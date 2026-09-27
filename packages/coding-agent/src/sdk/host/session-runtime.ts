@@ -7196,37 +7196,41 @@ export function createSdkSessionRuntimeExtension(api: ExtensionAPI, options: Cre
 		let brokerRecoveryInFlight: Promise<void> | undefined;
 		const runBrokerRecovery = async (): Promise<void> => {
 			if (brokerRecoveryStopped || brokerRecoveryInFlight !== undefined || brokerRecoveryRestartRequired) return;
-
-			// Check if this process's own runtime image is gone or replaced.
-			// If so, we cannot spawn a broker and must surface a restart condition.
-			const imageReplaced = await (isRuntimeImageReplacedForTest
-				? isRuntimeImageReplacedForTest()
-				: isSdkInternalRuntimeImageReplaced(startupRuntimeImageIdentity).catch(
-						() => false, // Inconclusive on error
-					));
-			if (imageReplaced) {
-				// Runtime image is gone or replaced; cannot spawn broker.
-				// Mark that a restart is required and stop recovery attempts.
-				brokerRecoveryRestartRequired = true;
-				stopBrokerRecovery();
-				logger.warn("sdk broker recovery requires session restart", {
-					reason: "runtime_image_replaced",
-				});
-				return;
-			}
-
-			// Check if we should proceed with recovery based on backoff schedule.
+			// Checked synchronously so an interval tick cannot start an attempt the backoff forbids.
 			if (!brokerRecoveryBackoff.canAttemptRecovery(options.agentDir)) return;
 
+			// The single-flight slot is claimed before the first await: the interval does not wait
+			// for prior callbacks, so a slow runtime-image probe must not let a second tick through
+			// to ensure the broker and record the same failure twice.
 			const recovery = (async (): Promise<void> => {
+				// A replaced runtime image cannot launch a broker; restarting the session is the only fix.
+				const imageReplaced = await (isRuntimeImageReplacedForTest
+					? isRuntimeImageReplacedForTest()
+					: isSdkInternalRuntimeImageReplaced(startupRuntimeImageIdentity).catch(() => false));
+				if (imageReplaced) {
+					brokerRecoveryRestartRequired = true;
+					stopBrokerRecovery();
+					logger.warn("sdk broker recovery requires session restart", {
+						reason: "runtime_image_replaced",
+					});
+					return;
+				}
 				if (brokerRecoveryStopped) return;
 				if (brokerRegistered) await (options.ensureBrokerImpl ?? ensureBroker)({ agentDir: options.agentDir });
-				else await registerBroker();
+				else {
+					// Optional registration logs and resolves on failure; recovery must still count it
+					// as a failed attempt so the backoff holds instead of resetting every tick.
+					await registerBroker();
+					if (!brokerRegistered && !brokerRecoveryStopped)
+						throw Object.assign(new Error("SDK broker registration did not complete."), {
+							code: "registration_incomplete",
+						});
+				}
 			})();
 			brokerRecoveryInFlight = recovery;
 			try {
 				await recovery;
-				// Recovery succeeded; reset backoff state.
+				if (brokerRecoveryRestartRequired || brokerRecoveryStopped) return;
 				brokerRecoveryBackoff.recordSuccess(options.agentDir);
 			} catch (error) {
 				const shouldContinue = brokerRecoveryBackoff.recordFailure(options.agentDir);

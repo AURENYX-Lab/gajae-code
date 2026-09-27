@@ -36,7 +36,10 @@ interface Harness {
 	dispose(): Promise<void>;
 }
 
-async function startRuntime(options: { replaced: () => boolean }): Promise<Harness> {
+async function startRuntime(options: {
+	replaced: () => boolean | Promise<boolean>;
+	failStartupRegistration?: boolean;
+}): Promise<Harness> {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "gjc-broker-recovery-6040-"));
 	const agentDir = path.join(root, "agent");
 	const cwd = await fs.mkdtemp(path.join(root, "session-"));
@@ -61,7 +64,7 @@ async function startRuntime(options: { replaced: () => boolean }): Promise<Harne
 		// recovery ensure after that fails, like a broker that keeps dying.
 		ensureBrokerImpl: async input => {
 			ensureCount++;
-			if (ensureCount === 1) return await ensureBroker(input);
+			if (ensureCount === 1 && !options.failStartupRegistration) return await ensureBroker(input);
 			throw Object.assign(new Error("broker unavailable"), { code: "unavailable" });
 		},
 		setIntervalImpl: ((callback: () => void) => {
@@ -164,6 +167,50 @@ test("repeated broker recovery failures back off instead of respawning every tic
 		expect(steadyState).toBeLessThanOrEqual(5);
 		expect(harness.cleared()).toBe(false);
 	} finally {
+		await harness.dispose();
+	}
+});
+
+test("failed optional registration still backs off instead of resetting every tick (#6040)", async () => {
+	// Startup registration fails; SDK-only sessions do not require it, so it only logs.
+	// Recovery then retries through registerBroker(), which also only logs on failure.
+	const harness = await startRuntime({ replaced: () => false, failStartupRegistration: true });
+	try {
+		for (let i = 0; i < 40; i++) {
+			await harness.tick();
+			harness.advance(30_000);
+		}
+		// Every attempt fails; a tracker reset on each resolved-but-failed registration
+		// would allow one attempt per tick (40).
+		expect(harness.ensureCalls()).toBeGreaterThan(0);
+		expect(harness.ensureCalls()).toBeLessThanOrEqual(6);
+	} finally {
+		await harness.dispose();
+	}
+});
+
+test("overlapping recovery ticks during a slow probe start only one attempt (#6040)", async () => {
+	let releaseProbe: (() => void) | undefined;
+	let probes = 0;
+	const harness = await startRuntime({
+		replaced: () => {
+			probes++;
+			return new Promise<boolean>(resolve => {
+				releaseProbe = () => resolve(false);
+			});
+		},
+	});
+	try {
+		// Three ticks fire while the first probe is still pending.
+		await harness.tick();
+		await harness.tick();
+		await harness.tick();
+		expect(probes).toBe(1);
+		releaseProbe?.();
+		for (let i = 0; i < 20; i++) await Bun.sleep(0);
+		expect(harness.ensureCalls()).toBe(1);
+	} finally {
+		releaseProbe?.();
 		await harness.dispose();
 	}
 });
