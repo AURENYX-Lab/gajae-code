@@ -9636,10 +9636,10 @@ export function createNotificationsExtension(
 			else if (finalAssistant?.errorKind === "provider_safety_stop")
 				outcome = { kind: "stopped", reason: "refusal", provenance: "agent" };
 			// A missing/normal final assistant with a non-failing loop stop reason is a
-			// normal turn end; only explicit error/aborted assistants or non-completed
-			// loop stop reasons are failures. Text is never parsed.
+			// normal turn end; only explicit error/aborted assistants or other
+			// non-completed loop stop reasons are failures. Text is never parsed.
 			else if (
-				(event.stopReason === undefined || event.stopReason === "completed") &&
+				(event.stopReason === undefined || event.stopReason === "completed" || event.stopReason === "paused") &&
 				finalAssistant?.stopReason !== "error" &&
 				finalAssistant?.stopReason !== "aborted"
 			)
