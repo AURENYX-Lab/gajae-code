@@ -28,11 +28,18 @@ export interface RecoveryBackoffState {
 	stopped: boolean;
 }
 
+/**
+ * Session broker recovery ticks every 30 s (`SESSION_BROKER_RECOVERY_INTERVAL_MS`), so the
+ * first retry waits two ticks and the delay doubles up to 30 minutes: a broker that keeps
+ * failing costs about two spawn attempts per hour at steady state instead of one per tick.
+ * Recovery never stops for good on failures alone -- a broker outage must still heal once
+ * the broker comes back. Only a replaced runtime image ends recovery (session-runtime.ts).
+ */
 const DEFAULTS: RecoveryBackoffConfig = {
-	initialDelayMs: 1_000,
-	maxDelayMs: 30_000,
+	initialDelayMs: 60_000,
+	maxDelayMs: 30 * 60_000,
 	multiplier: 2,
-	maxAttempts: 5,
+	maxAttempts: Number.POSITIVE_INFINITY,
 };
 
 /** Manages per-agent-dir recovery backoff state. */
