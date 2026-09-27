@@ -61,7 +61,13 @@ Environment variables read by `dirs`:
 | `GJC_LOG_DIR` | Log directory override |
 | `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` | XDG base directories (see below) |
 
-On Linux and macOS, a category moves under `$XDG_*_HOME/gjc/` only when the variable is set **and** `$XDG_*_HOME/gjc` already exists (`gjc config init-xdg` creates it). With the default agent directory, logs then resolve to `$XDG_STATE_HOME/gjc/logs` and sessions to `$XDG_DATA_HOME/gjc/sessions`. Otherwise both stay under `~/.gjc`. A custom `GJC_CODING_AGENT_DIR` keeps agent data out of the XDG locations.
+`<config>` below is `~/.gjc`, or `~/<GJC_CONFIG_DIR>` when that variable is set. XDG routing applies on Linux and macOS only when the variable is set **and** `$XDG_*_HOME/gjc` already exists (`gjc config init-xdg` creates it), and only for the default agent directory:
+
+| Setup | `getLogsDir()` | `getSessionsDir()` |
+|-------|----------------|--------------------|
+| Default agent directory, XDG not in use | `<config>/logs` | `<config>/agent/sessions` |
+| Default agent directory, XDG in use | `$XDG_STATE_HOME/gjc/logs` | `$XDG_DATA_HOME/gjc/sessions` |
+| Custom `GJC_CODING_AGENT_DIR` (XDG ignored) | `<config>/logs` | `$GJC_CODING_AGENT_DIR/sessions` |
 
 ## Environment (`env`)
 

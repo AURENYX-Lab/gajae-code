@@ -145,7 +145,7 @@ if (topModel) {
 
 ### Troubleshooting
 
-- **No data shown?** Check that session logs exist under `~/.gjc/agent/sessions/`. On Linux and macOS, if `XDG_DATA_HOME` is set and `$XDG_DATA_HOME/gjc` exists (created by `gjc config init-xdg`), sessions live in `$XDG_DATA_HOME/gjc/sessions/` instead.
+- **No data shown?** Check that session logs exist under `~/.gjc/agent/sessions/` (`~/<GJC_CONFIG_DIR>/agent/sessions/` if that variable is set). With a custom `GJC_CODING_AGENT_DIR`, sessions are in `$GJC_CODING_AGENT_DIR/sessions/`. Otherwise, on Linux and macOS, if `XDG_DATA_HOME` is set and `$XDG_DATA_HOME/gjc` exists (created by `gjc config init-xdg`), sessions are in `$XDG_DATA_HOME/gjc/sessions/`.
 - **Dashboard not starting?** Check that port 3847 (or the port passed to `--port`) is free.
 
 ## License
