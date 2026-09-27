@@ -494,7 +494,7 @@ isolatedSdkHostTest(
 						input: { kind: "prompt", clientRef },
 					}),
 				);
-				await Bun.sleep(25);
+				await waitFor(() => frames.some(frame => frame.id === id), `terminal prompt query ${clientRef}`);
 				const response = frames.find(frame => frame.id === id) as
 					| { result?: { status?: string; [key: string]: unknown } }
 					| undefined;
@@ -504,6 +504,7 @@ isolatedSdkHostTest(
 				}
 				if (response?.result?.status === "failed" || response?.result?.status === "terminal_ok")
 					return response.result;
+				await Bun.sleep(25);
 			}
 			throw new Error(
 				`turn.result never reported a terminal status for ${clientRef}; responseSeen=${responseSeen}; lastResponse=${lastResponse}`,
