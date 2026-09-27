@@ -6,7 +6,7 @@ Everything below is exported from the package root (`@gajae-code/utils`). A few 
 
 ## Logger
 
-The logger is exported as the `logger` namespace. By default it writes JSON lines to a rotating file, `gjc.<YYYY-MM-DD>.log` in the logs directory (`~/.gjc/logs`, or `GJC_LOG_DIR`). It writes nothing to stdout or stderr, because console output would corrupt the TUI.
+The logger is exported as the `logger` namespace. By default it writes JSON lines to a rotating file, `gjc.<YYYY-MM-DD>.log` in the logs directory (`getLogsDir()`, see [Paths](#paths-dirs); `GJC_LOG_DIR` overrides it). It writes nothing to stdout or stderr, because console output would corrupt the TUI.
 
 ```typescript
 import { logger } from "@gajae-code/utils";
@@ -44,8 +44,8 @@ CONFIG_DIR_NAME; // ".gjc"
 
 getConfigRootDir(); // config root, ~/.gjc by default
 getAgentDir(); // agent directory under the config root
-getSessionsDir(); // session logs in the agent directory
-getLogsDir(); // ~/.gjc/logs
+getSessionsDir(); // ~/.gjc/agent/sessions by default
+getLogsDir(); // ~/.gjc/logs by default
 getEffectiveLogsDir(); // where the logger actually writes (honors a trusted GJC_LOG_DIR)
 getProjectDir(); // the current project directory (process.cwd() unless setProjectDir() changed it)
 ```
@@ -59,7 +59,9 @@ Environment variables read by `dirs`:
 | `GJC_CONFIG_DIR` | Config directory name (legacy `PI_CONFIG_DIR`) |
 | `GJC_CODING_AGENT_DIR` | Agent directory override (legacy `PI_CODING_AGENT_DIR`) |
 | `GJC_LOG_DIR` | Log directory override |
-| `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` | XDG base directories |
+| `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` | XDG base directories (see below) |
+
+On Linux and macOS, a category moves under `$XDG_*_HOME/gjc/` only when the variable is set **and** `$XDG_*_HOME/gjc` already exists (`gjc config init-xdg` creates it). With the default agent directory, logs then resolve to `$XDG_STATE_HOME/gjc/logs` and sessions to `$XDG_DATA_HOME/gjc/sessions`. Otherwise both stay under `~/.gjc`. A custom `GJC_CODING_AGENT_DIR` keeps agent data out of the XDG locations.
 
 ## Environment (`env`)
 
