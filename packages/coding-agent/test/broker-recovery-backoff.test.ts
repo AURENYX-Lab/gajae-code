@@ -158,37 +158,10 @@ describe("Broker recovery with replaced runtime image", () => {
 	});
 
 	it("does not spawn broker when runtime image is replaced", async () => {
-		const agentDir = path.join(tempDir.path(), "agent");
 		const runtimeImagePath = path.join(tempDir.path(), "runtime");
 
 		// Create a dummy runtime image file
 		await Bun.write(runtimeImagePath, "initial runtime");
-
-		// Track broker spawn attempts
-		let spawnAttempts = 0;
-		const mockEnsureBroker = vi.fn(async () => {
-			spawnAttempts++;
-			throw new Error("mock broker spawn");
-		});
-
-		const now = { value: Date.now() };
-		const clock = { now: () => now.value };
-
-		// Virtual clock for deterministic backoff testing
-		setEnsureBrokerTimingForTest({
-			now: () => now.value,
-			sleep: async (ms: number) => {
-				now.value += ms;
-			},
-		});
-
-		const tracker = new RecoveryBackoffTracker({
-			initialDelayMs: 100,
-			maxDelayMs: 1000,
-			multiplier: 2,
-			maxAttempts: 5,
-		});
-		tracker.setClockForTest(clock);
 
 		// Simulate the startup image capture and replacement detection
 		const { captureRuntimeImageIdentity, isSdkInternalRuntimeImageReplaced } = await import(
@@ -268,7 +241,7 @@ describe("Broker recovery with replaced runtime image", () => {
 		recoveryAttempts.push({ attempt: 4, skipped: true });
 
 		// Verify backoff prevented excessive spawns
-		const skippedAttempts = recoveryAttempts.filter(r => r.skipped).length;
+		const skippedAttempts = recoveryAttempts.filter(r => "skipped" in r).length;
 		expect(skippedAttempts).toBe(2); // We skipped 2 attempts due to backoff
 	});
 });

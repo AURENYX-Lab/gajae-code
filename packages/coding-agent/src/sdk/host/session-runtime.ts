@@ -724,6 +724,13 @@ export interface CreateSdkSessionRuntimeOptions {
 	onInvocationCompletionReconciledForTests?: (kind: InvocationKind, correlation: InvocationCorrelation) => void;
 	/** Test hook: provides a function to inject a controlled clock for broker recovery backoff assertions. */
 	setRecoveryBackoffClockForTest?: (inject: (clock: { now(): number }) => void) => void;
+	/** Test hook: inject mock runtime image identity and replacement detection for broker recovery tests. */
+	setRuntimeImageIdentityForTest?: (
+		register: (
+			captureFn: () => Awaited<ReturnType<typeof captureRuntimeImageIdentity>> | undefined,
+			isReplacedFn: () => Promise<boolean>,
+		) => void,
+	) => void;
 }
 
 function unavailable(operation: string): () => never {
@@ -7030,13 +7037,34 @@ export function createSdkSessionRuntimeExtension(api: ExtensionAPI, options: Cre
 		}
 		// Capture runtime image identity at startup to detect replacements
 		let startupRuntimeImageIdentity: Awaited<ReturnType<typeof captureRuntimeImageIdentity>> | undefined;
+		let captureStartupRuntimeImageForTest:
+			| (() => Awaited<ReturnType<typeof captureRuntimeImageIdentity>> | undefined)
+			| undefined;
+		let isRuntimeImageReplacedForTest: (() => Promise<boolean>) | undefined;
+		if (options.setRuntimeImageIdentityForTest) {
+			options.setRuntimeImageIdentityForTest(
+				(
+					captureFn: () => Awaited<ReturnType<typeof captureRuntimeImageIdentity>> | undefined,
+					isReplacedFn: () => Promise<boolean>,
+				) => {
+					captureStartupRuntimeImageForTest = captureFn;
+					isRuntimeImageReplacedForTest = isReplacedFn;
+				},
+			);
+		}
 		const captureStartupRuntimeImage = async (): Promise<void> => {
-			const runtimeImage = sdkInternalRuntimeImage();
-			if (runtimeImage) {
-				startupRuntimeImageIdentity = await captureRuntimeImageIdentity(runtimeImage);
+			if (options.setRuntimeImageIdentityForTest) {
+				// Test mode: use injected identity
+				startupRuntimeImageIdentity = captureStartupRuntimeImageForTest?.();
+			} else {
+				// Production mode: capture real runtime image
+				const runtimeImage = sdkInternalRuntimeImage();
+				if (runtimeImage) {
+					startupRuntimeImageIdentity = await captureRuntimeImageIdentity(runtimeImage);
+				}
 			}
 		};
-		void captureStartupRuntimeImage();
+		const startupImageCapture = captureStartupRuntimeImage();
 		const registerBroker = async (): Promise<void> => {
 			if (brokerRegistered) return;
 			if (brokerRegistrationInFlight !== undefined) {
@@ -7171,9 +7199,11 @@ export function createSdkSessionRuntimeExtension(api: ExtensionAPI, options: Cre
 
 			// Check if this process's own runtime image is gone or replaced.
 			// If so, we cannot spawn a broker and must surface a restart condition.
-			const imageReplaced = await isSdkInternalRuntimeImageReplaced(startupRuntimeImageIdentity).catch(
-				() => false, // Inconclusive on error
-			);
+			const imageReplaced = await (isRuntimeImageReplacedForTest
+				? isRuntimeImageReplacedForTest()
+				: isSdkInternalRuntimeImageReplaced(startupRuntimeImageIdentity).catch(
+						() => false, // Inconclusive on error
+					));
 			if (imageReplaced) {
 				// Runtime image is gone or replaced; cannot spawn broker.
 				// Mark that a restart is required and stop recovery attempts.
@@ -7269,6 +7299,9 @@ export function createSdkSessionRuntimeExtension(api: ExtensionAPI, options: Cre
 		try {
 			publishedEndpointUrl = (await runtime.start()).url;
 			await registerBroker();
+			// Await the startup runtime image capture before arming recovery.
+			// This ensures replacement detection works correctly on the first recovery check.
+			await startupImageCapture;
 			if (!brokerRecoveryStopped) startBrokerRecovery();
 		} catch (error) {
 			active = undefined;
