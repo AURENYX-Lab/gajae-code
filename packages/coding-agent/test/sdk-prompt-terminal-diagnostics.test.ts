@@ -460,7 +460,30 @@ isolatedSdkHostTest(
 				`prompt acknowledgement ${requestId}`,
 			);
 		};
+		const waitForActive = async (clientRef: string): Promise<void> => {
+			let lastResponse = "none";
+			for (let attempt = 0; attempt < 120; attempt += 1) {
+				const id = `${clientRef}-active-${attempt}`;
+				socket.send(
+					JSON.stringify({
+						type: "query_request",
+						id,
+						query: "turn.result",
+						input: { kind: "prompt", clientRef },
+					}),
+				);
+				await waitFor(() => frames.some(frame => frame.id === id), `active prompt query ${clientRef}`);
+				const response = frames.find(frame => frame.id === id) as
+					| { result?: { status?: string; [key: string]: unknown } }
+					| undefined;
+				if (response !== undefined) lastResponse = JSON.stringify(response);
+				if (response?.result?.status === "accepted" || response?.result?.status === "in_flight") return;
+			}
+			throw new Error(`prompt ${clientRef} never became in_flight; lastResponse=${lastResponse}`);
+		};
 		const result = async (clientRef: string): Promise<Record<string, unknown>> => {
+			let lastResponse = "none";
+			let responseSeen = false;
 			for (let attempt = 0; attempt < 120; attempt += 1) {
 				const id = `${clientRef}-result-${attempt}`;
 				socket.send(
@@ -475,14 +498,21 @@ isolatedSdkHostTest(
 				const response = frames.find(frame => frame.id === id) as
 					| { result?: { status?: string; [key: string]: unknown } }
 					| undefined;
+				if (response !== undefined) {
+					responseSeen = true;
+					lastResponse = JSON.stringify(response);
+				}
 				if (response?.result?.status === "failed" || response?.result?.status === "terminal_ok")
 					return response.result;
 			}
-			throw new Error(`turn.result never reported a terminal status for ${clientRef}`);
+			throw new Error(
+				`turn.result never reported a terminal status for ${clientRef}; responseSeen=${responseSeen}; lastResponse=${lastResponse}`,
+			);
 		};
 
 		try {
 			await submit("paused-prompt");
+			await waitForActive("paused-prompt");
 			await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
 			await handlers.get("agent_end")?.({ type: "agent_end", stopReason: "paused", messages: [] }, sessionContext);
 			const paused = await result("paused-prompt");
@@ -491,6 +521,7 @@ isolatedSdkHostTest(
 			expect(diagnostics).toHaveLength(0);
 
 			await submit("paused-error-prompt");
+			await waitForActive("paused-error-prompt");
 			await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
 			await handlers.get("agent_end")?.(
 				{
