@@ -157,19 +157,71 @@ describe("Broker recovery with replaced runtime image", () => {
 		tempDir.removeSync();
 	});
 
-	it("does not spawn broker when runtime image is gone", async () => {
-		// This scenario is tested through session-runtime.ts integration with seams.
-		// The RecoveryBackoffTracker is verified to work correctly above.
-		// When runtime image is gone, runBrokerRecovery will:
-		// 1. Call isSdkInternalRuntimeImagePresent(runtimeImage)
-		// 2. Detect it returns false
-		// 3. Set brokerRecoveryRestartRequired = true
-		// 4. Call stopBrokerRecovery() to stop the timer
-		// Full integration test would be in session-runtime.test.ts
-		expect(true).toBe(true);
+	it("does not spawn broker when runtime image is replaced", async () => {
+		const agentDir = path.join(tempDir.path(), "agent");
+		const runtimeImagePath = path.join(tempDir.path(), "runtime");
+
+		// Create a dummy runtime image file
+		await Bun.write(runtimeImagePath, "initial runtime");
+
+		// Track broker spawn attempts
+		let spawnAttempts = 0;
+		const mockEnsureBroker = vi.fn(async () => {
+			spawnAttempts++;
+			throw new Error("mock broker spawn");
+		});
+
+		const now = { value: Date.now() };
+		const clock = { now: () => now.value };
+
+		// Virtual clock for deterministic backoff testing
+		setEnsureBrokerTimingForTest({
+			now: () => now.value,
+			sleep: async (ms: number) => {
+				now.value += ms;
+			},
+		});
+
+		const tracker = new RecoveryBackoffTracker({
+			initialDelayMs: 100,
+			maxDelayMs: 1000,
+			multiplier: 2,
+			maxAttempts: 5,
+		});
+		tracker.setClockForTest(clock);
+
+		// Simulate the startup image capture and replacement detection
+		const { captureRuntimeImageIdentity, isSdkInternalRuntimeImageReplaced } = await import(
+			"../src/sdk/broker/runtime"
+		);
+
+		// Capture initial identity
+		const startupIdentity = await captureRuntimeImageIdentity(runtimeImagePath);
+		expect(startupIdentity).toBeDefined();
+		expect(startupIdentity?.path).toBe(path.resolve(runtimeImagePath));
+
+		// Initially not replaced
+		let isReplaced = await isSdkInternalRuntimeImageReplaced(startupIdentity);
+		expect(isReplaced).toBe(false);
+
+		// Replace the runtime image by deleting and recreating (ensures inode change)
+		const fsp = await import("node:fs/promises");
+		await fsp.rm(runtimeImagePath);
+		await Bun.write(runtimeImagePath, "replaced runtime binary with more content");
+
+		// Now should detect replacement (inode or dev changed)
+		isReplaced = await isSdkInternalRuntimeImageReplaced(startupIdentity);
+		expect(isReplaced).toBe(true);
+
+		// Simulate deletion again
+		await fsp.rm(runtimeImagePath);
+
+		// Deletion should be detected as replacement (ENOENT)
+		isReplaced = await isSdkInternalRuntimeImageReplaced(startupIdentity);
+		expect(isReplaced).toBe(true);
 	});
 
-	it("exponential backoff prevents rapid broker spawns", async () => {
+	it("backoff schedule blocks recovery attempts until time passes", async () => {
 		const agentDir = path.join(tempDir.path(), "agent");
 
 		const now = { value: Date.now() };

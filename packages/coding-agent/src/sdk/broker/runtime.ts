@@ -271,6 +271,15 @@ export function sdkInternalRuntimeImage(): string | undefined {
 	return publishedRuntimeImage({});
 }
 
+/** Identity of a runtime image: enough to detect replacement at the same path. */
+export interface SdkInternalRuntimeImageIdentity {
+	path: string;
+	dev: number;
+	ino: number;
+	mtimeMs: number;
+	size: number;
+}
+
 /** A stat that has not answered by here is inconclusive, never proof of absence. */
 const RUNTIME_IMAGE_PROBE_TIMEOUT_MS = 1_000;
 
@@ -305,6 +314,54 @@ export async function isSdkInternalRuntimeImagePresent(file: string): Promise<bo
 		return await Promise.race([probe, inconclusive.promise]);
 	} finally {
 		clearTimeout(timer);
+	}
+}
+
+/**
+ * Capture the runtime image identity (dev, ino, mtimeMs, size) at startup.
+ * Used to detect if the binary at the same path has been replaced.
+ */
+export async function captureRuntimeImageIdentity(file: string): Promise<SdkInternalRuntimeImageIdentity | undefined> {
+	try {
+		const resolved = path.resolve(file);
+		const stats = await fsp.stat(resolved);
+		if (!stats.isFile()) return undefined;
+		return {
+			path: resolved,
+			dev: stats.dev,
+			ino: stats.ino,
+			mtimeMs: stats.mtimeMs,
+			size: stats.size,
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Check if the runtime image has been replaced since startup.
+ * Returns `true` if the path is gone or its dev/ino differ from the startup identity,
+ * or if its size changed (additional detection for filesystems that reuse inodes).
+ * Returns `false` (inconclusive) if the file exists and matches, or on any error.
+ */
+export async function isSdkInternalRuntimeImageReplaced(
+	startupIdentity: SdkInternalRuntimeImageIdentity | undefined,
+): Promise<boolean> {
+	if (startupIdentity === undefined) return false;
+
+	try {
+		const stats = await fsp.stat(startupIdentity.path);
+		if (!stats.isFile()) return false; // Not a file, but not proven gone
+		// Check if dev or ino differ (primary indicator: replacement at same path)
+		// Also check if size differs (secondary indicator for inode-reusing filesystems)
+		return (
+			stats.dev !== startupIdentity.dev || stats.ino !== startupIdentity.ino || stats.size !== startupIdentity.size
+		);
+	} catch (error) {
+		// Only ENOENT/ENOTDIR prove absence
+		if (isProvenRuntimeImageAbsence(error)) return true;
+		// Inconclusive on other errors
+		return false;
 	}
 }
 

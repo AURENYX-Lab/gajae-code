@@ -51,7 +51,11 @@ import { readEndpointFile } from "../broker/endpoint-authority";
 import { ensureBroker } from "../broker/ensure";
 import { processIncarnation } from "../broker/process-incarnation";
 import { RecoveryBackoffTracker } from "../broker/recovery-backoff";
-import { isSdkInternalRuntimeImagePresent, sdkInternalRuntimeImage } from "../broker/runtime";
+import {
+	captureRuntimeImageIdentity,
+	isSdkInternalRuntimeImageReplaced,
+	sdkInternalRuntimeImage,
+} from "../broker/runtime";
 import {
 	type MasterRoleAttestationV2,
 	resolveSessionLocator,
@@ -7024,6 +7028,15 @@ export function createSdkSessionRuntimeExtension(api: ExtensionAPI, options: Cre
 				brokerRecoveryBackoff.setClockForTest(clock),
 			);
 		}
+		// Capture runtime image identity at startup to detect replacements
+		let startupRuntimeImageIdentity: Awaited<ReturnType<typeof captureRuntimeImageIdentity>> | undefined;
+		const captureStartupRuntimeImage = async (): Promise<void> => {
+			const runtimeImage = sdkInternalRuntimeImage();
+			if (runtimeImage) {
+				startupRuntimeImageIdentity = await captureRuntimeImageIdentity(runtimeImage);
+			}
+		};
+		void captureStartupRuntimeImage();
 		const registerBroker = async (): Promise<void> => {
 			if (brokerRegistered) return;
 			if (brokerRegistrationInFlight !== undefined) {
@@ -7158,21 +7171,18 @@ export function createSdkSessionRuntimeExtension(api: ExtensionAPI, options: Cre
 
 			// Check if this process's own runtime image is gone or replaced.
 			// If so, we cannot spawn a broker and must surface a restart condition.
-			const runtimeImage = sdkInternalRuntimeImage();
-			if (runtimeImage) {
-				const imagePresent = await isSdkInternalRuntimeImagePresent(runtimeImage).catch(
-					() => true, // Assume present on any error to be conservative
-				);
-				if (!imagePresent) {
-					// Runtime image is gone or replaced; cannot spawn broker.
-					// Mark that a restart is required and stop recovery attempts.
-					brokerRecoveryRestartRequired = true;
-					stopBrokerRecovery();
-					logger.warn("sdk broker recovery requires session restart", {
-						reason: "runtime_image_replaced",
-					});
-					return;
-				}
+			const imageReplaced = await isSdkInternalRuntimeImageReplaced(startupRuntimeImageIdentity).catch(
+				() => false, // Inconclusive on error
+			);
+			if (imageReplaced) {
+				// Runtime image is gone or replaced; cannot spawn broker.
+				// Mark that a restart is required and stop recovery attempts.
+				brokerRecoveryRestartRequired = true;
+				stopBrokerRecovery();
+				logger.warn("sdk broker recovery requires session restart", {
+					reason: "runtime_image_replaced",
+				});
+				return;
 			}
 
 			// Check if we should proceed with recovery based on backoff schedule.
