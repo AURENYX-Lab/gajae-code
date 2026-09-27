@@ -10,10 +10,12 @@ import {
 	type ExecuteHashlineSingleOptions,
 	executeHashlineSingle,
 	FileReadCache,
+	formatFullAnchorRequirement,
 	generateDiffString,
 	getFileReadCache,
 	HashlineMismatchError,
 	HashlineMissingHashError,
+	HashlineMissingLineError,
 	HL_BODY_SEP,
 	HL_BODY_SEP_RE_RAW,
 	hashlineEditParamsSchema,
@@ -69,6 +71,18 @@ async function withTempDir(fn: (tempDir: string) => Promise<void>): Promise<void
 	} finally {
 		await fs.rm(tempDir, { recursive: true, force: true });
 	}
+}
+async function expectFileBytesUnchanged(filePath: string, original: string): Promise<void> {
+	expect(await Bun.file(filePath).bytes()).toEqual(new TextEncoder().encode(original));
+}
+
+async function rejectionMessage(promise: Promise<unknown>): Promise<string> {
+	try {
+		await promise;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+	throw new Error("Expected promise to reject");
 }
 
 function makeHashlineSession(tempDir: string, settings = Settings.isolated()): ToolSession {
@@ -449,9 +463,131 @@ describe("hashline — hash-less line references", () => {
 		}
 	});
 
-	it("still reports other malformed anchors as plain parse errors", () => {
-		expect(() => parseHashline(`≔sr\n${pl("x")}`)).toThrow(/expected a full anchor/);
-		expect(() => parseHashline(`≔sr\n${pl("x")}`)).not.toThrow(HashlineMissingHashError);
+	it("keeps non-hash-shaped malformed refs on the existing parse error path", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const original = "first\nsecond";
+			await Bun.write(filePath, original);
+
+			const message = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n≔s\n${pl("x")}`)),
+			);
+			expect(message).toBe('line 1: expected a full anchor such as "119sr", "119ab", "119th"; got "s".');
+			await expectFileBytesUnchanged(filePath, original);
+		});
+	});
+
+	it("suggests the exact current anchor for a bare single-line reference", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const lines = Array.from({ length: 50 }, (_, index) => `line ${index + 1}`);
+			const original = lines.join("\n");
+			await Bun.write(filePath, original);
+
+			const message = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n≔47\n${pl("X")}`)),
+			);
+			expect(message).toContain(`Use ≔${tag(47, "line 47")}`);
+			await expectFileBytesUnchanged(filePath, original);
+		});
+	});
+
+	it("suggests copy-ready endpoint anchors for bare ranges", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const lines = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`);
+			const original = lines.join("\n");
+			await Bun.write(filePath, original);
+
+			const dottedMessage = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n≔22..23\n${pl("X")}`)),
+			);
+			expect(dottedMessage).toContain(`Use ≔${tag(22, "line 22")}..${tag(23, "line 23")}`);
+			await expectFileBytesUnchanged(filePath, original);
+
+			const hyphenMessage = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n≔24-27\n${pl("X")}`)),
+			);
+			expect(hyphenMessage).toContain(`Use ≔${tag(24, "line 24")}..${tag(27, "line 27")}`);
+			await expectFileBytesUnchanged(filePath, original);
+		});
+	});
+
+	it("preserves the insert op sigil when suggesting a bare anchor retry", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const original = "one\ntwo\nthree";
+			await Bun.write(filePath, original);
+
+			const beforeMessage = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n«2\n${pl("before")}`)),
+			);
+			expect(beforeMessage).toContain(`Use «${tag(2, "two")}`);
+			await expectFileBytesUnchanged(filePath, original);
+
+			const afterMessage = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n»2\n${pl("after")}`)),
+			);
+			expect(afterMessage).toContain(`Use »${tag(2, "two")}`);
+			await expectFileBytesUnchanged(filePath, original);
+		});
+	});
+
+	it("suggests the unique current line for a hash-only ref", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const original = "line-1\nline 2\nline 3";
+			await Bun.write(filePath, original);
+
+			let parseError: unknown;
+			try {
+				parseHashline(`≔qn\n${pl("X")}`);
+			} catch (error) {
+				parseError = error;
+			}
+			expect(parseError).toBeInstanceOf(HashlineMissingLineError);
+			const typedError = parseError as HashlineMissingLineError;
+			expect(typedError.hash).toBe("qn");
+			expect(typedError.lineNum).toBeUndefined();
+			expect(typedError.opSigil).toBe("≔");
+
+			const message = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n≔qn\n${pl("X")}`)),
+			);
+			expect(message).toContain('Anchor "qn" lacks its line number. Did you mean ≔1qn?');
+			await expectFileBytesUnchanged(filePath, original);
+		});
+	});
+
+	it("does not guess a line for a hash-only ref with duplicate matches", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const original = "line-1\nline-1";
+			await Bun.write(filePath, original);
+
+			const message = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n≔qn\n${pl("X")}`)),
+			);
+			expect(message).toContain(formatFullAnchorRequirement("qn"));
+			expect(message).toContain("hash matches 2 lines; re-read the target");
+			expect(message).not.toContain("Did you mean");
+			await expectFileBytesUnchanged(filePath, original);
+		});
+	});
+
+	it("shows the full-anchor hint when a hash-only ref has no matches", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const original = "alpha\nbeta";
+			await Bun.write(filePath, original);
+
+			const message = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n≔zz\n${pl("X")}`)),
+			);
+			expect(message).toContain(formatFullAnchorRequirement("zz"));
+			expect(message).toContain("hash matches 0 lines; re-read the target");
+			await expectFileBytesUnchanged(filePath, original);
+		});
 	});
 
 	it("answers with the current anchors for the referenced lines and leaves the file untouched", async () => {

@@ -11,12 +11,12 @@ import { assertEditableFileContent } from "../tools/auto-generated-guard";
 import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
 import { outputMeta } from "../tools/output-meta";
 import { enforcePlanModeWrite, resolvePlanPath } from "../tools/plan-mode-guard";
-import { HashlineMismatchError } from "./anchors";
+import { formatFullAnchorRequirement, HashlineMismatchError } from "./anchors";
 import { applyHashlineEdits, type HashlineApplyResult } from "./apply";
 import { buildCompactHashlineDiffPreview } from "./diff-preview";
 import { computeLineHash, HL_BODY_SEP } from "./hash";
 import { type HashlineInputSection, splitHashlineInputs } from "./input";
-import { HashlineMissingHashError, parseHashlineWithWarnings } from "./parser";
+import { HashlineMissingHashError, HashlineMissingLineError, parseHashlineWithWarnings } from "./parser";
 import { tryRecoverHashlineWithCache } from "./recovery";
 import type {
 	ExecuteHashlineSingleOptions,
@@ -88,6 +88,17 @@ function formatMissingHashAnchors(fileLines: string[], start: number, end: numbe
 	return [...head, "...", format(end)];
 }
 
+function formatMissingHashRetryHeader(
+	fileLines: string[],
+	start: number,
+	end: number,
+	opSigil: HashlineMissingHashError["opSigil"],
+): string {
+	const format = (line: number): string => `${line}${computeLineHash(line, fileLines[line - 1] ?? "")}`;
+	const anchorRange = start === end ? format(start) : `${format(start)}..${format(end)}`;
+	return `${opSigil}${anchorRange}`;
+}
+
 /**
  * Parse an edit section. When an op names lines by number only, answer with
  * the current full anchors for those lines so the model can retry without
@@ -101,6 +112,25 @@ async function parseHashlineSection(
 	try {
 		return parseHashlineWithWarnings(diff);
 	} catch (err) {
+		if (err instanceof HashlineMissingLineError) {
+			const source = await readHashlineFile(absolutePath, pathText);
+			const fileLines = source.exists ? normalizeToLF(stripBom(source.rawContent).text).split("\n") : [];
+			let matchCount = 0;
+			let matchLine: number | undefined;
+			for (let index = 0; index < fileLines.length; index++) {
+				if (computeLineHash(index + 1, fileLines[index] ?? "") !== err.hash) continue;
+				matchCount++;
+				matchLine = index + 1;
+			}
+			if (matchCount === 1 && matchLine !== undefined) {
+				const suggestion = new HashlineMissingLineError(err.hash, matchLine, err.opSigil);
+				throw new Error(`${suggestion.message} The edit was NOT applied.`);
+			}
+			throw new Error(
+				`${err.message} ${formatFullAnchorRequirement(err.hash)} ` +
+					`The hash matches ${matchCount} lines; re-read the target. The edit was NOT applied.`,
+			);
+		}
 		if (!(err instanceof HashlineMissingHashError)) throw err;
 		const source = await readHashlineFile(absolutePath, pathText);
 		if (!source.exists) throw err;
@@ -112,8 +142,9 @@ async function parseHashlineSection(
 			);
 		}
 		const anchors = formatMissingHashAnchors(fileLines, start, end);
+		const retryHeader = formatMissingHashRetryHeader(fileLines, start, end, err.opSigil);
 		throw new Error(
-			`${err.message}\nThe edit was NOT applied. Current anchors for ${pathText}:\n${anchors.join("\n")}`,
+			`${err.message}\nUse ${retryHeader}\nThe edit was NOT applied. Current anchors for ${pathText}:\n${anchors.join("\n")}`,
 		);
 	}
 }
