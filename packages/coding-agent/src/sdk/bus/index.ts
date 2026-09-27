@@ -116,6 +116,7 @@ import { type AbortScope, type ControlSurface, dispatchControl, TypedControlErro
 import { BROKER_RUNTIME_CLOSE_CAPABILITY_FIELD } from "../host/control/runtime-gate";
 import { isAutoroutingInactive, markAutoroutingInactive } from "../host/internal-autorouting-state";
 import { CursorRegistry, QueryHandlers, RevisionStore, type SessionSurface } from "../host/query";
+import { RESPONSE_CEILING_BYTES } from "../host/query/handlers";
 import type { SdkFrame } from "../host/types";
 import {
 	parseSyntheticModelId,
@@ -137,6 +138,7 @@ import {
 	assistantFailureCode,
 	failedPromptOutcome,
 	formatPromptFailureForLocalLog,
+	isSafePromptFailureCode,
 	PROMPT_FAILURE_MESSAGE_DEADLINE,
 	providerDiagnosticField,
 	publishedPromptFailure,
@@ -5331,6 +5333,144 @@ export function createNotificationsExtension(
 			submission.abandoned = true;
 			submission.bufferedFrames.length = 0;
 		};
+		const boundedCorrelatedFrame = (frame: Record<string, unknown>): Record<string, unknown> | undefined => {
+			if (frame.type === "event" && frame.kind === "message_update") {
+				const payload = frame.payload as {
+					event?: {
+						message?: { role?: string };
+						assistantMessageEvent?: { type?: string; delta?: string };
+					};
+				};
+				const update = payload.event?.assistantMessageEvent;
+				if (update?.type !== "text_delta" && update?.type !== "thinking_delta") return undefined;
+				// ACP consumes deltas, so retain the delta while discarding the replaceable
+				// accumulated message snapshot. A giant single delta is marked as truncated.
+				const delta = update.delta ?? "";
+				return {
+					...frame,
+					payload: {
+						event_type: "message_update",
+						event: {
+							type: "message_update",
+							message: { role: payload.event?.message?.role ?? "assistant", content: [] },
+							assistantMessageEvent: {
+								type: update.type,
+								delta:
+									delta.length > RESPONSE_CEILING_BYTES / 8
+										? `${delta.slice(0, RESPONSE_CEILING_BYTES / 8)}[truncated]`
+										: delta,
+							},
+						},
+					},
+				};
+			}
+			if (frame.type === "event" && frame.kind === "message_end") {
+				const payload = frame.payload as {
+					event?: { message?: { role?: string; content?: Array<{ type?: string; text?: string }> } };
+				};
+				const message = payload.event?.message;
+				const text = message?.content?.find(block => block.type === "text")?.text ?? "";
+				return {
+					...frame,
+					payload: {
+						event_type: "message_end",
+						event: {
+							type: "message_end",
+							message: {
+								role: message?.role ?? "assistant",
+								content: [{ type: "text", text: `${text.slice(0, RESPONSE_CEILING_BYTES / 8)}[truncated]` }],
+							},
+						},
+					},
+				};
+			}
+			if (frame.type === "agent_end")
+				return {
+					...frame,
+					finalText: `${typeof frame.finalText === "string" ? frame.finalText.slice(0, RESPONSE_CEILING_BYTES / 8) : ""}[truncated]`,
+				};
+			if (frame.type === "agent_failed") {
+				const outcome = frame.outcome as Extract<SdkPromptTerminalOutcome, { kind: "failed" }> | undefined;
+				return {
+					...frame,
+					error: { code: outcome?.code ?? "prompt_failed", message: "Prompt failure details were truncated." },
+					...(outcome ? { outcome: { ...outcome, message: "Prompt failure details were truncated." } } : {}),
+				};
+			}
+			return undefined;
+		};
+		const deliverCorrelatedFrame = (submission: PromptSubmission, frame: Record<string, unknown>) => {
+			if (submission.abandoned) return;
+			const activeRuntime = runtime;
+			if (!activeRuntime) return;
+			const fail = (cause: string, frameBytes: number) => {
+				const safeCause = isSafePromptFailureCode(cause) ? cause : "unknown";
+				const correlation = { commandId: String(frame.commandId), turnId: String(frame.turnId) };
+				const outcome = failedPromptOutcome({
+					code: "prompt_failed",
+					provenance: "agent_failed",
+					providerCode: safeCause,
+					evidence: {},
+				});
+				try {
+					activeRuntime.server.sendTo(
+						submission.connectionId,
+						JSON.stringify({
+							type: "agent_failed",
+							sessionId: activeRuntime.id,
+							...correlation,
+							error: {
+								code: "delivery_failed",
+								message: "Prompt frame delivery failed.",
+								cause: safeCause,
+								frameBytes,
+							},
+							outcome,
+						}),
+					);
+				} catch (error) {
+					logger.warn(`sdk: correlated delivery failure terminal failed: ${String(error)}`);
+				}
+				abandonPrompt(submission);
+			};
+			const original = JSON.stringify(frame);
+			const originalBytes = Buffer.byteLength(original);
+			let json = original;
+			if (originalBytes > RESPONSE_CEILING_BYTES) {
+				const bounded = boundedCorrelatedFrame(frame);
+				if (!bounded) {
+					if (frame.type === "event" && frame.kind === "message_update") return;
+					fail("oversized_frame", originalBytes);
+					return;
+				}
+				json = JSON.stringify(bounded);
+				if (Buffer.byteLength(json) > RESPONSE_CEILING_BYTES) {
+					fail("oversized_frame", originalBytes);
+					return;
+				}
+			}
+			try {
+				activeRuntime.server.sendTo(submission.connectionId, json);
+			} catch (error) {
+				const detail = String(error);
+				if (detail.includes("cause=oversized_frame") && frame.type === "event" && frame.kind === "message_update")
+					return; // A transport ceiling can still reject the bounded delta; later updates continue the turn.
+				if (detail.includes("cause=oversized_frame") && json === original) {
+					const bounded = boundedCorrelatedFrame(frame);
+					if (bounded) {
+						try {
+							activeRuntime.server.sendTo(submission.connectionId, JSON.stringify(bounded));
+							return;
+						} catch (retryError) {
+							logger.warn(`sdk: bounded correlated delivery failed: ${String(retryError)}`);
+						}
+					}
+				}
+				logger.warn(`sdk: correlated delivery failed: ${detail}`);
+				const cause = /cause=([a-z_]+)/.exec(detail)?.[1] ?? "unknown";
+				fail(cause, originalBytes);
+			}
+		};
 		const emitPromptLifecycle = (
 			correlation: { commandId: string; turnId: string } | undefined,
 			frame: PromptLifecycleFrame,
@@ -5353,12 +5493,7 @@ export function createNotificationsExtension(
 				submission.bufferedFrames.push(frame);
 				return;
 			}
-			try {
-				runtime.server.sendTo(submission.connectionId, JSON.stringify(frame));
-			} catch (error) {
-				logger.warn(`sdk: correlated lifecycle delivery failed: ${String(error)}`);
-				abandonPrompt(submission);
-			}
+			deliverCorrelatedFrame(submission, frame);
 			if (submission.terminal) {
 				submission.phase = "delivered";
 				finalizePrompt(key, correlation);
@@ -5497,12 +5632,7 @@ export function createNotificationsExtension(
 				submission.bufferedFrames.push(frame);
 				return;
 			}
-			try {
-				runtime.server.sendTo(submission.connectionId, JSON.stringify(frame));
-			} catch (error) {
-				logger.warn(`sdk: correlated agent event delivery failed: ${String(error)}`);
-				abandonPrompt(submission);
-			}
+			deliverCorrelatedFrame(submission, frame);
 		};
 		/**
 		 * Status of a registered deadline expiry attempt after an awaited
@@ -5666,13 +5796,8 @@ export function createNotificationsExtension(
 		};
 		const flushPromptLifecycle = (key: string, submission: PromptSubmission) => {
 			for (const frame of submission.bufferedFrames.splice(0)) {
-				try {
-					server.sendTo(submission.connectionId, JSON.stringify(frame));
-				} catch (error) {
-					logger.warn(`sdk: buffered correlated lifecycle delivery failed: ${String(error)}`);
-					abandonPrompt(submission);
-					break;
-				}
+				deliverCorrelatedFrame(submission, frame);
+				if (submission.abandoned) break;
 			}
 			if (submission.terminal) {
 				submission.phase = "delivered";
