@@ -69,6 +69,8 @@ Environment variables read by `dirs`:
 | Default agent directory, XDG in use | `$XDG_STATE_HOME/gjc/logs` | `$XDG_DATA_HOME/gjc/sessions` |
 | Custom `GJC_CODING_AGENT_DIR` (XDG ignored) | `<config>/logs` | `$GJC_CODING_AGENT_DIR/sessions` |
 
+These path variables (`GJC_CONFIG_DIR`, `GJC_CODING_AGENT_DIR`, and `XDG_*_HOME`) count only when they come from the process environment, such as your shell. The current directory's `.env` cannot set them: Bun loads it into the environment, but a value equal to the `.env` entry is ignored. If the `.env` entry uses `$` or backtick expansion, the variable is ignored even when the shell sets a different value. In both cases the default path applies.
+
 ## Environment (`env`)
 
 ```typescript

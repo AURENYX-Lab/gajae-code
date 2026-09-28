@@ -145,7 +145,7 @@ if (topModel) {
 
 ### Troubleshooting
 
-- **No data shown?** Check that session logs exist under `~/.gjc/agent/sessions/` (`~/<GJC_CONFIG_DIR>/agent/sessions/` if that variable is set). With a custom `GJC_CODING_AGENT_DIR`, sessions are in `$GJC_CODING_AGENT_DIR/sessions/`. Otherwise, on Linux and macOS, if `XDG_DATA_HOME` is set and `$XDG_DATA_HOME/gjc` exists (created by `gjc config init-xdg`), sessions are in `$XDG_DATA_HOME/gjc/sessions/`.
+- **No data shown?** Check that session logs exist under `~/.gjc/agent/sessions/` (`~/<GJC_CONFIG_DIR>/agent/sessions/` if that variable is set). With a custom `GJC_CODING_AGENT_DIR`, sessions are in `$GJC_CODING_AGENT_DIR/sessions/`. Otherwise, on Linux and macOS, if `XDG_DATA_HOME` is set and `$XDG_DATA_HOME/gjc` exists (created by `gjc config init-xdg`), sessions are in `$XDG_DATA_HOME/gjc/sessions/`. These variables must come from your shell environment. A project `.env` cannot set them, and if the `.env` entry uses `$` expansion it blocks the shell value as well; in both cases the default path applies.
 - **Dashboard not starting?** Check that port 3847 (or the port passed to `--port`) is free.
 
 ## License
