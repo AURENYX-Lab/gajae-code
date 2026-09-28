@@ -175,6 +175,10 @@ function createDarwinAncestryTracker(owned: Map<string, NativeProcess>): DarwinA
 			},
 		});
 		const knownUniqueIds = new Set<bigint>();
+		// Ancestry evidence (knownUniqueIds) and successful retention are tracked
+		// separately: a descendant whose process validation fails stays known, so its
+		// own children still chain, but it is retried on every poll until retained.
+		const retainedUniqueIds = new Set<bigint>();
 		const { Process } = require("@gajae-code/natives") as NativeProcessBindings;
 		// Reuse buffer across poll iterations to avoid allocations inside the loop.
 		const identityBuffer = new Uint8Array(56);
@@ -192,6 +196,7 @@ function createDarwinAncestryTracker(owned: Map<string, NativeProcess>): DarwinA
 			const uniqueId = signedUniqueId ?? identity?.uniqueId;
 			if (uniqueId === undefined) return false;
 			knownUniqueIds.add(uniqueId);
+			retainedUniqueIds.add(uniqueId);
 			retainOwnedProcess(owned, processRef);
 			return true;
 		};
@@ -213,19 +218,20 @@ function createDarwinAncestryTracker(owned: Map<string, NativeProcess>): DarwinA
 					const identity = uniqueIdentity(pid);
 					if (identity) identities.set(pid, identity);
 				}
-				// Compute set of pids whose ancestry reaches knownUniqueIds.
-				const descendantPids = extendOwnedDarwinAncestry(knownUniqueIds, identities);
-				// extendOwnedDarwinAncestry only yields identities not seen before, so each
-				// descendant pays the Process.fromPid pid-reuse check once. A pid whose
-				// identity changed between the listing and the check was reused; skip it.
-				for (const pid of descendantPids) {
-					const listed = identities.get(pid)!;
+				// Extend ancestry evidence, then validate every listed pid that is known but
+				// not yet retained: new descendants plus earlier ones whose Process.fromPid
+				// check failed (it can return null for a live pid it could not query). A pid
+				// whose identity changed between the listing and the check was reused; skip it.
+				extendOwnedDarwinAncestry(knownUniqueIds, identities);
+				for (const [pid, listed] of identities) {
+					if (!knownUniqueIds.has(listed.uniqueId) || retainedUniqueIds.has(listed.uniqueId)) continue;
 					const before = Process.fromPid(pid);
 					if (!before) continue;
 					const identity = uniqueIdentity(pid);
 					const after = Process.fromPid(pid);
 					if (identity?.uniqueId === listed.uniqueId && after?.incarnation === before.incarnation) {
 						retainOwnedProcess(owned, after);
+						retainedUniqueIds.add(listed.uniqueId);
 					}
 				}
 				return true;
