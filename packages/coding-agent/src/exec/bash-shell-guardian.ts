@@ -215,15 +215,16 @@ function createDarwinAncestryTracker(owned: Map<string, NativeProcess>): DarwinA
 				}
 				// Compute set of pids whose ancestry reaches knownUniqueIds.
 				const descendantPids = extendOwnedDarwinAncestry(knownUniqueIds, identities);
-				// For each new descendant (not already in owned), verify incarnation and retain.
+				// extendOwnedDarwinAncestry only yields identities not seen before, so each
+				// descendant pays the Process.fromPid pid-reuse check once. A pid whose
+				// identity changed between the listing and the check was reused; skip it.
 				for (const pid of descendantPids) {
-					const key = [...owned.keys()].find(k => k.startsWith(`${pid}:`));
-					if (key) continue; // Already retained with same identity (skip expensive Process.fromPid).
+					const listed = identities.get(pid)!;
 					const before = Process.fromPid(pid);
 					if (!before) continue;
 					const identity = uniqueIdentity(pid);
 					const after = Process.fromPid(pid);
-					if (identity && after?.incarnation === before.incarnation) {
+					if (identity?.uniqueId === listed.uniqueId && after?.incarnation === before.incarnation) {
 						retainOwnedProcess(owned, after);
 					}
 				}
