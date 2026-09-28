@@ -1,11 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import { createHmac } from "node:crypto";
+import type { Process as NativeProcess } from "@gajae-code/natives";
 import {
+	authenticateOwnershipRecord,
+	extendOwnedDarwinAncestry,
 	parseOwnershipRecord,
 	retainOwnedProcess,
-	extendOwnedDarwinAncestry,
-	authenticateOwnershipRecord,
 } from "../src/exec/bash-shell-guardian";
-import type { Process as NativeProcess } from "@gajae-code/natives";
 
 /**
  * Tests for bash-shell-guardian ownership tracking and Darwin ancestry tracking.
@@ -71,6 +72,33 @@ describe("bash-shell-guardian", () => {
 					}),
 				),
 			).toBeUndefined();
+		});
+	});
+
+	describe("authenticateOwnershipRecord", () => {
+		const token = "ledger-token";
+		const sign = (pid: number, incarnation: string, uniqueId: string) =>
+			createHmac("sha256", token).update(`${pid}:${incarnation}:${uniqueId}`).digest("hex");
+
+		it("authenticates an incarnation-only record on every platform", () => {
+			const line = JSON.stringify({ pid: 1234, incarnation: "uuid-abc", signature: sign(1234, "uuid-abc", "") });
+			const authenticated = authenticateOwnershipRecord(line, token);
+			expect(authenticated).toBeDefined();
+			expect(authenticated?.darwinUniqueId).toBeUndefined();
+		});
+
+		it("binds the Darwin unique id into the signature", () => {
+			const signature = sign(1234, "uuid-abc", "");
+			const forged = JSON.stringify({ pid: 1234, incarnation: "uuid-abc", darwinUniqueId: "42", signature });
+			expect(authenticateOwnershipRecord(forged, token)).toBeUndefined();
+
+			const line = JSON.stringify({
+				pid: 1234,
+				incarnation: "uuid-abc",
+				darwinUniqueId: "42",
+				signature: sign(1234, "uuid-abc", "42"),
+			});
+			expect(authenticateOwnershipRecord(line, token)?.darwinUniqueId).toBe(42n);
 		});
 	});
 

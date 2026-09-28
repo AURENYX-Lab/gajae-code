@@ -78,7 +78,10 @@ fn observed_spawn_incarnation(
 	match observation {
 		process::ProcessObservation::Absent => Ok(None),
 		process::ProcessObservation::Present { incarnation: observed } => {
-			if incarnation.as_ref().is_some_and(|pinned| pinned != &observed) {
+			if incarnation
+				.as_ref()
+				.is_some_and(|pinned| pinned != &observed)
+			{
 				Ok(None)
 			} else {
 				Ok(Some(observed))
@@ -2300,14 +2303,16 @@ mod tests {
 		let file = fs::File::create(&path).expect("create ledger");
 		let observer = CommandProcessObserver {
 			process_group_id: Arc::new(AtomicI32::new(0)),
-			targets: Arc::new(StdMutex::new(process::TerminationTargets::new())),
+			targets:          Arc::new(StdMutex::new(process::TerminationTargets::new())),
 			ownership_ledger: Some(OwnershipLedger {
-				file: Arc::new(StdMutex::new(file)),
+				file:  Arc::new(StdMutex::new(file)),
 				token: "test-token".to_owned(),
 			}),
-			upstream: None,
+			upstream:         None,
 		};
-		let mut child = std::process::Command::new("/bin/true").spawn().expect("spawn child");
+		let mut child = std::process::Command::new("/bin/true")
+			.spawn()
+			.expect("spawn child");
 		let pid = i32::try_from(child.id()).expect("pid fits");
 		child.wait().expect("reap child");
 		observer.spawned(pid, Some(pid));
@@ -2326,15 +2331,17 @@ mod tests {
 			let file = fs::File::open("/dev/null").expect("open read-only ledger");
 			let observer = CommandProcessObserver {
 				process_group_id: Arc::new(AtomicI32::new(0)),
-				targets: Arc::new(StdMutex::new(process::TerminationTargets::new())),
+				targets:          Arc::new(StdMutex::new(process::TerminationTargets::new())),
 				ownership_ledger: Some(OwnershipLedger {
-					file: Arc::new(StdMutex::new(file)),
+					file:  Arc::new(StdMutex::new(file)),
 					token: "test-token".to_owned(),
 				}),
-				upstream: None,
+				upstream:         None,
 			};
 			let mut child = std::process::Command::new("/bin/sleep")
-				.arg("30").spawn().expect("spawn identifiable child");
+				.arg("30")
+				.spawn()
+				.expect("spawn identifiable child");
 			observer.spawned(i32::try_from(child.id()).expect("pid fits"), None);
 			child.kill().expect("clean up unexpected survivor");
 			child.wait().expect("reap unexpected survivor");
@@ -2343,7 +2350,8 @@ mod tests {
 		let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
 			.args(["--exact", "shell::tests::spawn_ledger_write_failure_exits_70", "--nocapture"])
 			.env(CHILD_FLAG, "1")
-			.status().expect("run isolated observer");
+			.status()
+			.expect("run isolated observer");
 		assert_eq!(status.code(), Some(70));
 	}
 

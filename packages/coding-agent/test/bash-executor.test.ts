@@ -87,9 +87,7 @@ describe("executeBash", () => {
 		// (This is unchanged behavior but we verify it still works)
 		const token = "abc123def456";
 		const uniqueId = "999";
-		const signature = createHmac("sha256", token)
-			.update(`42:test-incarnation:${uniqueId}`)
-			.digest("hex");
+		const signature = createHmac("sha256", token).update(`42:test-incarnation:${uniqueId}`).digest("hex");
 		const record = JSON.stringify({
 			pid: 42,
 			incarnation: "test-incarnation",
@@ -128,9 +126,7 @@ describe("executeBash", () => {
 		const wrongToken = "wrong-token";
 		const uniqueId = "999";
 		// Create a signature with the correct token
-		const correctSignature = createHmac("sha256", token)
-			.update(`42:test-incarnation:${uniqueId}`)
-			.digest("hex");
+		const correctSignature = createHmac("sha256", token).update(`42:test-incarnation:${uniqueId}`).digest("hex");
 		// But present a record with the wrong token
 		const record = JSON.stringify({
 			pid: 42,

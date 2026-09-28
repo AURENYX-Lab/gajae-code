@@ -1,10 +1,14 @@
-//! Regression coverage for fast-exiting and entitled children with ownership enabled.
+//! Regression coverage for fast-exiting and entitled children with ownership
+//! enabled.
 #![cfg(target_os = "macos")]
 
 use std::fs;
 
 use hmac::{Hmac, Mac};
-use pi_shell::{cancel::CancelToken, shell::{Shell, ShellOptions, ShellRunOptions}};
+use pi_shell::{
+	cancel::CancelToken,
+	shell::{Shell, ShellOptions, ShellRunOptions},
+};
 use sha2::Sha256;
 
 #[tokio::test]
@@ -17,19 +21,33 @@ async fn fast_and_entitled_children_preserve_runtime_and_signed_ledger() {
 		..ShellOptions::default()
 	}));
 	for _ in 0..200 {
-		let result = shell.run(ShellRunOptions {
-			command: "/bin/true".to_owned(),
-			timeout_ms: Some(10_000),
-			..ShellRunOptions::default()
-		}, None, CancelToken::default()).await.expect("run fast child");
+		let result = shell
+			.run(
+				ShellRunOptions {
+					command: "/bin/true".to_owned(),
+					timeout_ms: Some(10_000),
+					..ShellRunOptions::default()
+				},
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run fast child");
 		assert_eq!(result.exit_code, Some(0));
 		assert!(!result.timed_out);
 	}
-	let result = shell.run(ShellRunOptions {
-		command: "/usr/bin/top -l 1".to_owned(),
-		timeout_ms: Some(30_000),
-		..ShellRunOptions::default()
-	}, None, CancelToken::default()).await.expect("run entitled child");
+	let result = shell
+		.run(
+			ShellRunOptions {
+				command: "/usr/bin/top -l 1".to_owned(),
+				timeout_ms: Some(30_000),
+				..ShellRunOptions::default()
+			},
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("run entitled child");
 	assert_eq!(result.exit_code, Some(0));
 	assert!(!result.timed_out);
 	let ledger = fs::read_to_string(&path).expect("read ledger");
@@ -42,7 +60,12 @@ async fn fast_and_entitled_children_preserve_runtime_and_signed_ledger() {
 		let payload = format!("{}:{incarnation}:{unique_id}", record["pid"]);
 		let mut mac = Hmac::<Sha256>::new_from_slice(token.as_bytes()).expect("HMAC key");
 		mac.update(payload.as_bytes());
-		let expected: String = mac.finalize().into_bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+		let expected: String = mac
+			.finalize()
+			.into_bytes()
+			.iter()
+			.map(|byte| format!("{byte:02x}"))
+			.collect();
 		assert_eq!(record["signature"].as_str(), Some(expected.as_str()));
 	}
 	drop(shell);
