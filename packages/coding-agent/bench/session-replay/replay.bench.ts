@@ -122,7 +122,7 @@ const MIN_SCENARIO_WALL_MS: Partial<Record<ScenarioName, number>> = {
 	compaction: 5_000,
 };
 const MAX_SCENARIO_REPEATS = 200;
-const STARTUP_REPEATS = 20;
+const STARTUP_REPEATS = 60;
 type SessionJsonlEntry = Parameters<typeof toolCallSequence>[0][number];
 
 type SessionMessage = Message;
