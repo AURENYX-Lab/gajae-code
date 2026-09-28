@@ -7,7 +7,7 @@ interface RootManifest {
 	scripts: Record<string, string>;
 }
 
-test("install:dev builds the native addon, links the source CLI, and enables the repo git hooks", async () => {
+test("install:dev builds the native addon and links the source CLI without overriding Git hooks", async () => {
 	const repoRoot = path.resolve(import.meta.dir, "..");
 	const manifest = (await Bun.file(path.join(repoRoot, "package.json")).json()) as RootManifest;
 
@@ -17,12 +17,10 @@ test("install:dev builds the native addon, links the source CLI, and enables the
 		"bun --cwd=packages/coding-agent link",
 		"bun --cwd=packages/ai link",
 		"bun run dev:link",
-		"bun run dev:hooks",
 		"bun packages/coding-agent/src/cli.ts setup defaults",
 	]);
+	expect(manifest.scripts["dev:hooks"]).toBeUndefined();
 });
-
-
 
 test("setup:worktree installs dependencies and builds natives without touching primary-checkout global state", async () => {
 	const repoRoot = path.resolve(import.meta.dir, "..");
@@ -33,7 +31,7 @@ test("setup:worktree installs dependencies and builds natives without touching p
 	// The canonical step string lives in scripts/worktree-deps.ts; pin the manifest to it.
 	expect(script).toBe(WORKTREE_SETUP_STEPS);
 	// install:dev's global-state steps would hijack the primary checkout from a worktree.
-	for (const forbidden of ["link", "dev:hooks", "setup defaults"]) {
+	for (const forbidden of ["link", "setup defaults"]) {
 		expect(script).not.toContain(forbidden);
 	}
 });

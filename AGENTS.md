@@ -54,10 +54,12 @@ A second checkout created with `git worktree add` starts with no `node_modules/`
 built native addon, so every `bun test` fails with a bare module-resolution error until
 dependencies are installed. Run `bun run setup:worktree` there (equivalent to
 `bun install && bun run build:native`). Do **not** run `bun run install:dev` in a
-worktree: it repoints the global `gjc` on `PATH`, rewrites `core.hooksPath`, and
-overwrites user-level defaults for your primary checkout. `bun run dev:doctor -- --worktree`
-reports whether the current checkout can resolve workspace packages and load the native
-addon, and names the fix when it cannot.
+worktree: it repoints the global `gjc` on `PATH` and overwrites user-level defaults
+for your primary checkout. `bun run dev:doctor -- --worktree` reports whether the
+current checkout can resolve workspace packages and load the native addon, and names
+the fix when it cannot. If an older `install:dev` set `core.hooksPath` to the now-removed
+`.githooks` directory, run `git config --local --unset core.hooksPath` in the primary
+checkout to restore Git's default hook lookup; do not unset a custom hooks path.
 
 Removing build output (never touches sources, `node_modules/`, `.gjc/` state, or `artifacts/` test working space):
 
