@@ -24,7 +24,7 @@ async fn fast_and_entitled_children_preserve_runtime_and_signed_ledger() {
 		let result = shell
 			.run(
 				ShellRunOptions {
-					command: "/bin/true".to_owned(),
+					command: "/usr/bin/true".to_owned(),
 					timeout_ms: Some(10_000),
 					..ShellRunOptions::default()
 				},

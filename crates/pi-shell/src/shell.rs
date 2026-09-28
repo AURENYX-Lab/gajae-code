@@ -2310,7 +2310,7 @@ mod tests {
 			}),
 			upstream:         None,
 		};
-		let mut child = std::process::Command::new("/bin/true")
+		let mut child = std::process::Command::new("/usr/bin/true")
 			.spawn()
 			.expect("spawn child");
 		let pid = i32::try_from(child.id()).expect("pid fits");
