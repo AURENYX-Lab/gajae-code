@@ -108,28 +108,38 @@ impl ExternalProcessObserver for CommandProcessObserver {
 			// (absent, or the pid now holds a different incarnation). Re-resolving
 			// the numeric pid would then target an unrelated occupant, so only the
 			// process group is recorded.
+			// `pid_reused` means the pid now holds a different incarnation, so the
+			// numeric pgid may belong to the new occupant too and is not rescanned.
 			#[cfg(target_os = "macos")]
-			let (incarnation, pid_released) = if darwin_unique_id.is_none() {
-				match observed_spawn_incarnation(incarnation, process::Process::observe(pid)) {
-					Ok(Some(incarnation)) => (Some(incarnation), false),
-					Ok(None) => (None, true),
+			let (incarnation, pid_released, pid_reused) = if darwin_unique_id.is_none() {
+				let observation = process::Process::observe(pid);
+				let reused = matches!(
+					(&incarnation, &observation),
+					(Some(pinned), process::ProcessObservation::Present { incarnation: observed })
+						if pinned != observed
+				);
+				match observed_spawn_incarnation(incarnation, observation) {
+					Ok(Some(incarnation)) => (Some(incarnation), false, false),
+					Ok(None) => (None, true, reused),
 					Err(()) => std::process::exit(70),
 				}
 			} else {
-				(incarnation, false)
+				(incarnation, false, false)
 			};
 			#[cfg(not(target_os = "macos"))]
-			let pid_released = false;
+			let (pid_released, pid_reused) = (false, false);
 			let Some(incarnation) = incarnation else {
 				let mut targets = self.targets.lock().expect("process target lock poisoned");
 				if !pid_released {
 					targets.add_pid(pid);
 				}
-				// A reaped leader leaves only a numeric PGID, which cleanup does not
-				// treat as authority. Capture identity-bound references for the
-				// group's surviving members now so cancellation can still reach them.
+				// A reaped leader (confirmed Absent) leaves only a numeric PGID, which
+				// cleanup does not treat as authority. With the pid absent, no
+				// replacement can lead that group yet, so its surviving members are
+				// ours: capture identity-bound references now so cancellation can
+				// still reach them. After a reuse the group is not rescanned.
 				#[cfg(unix)]
-				if let Some(pgid) = process_group_id {
+				if !pid_reused && let Some(pgid) = process_group_id {
 					process::add_process_group_members(&mut targets, pgid);
 				}
 				drop(targets);
