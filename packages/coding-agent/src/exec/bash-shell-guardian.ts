@@ -63,7 +63,7 @@ export function extendOwnedDarwinAncestry<T extends { uniqueId: bigint; parentUn
 	return addedPids;
 }
 
-function authenticateOwnershipRecord(
+export function authenticateOwnershipRecord(
 	line: string,
 	ledgerToken: string,
 ): { processRef?: NativeProcess; darwinUniqueId?: bigint } | undefined {
@@ -80,7 +80,6 @@ function authenticateOwnershipRecord(
 		return undefined;
 	}
 	if (received.byteLength !== expected.byteLength || !timingSafeEqual(received, expected)) return undefined;
-	if (process.platform === "darwin" && !record.darwinUniqueId) return undefined;
 	const { Process } = require("@gajae-code/natives") as NativeProcessBindings;
 	const owned = Process.fromPid(record.pid);
 	return {

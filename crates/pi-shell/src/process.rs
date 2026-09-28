@@ -616,6 +616,10 @@ mod platform {
 			}
 			// SAFETY: the full structure size was reported initialized above.
 			let unique_id = unsafe { info.assume_init() }.unique_id;
+			// Re-check liveness after reading to protect against pid reuse between the read and this
+			// verification: if the start time has changed, the pid was recycled. For entitled children
+			// that deny bsdinfo access (EPERM), returning None is appropriate since the caller must
+			// corroborate liveness separately (e.g., via incarnation records with empty unique_id).
 			self.live_bsdinfo()?;
 			Some(unique_id)
 		}
