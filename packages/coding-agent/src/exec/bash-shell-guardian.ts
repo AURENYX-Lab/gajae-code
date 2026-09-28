@@ -197,6 +197,13 @@ export function createDarwinAncestryTracker(
 		};
 		const uniqueIdentity = uniqueIdentityFn ?? defaultUniqueIdentity;
 		const incarnationOnlyAnchors: NativeProcess[] = [];
+		const anchorKeys = new Set<string>();
+		const addIncarnationOnlyAnchor = (processRef: NativeProcess): void => {
+			const key = `${processRef.pid}:${processRef.incarnation}`;
+			if (anchorKeys.has(key)) return;
+			anchorKeys.add(key);
+			incarnationOnlyAnchors.push(processRef);
+		};
 		const seedAnchorDescendants = (anchor: NativeProcess): void => {
 			const pending = [...anchor.children()];
 			while (pending.length > 0) {
@@ -207,9 +214,16 @@ export function createDarwinAncestryTracker(
 				// seed an unrelated process (and its descendants) as owned.
 				if (Process.fromPid(child.pid)?.incarnation === child.incarnation) {
 					const childId = uniqueIdentity(child.pid)?.uniqueId;
-					if (childId !== undefined && Process.fromPid(child.pid)?.incarnation === child.incarnation) {
-						knownUniqueIds.add(childId);
-						retainedUniqueIds.add(childId);
+					if (Process.fromPid(child.pid)?.incarnation === child.incarnation) {
+						if (childId !== undefined) {
+							knownUniqueIds.add(childId);
+							retainedUniqueIds.add(childId);
+						} else {
+							// Its flavor-17 query is denied too: without a unique id the
+							// ancestry walk can never reach its subtree, so it must outlive
+							// this anchor's pruning as an incarnation-only anchor itself.
+							addIncarnationOnlyAnchor(child);
+						}
 					}
 				}
 				pending.push(...child.children());
@@ -228,7 +242,7 @@ export function createDarwinAncestryTracker(
 				// this record is scanned, nothing links that descendant back to us. The
 				// ledger watcher scans on append to keep that window minimal.
 				retainOwnedProcess(owned, processRef);
-				incarnationOnlyAnchors.push(processRef);
+				addIncarnationOnlyAnchor(processRef);
 				seedAnchorDescendants(processRef);
 				return true;
 			}
@@ -262,6 +276,7 @@ export function createDarwinAncestryTracker(
 					seedAnchorDescendants(anchor);
 					if (Process.fromPid(anchor.pid)?.incarnation !== anchor.incarnation) {
 						incarnationOnlyAnchors.splice(index, 1);
+						anchorKeys.delete(`${anchor.pid}:${anchor.incarnation}`);
 					}
 				}
 				const capacity = proc.symbols.proc_listallpids(null, 0);
