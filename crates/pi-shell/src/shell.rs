@@ -3580,8 +3580,18 @@ mod tests {
 	async fn jobs_list_changed_reports_completed_jobs() {
 		let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
 		let shell = Shell::new(None);
+		// Poll `jobs -n` until the background job's completion is reported rather
+		// than betting a fixed sleep on python3 startup (flaky on loaded macOS,
+		// #6098). The redirect keeps `jobs` in the current shell, so the first
+		// non-empty report is the one notification for this job; the loop is
+		// bounded at ~10s.
+		let report = std::env::temp_dir().join(format!("pi-shell-jobs-n-{}.txt", std::process::id()));
+		let report = report.display();
 		let (result, output) = run_and_capture(&shell, ShellRunOptions {
-			command: "python3 -c 'import time; time.sleep(0.1)' & sleep 0.3; jobs -n".to_string(),
+			command: format!(
+				"python3 -c 'pass' & for _ in $(seq 1 200); do jobs -n > '{report}'; [ -s '{report}' \
+				 ] && break; sleep 0.05; done; cat '{report}'; rm -f '{report}'"
+			),
 			..Default::default()
 		})
 		.await;
