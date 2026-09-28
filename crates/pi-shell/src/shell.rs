@@ -104,21 +104,30 @@ impl ExternalProcessObserver for CommandProcessObserver {
 				.as_ref()
 				.and_then(process::Process::darwin_unique_id)
 				.map(|value| value.to_string());
+			// `pid_released` means the observation proved the spawned child is gone
+			// (absent, or the pid now holds a different incarnation). Re-resolving
+			// the numeric pid would then target an unrelated occupant, so only the
+			// process group is recorded.
 			#[cfg(target_os = "macos")]
-			let incarnation = if darwin_unique_id.is_none() {
+			let (incarnation, pid_released) = if darwin_unique_id.is_none() {
 				match observed_spawn_incarnation(incarnation, process::Process::observe(pid)) {
-					Ok(incarnation) => incarnation,
+					Ok(Some(incarnation)) => (Some(incarnation), false),
+					Ok(None) => (None, true),
 					Err(()) => std::process::exit(70),
 				}
 			} else {
-				incarnation
+				(incarnation, false)
 			};
+			#[cfg(not(target_os = "macos"))]
+			let pid_released = false;
 			let Some(incarnation) = incarnation else {
-				self
-					.targets
-					.lock()
-					.expect("process target lock poisoned")
-					.add_pid(pid);
+				if !pid_released {
+					self
+						.targets
+						.lock()
+						.expect("process target lock poisoned")
+						.add_pid(pid);
+				}
 				if let Some(pgid) = process_group_id {
 					self
 						.process_group_id

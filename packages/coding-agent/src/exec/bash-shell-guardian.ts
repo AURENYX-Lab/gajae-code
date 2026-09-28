@@ -201,10 +201,15 @@ export function createDarwinAncestryTracker(
 			while (pending.length > 0) {
 				const child = pending.pop()!;
 				retainOwnedProcess(owned, child);
-				const childId = uniqueIdentity(child.pid)?.uniqueId;
-				if (childId !== undefined) {
-					knownUniqueIds.add(childId);
-					retainedUniqueIds.add(childId);
+				// The unique id is read from a bare pid, so bracket it with incarnation
+				// checks against this handle: a pid reused in between would otherwise
+				// seed an unrelated process (and its descendants) as owned.
+				if (Process.fromPid(child.pid)?.incarnation === child.incarnation) {
+					const childId = uniqueIdentity(child.pid)?.uniqueId;
+					if (childId !== undefined && Process.fromPid(child.pid)?.incarnation === child.incarnation) {
+						knownUniqueIds.add(childId);
+						retainedUniqueIds.add(childId);
+					}
 				}
 				pending.push(...child.children());
 			}
@@ -244,7 +249,16 @@ export function createDarwinAncestryTracker(
 			track,
 			trackGuardian,
 			poll() {
-				for (const anchor of incarnationOnlyAnchors) seedAnchorDescendants(anchor);
+				// Re-seed live anchors, then drop exited ones: their descendants were
+				// seeded by unique id while the anchor was alive, and ancestry now
+				// carries them, so re-walking a dead anchor only costs time.
+				for (let index = incarnationOnlyAnchors.length - 1; index >= 0; index--) {
+					const anchor = incarnationOnlyAnchors[index]!;
+					seedAnchorDescendants(anchor);
+					if (Process.fromPid(anchor.pid)?.incarnation !== anchor.incarnation) {
+						incarnationOnlyAnchors.splice(index, 1);
+					}
+				}
 				const capacity = proc.symbols.proc_listallpids(null, 0);
 				if (capacity <= 0) return false;
 				const pids = new Int32Array(capacity + 64);
