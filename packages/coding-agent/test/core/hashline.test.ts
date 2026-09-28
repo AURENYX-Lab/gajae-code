@@ -685,6 +685,25 @@ describe("hashline — hash-less line references", () => {
 		});
 	});
 
+	it.each([
+		"22|foo..23|bar",
+		"22|foo..23cd",
+	])("keeps the full span when a copied suffix precedes the range separator (≔%s)", async anchor => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const original = "line 1\nline 2\nline 3\n";
+			await Bun.write(filePath, original);
+
+			const message = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n≔${anchor}\n${pl("X")}\n`)),
+			);
+			// A one-line `Use ≔22xx` suggestion would make a resent range payload replace line 22 only.
+			expect(message).not.toMatch(/Use ≔\d+/);
+			expect(message).toContain("Re-read the target");
+			await expectFileBytesUnchanged(filePath, original);
+		});
+	});
+
 	it("rejects mixed range with hash on second endpoint only (≔ab..10cd)", async () => {
 		await withTempDir(async tempDir => {
 			const filePath = path.join(tempDir, "a.ts");
