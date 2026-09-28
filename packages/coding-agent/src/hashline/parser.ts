@@ -20,8 +20,8 @@ import type { Anchor, HashlineCursor, HashlineEdit } from "./types";
 const LID_CAPTURE_RE = new RegExp(`^\\s*[>+\\-*]*\\s*${HL_HASH_CAPTURE_RE_RAW}(?:\\|.*)?\\s*$`);
 const regexEscape = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-const BARE_LINE_REF_RE = /^\s*[>+\-*]*\s*([1-9]\d*)(?:\s*(?:-|\.\.)\s*([1-9]\d*))?\s*$/;
-const HASH_ONLY_REF_RE = /^\s*[>+\-*]*\s*([a-z]{2})\s*$/;
+const BARE_LINE_REF_RE = /^\s*[>+\-*]*\s*([1-9]\d*)(?:\s*(?:-|\.\.)\s*([1-9]\d*))?(?:\|.*)?\s*$/;
+const HASH_ONLY_REF_RE = /^\s*[>+\-*]*\s*([a-z]{2})(?:\|.*)?\s*$/;
 type HashlineOpSigil = typeof HL_OP_INSERT_BEFORE | typeof HL_OP_INSERT_AFTER | typeof HL_OP_REPLACE;
 
 /**
@@ -181,7 +181,7 @@ const INSERT_BEFORE_OP_RE = new RegExp(
 const INSERT_AFTER_OP_RE = new RegExp(
 	`^${regexEscape(HL_OP_INSERT_AFTER)}\\s*([^|\\s]+)(?:${HL_BODY_SEP_RE_RAW}(.*))?\\s*$`,
 );
-const REPLACE_OP_RE = new RegExp(`^${regexEscape(HL_OP_REPLACE)}\\s*([^\\s+<\\-=]\\S*)\\s*$`);
+const REPLACE_OP_RE = new RegExp(`^${regexEscape(HL_OP_REPLACE)}\\s*([^\\s+<\\-=]\\S*(?:\\|.*)?)\\s*$`);
 
 function isEnvelopeOrAbortMarkerLine(line: string): boolean {
 	const trimmed = line.trimEnd();

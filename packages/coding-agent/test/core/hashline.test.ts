@@ -637,6 +637,34 @@ describe("hashline — hash-less line references", () => {
 		});
 	});
 
+	it("accepts a copied-text suffix on a bare line number", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const lines = Array.from({ length: 50 }, (_, index) => `line ${index + 1}`);
+			const original = lines.join("\n");
+			await Bun.write(filePath, original);
+
+			const message = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n≔47|old text\n${pl("X")}`)),
+			);
+			expect(message).toContain(`Use ≔${tag(47, "line 47")}`);
+			await expectFileBytesUnchanged(filePath, original);
+		});
+	});
+
+	it("accepts a copied-text suffix on a hash-only anchor", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const original = "line-1\nsecond";
+			await Bun.write(filePath, original);
+
+			const message = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n≔qn|old text\n${pl("X")}`)),
+			);
+			expect(message).toContain('Anchor "qn" lacks its line number. Did you mean ≔1qn?');
+			await expectFileBytesUnchanged(filePath, original);
+		});
+	});
 	it("rejects mixed range with hash on first endpoint only (≔22..23cd)", async () => {
 		await withTempDir(async tempDir => {
 			const filePath = path.join(tempDir, "a.ts");
