@@ -34,6 +34,8 @@ function validateOptionalReason(reason: unknown): void {
 	}
 }
 
+const PROBE_BATCH = 1000;
+
 const cases = [
 	{
 		id: "I01",
@@ -52,9 +54,13 @@ const cases = [
 		},
 	},
 	{
+		// I02: PROBE_BATCH default-backend probes per sample.
 		id: "I02",
 		run: async () => {
-			const result = await isoProbe();
+			// One probe is ~0.1us, below timer/await noise; a batch makes the
+			// sample measure the native call rather than the harness.
+			let result = await isoProbe();
+			for (let i = 1; i < PROBE_BATCH; i++) result = await isoProbe();
 			if (!result || typeof result !== "object") throw new Error("isoProbe() returned no result object");
 			if (typeof result.available !== "boolean") throw new Error("isoProbe() returned invalid availability flag");
 			if (!isBackendKind(result.kind)) throw new Error(`isoProbe() returned invalid kind ${String(result.kind)}`);
