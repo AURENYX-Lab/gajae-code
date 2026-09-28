@@ -176,11 +176,16 @@ function createDarwinAncestryTracker(owned: Map<string, NativeProcess>): DarwinA
 		});
 		const knownUniqueIds = new Set<bigint>();
 		const { Process } = require("@gajae-code/natives") as NativeProcessBindings;
+		// Reuse buffer across poll iterations to avoid allocations inside the loop.
+		const identityBuffer = new Uint8Array(56);
+		const identityView = new DataView(identityBuffer.buffer);
 		const uniqueIdentity = (pid: number): { uniqueId: bigint; parentUniqueId: bigint } | undefined => {
-			const info = new Uint8Array(56);
-			if (proc.symbols.proc_pidinfo(pid, 17, 0, ptr(info), info.byteLength) !== info.byteLength) return undefined;
-			const view = new DataView(info.buffer);
-			return { uniqueId: view.getBigUint64(16, true), parentUniqueId: view.getBigUint64(24, true) };
+			const bytes = proc.symbols.proc_pidinfo(pid, 17, 0, ptr(identityBuffer), identityBuffer.byteLength);
+			if (bytes !== identityBuffer.byteLength) return undefined;
+			return {
+				uniqueId: identityView.getBigUint64(16, true),
+				parentUniqueId: identityView.getBigUint64(24, true),
+			};
 		};
 		const track = (processRef: NativeProcess, signedUniqueId?: bigint): boolean => {
 			const identity = signedUniqueId === undefined ? uniqueIdentity(processRef.pid) : undefined;
@@ -201,22 +206,26 @@ function createDarwinAncestryTracker(owned: Map<string, NativeProcess>): DarwinA
 				const pids = new Int32Array(capacity + 64);
 				const count = proc.symbols.proc_listallpids(ptr(pids), pids.byteLength);
 				if (count <= 0) return false;
-				const candidates = new Map<
-					number,
-					{ uniqueId: bigint; parentUniqueId: bigint; processRef: NativeProcess }
-				>();
+				// First pass: collect identities for all pids, avoiding Process.fromPid calls.
+				const identities = new Map<number, { uniqueId: bigint; parentUniqueId: bigint }>();
 				for (let index = 0; index < count; index++) {
 					const pid = pids[index]!;
-					const processRef = Process.fromPid(pid);
-					if (!processRef) continue;
+					const identity = uniqueIdentity(pid);
+					if (identity) identities.set(pid, identity);
+				}
+				// Compute set of pids whose ancestry reaches knownUniqueIds.
+				const descendantPids = extendOwnedDarwinAncestry(knownUniqueIds, identities);
+				// For each new descendant (not already in owned), verify incarnation and retain.
+				for (const pid of descendantPids) {
+					const key = [...owned.keys()].find(k => k.startsWith(`${pid}:`));
+					if (key) continue; // Already retained with same identity (skip expensive Process.fromPid).
+					const before = Process.fromPid(pid);
+					if (!before) continue;
 					const identity = uniqueIdentity(pid);
 					const after = Process.fromPid(pid);
-					if (identity && after?.incarnation === processRef.incarnation) {
-						candidates.set(pid, { ...identity, processRef });
+					if (identity && after?.incarnation === before.incarnation) {
+						retainOwnedProcess(owned, after);
 					}
-				}
-				for (const pid of extendOwnedDarwinAncestry(knownUniqueIds, candidates)) {
-					retainOwnedProcess(owned, candidates.get(pid)!.processRef);
 				}
 				return true;
 			},

@@ -79,6 +79,27 @@ describe("executeBash", () => {
 		expect(extendOwnedDarwinAncestry(known, candidates)).toEqual([42, 43]);
 		expect(known).toEqual(new Set([100n, 200n, 300n]));
 	});
+
+	it("computes identity-level fixpoint with absent intermediate parents and unrelated processes", () => {
+		// Scenario: root process 100 is known, has child 200 (not in listing).
+		// Grandchild 300 whose parentUniqueId is 200 (intermediate missing) must not be selected.
+		// Process 400 with unrelated ancestry must not be selected.
+		// Process 500 with grandchild 600 via chain 100->500->600 must be selected.
+		const known = new Set([100n]);
+		const candidates = new Map([
+			// Direct child of known root
+			[42, { uniqueId: 500n, parentUniqueId: 100n }],
+			// Grandchild of root (parent 500 is in candidates, will be added first)
+			[43, { uniqueId: 600n, parentUniqueId: 500n }],
+			// Child of unknown parent (not in candidates, ancestry chain broken)
+			[44, { uniqueId: 300n, parentUniqueId: 200n }],
+			// Completely unrelated process
+			[45, { uniqueId: 700n, parentUniqueId: 999n }],
+		]);
+		const result = extendOwnedDarwinAncestry(known, candidates);
+		expect(result).toEqual([42, 43]);
+		expect(known).toEqual(new Set([100n, 500n, 600n]));
+	});
 	let tempDir: string;
 
 	beforeEach(async () => {
