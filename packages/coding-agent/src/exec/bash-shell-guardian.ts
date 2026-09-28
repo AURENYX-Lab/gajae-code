@@ -230,7 +230,18 @@ export function createDarwinAncestryTracker(
 			}
 		};
 		const track = (processRef: NativeProcess, signedUniqueId?: bigint): boolean => {
-			const identity = signedUniqueId === undefined ? uniqueIdentity(processRef.pid) : undefined;
+			// The bare-pid unique-id query is only trusted if the same incarnation
+			// holds on both sides of it; otherwise a pid reused after the record was
+			// authenticated would seed the replacement's ancestry as owned.
+			let identity: { uniqueId: bigint; parentUniqueId: bigint } | undefined;
+			if (signedUniqueId === undefined) {
+				const queried = uniqueIdentity(processRef.pid);
+				if (Process.fromPid(processRef.pid)?.incarnation !== processRef.incarnation) {
+					// Exited (or reused) since authentication: retain nothing new.
+					return true;
+				}
+				identity = queried;
+			}
 			const uniqueId = signedUniqueId ?? identity?.uniqueId;
 			if (uniqueId === undefined) {
 				// Incarnation-only record: the child has no unique id to anchor the

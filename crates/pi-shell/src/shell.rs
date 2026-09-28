@@ -121,13 +121,18 @@ impl ExternalProcessObserver for CommandProcessObserver {
 			#[cfg(not(target_os = "macos"))]
 			let pid_released = false;
 			let Some(incarnation) = incarnation else {
+				let mut targets = self.targets.lock().expect("process target lock poisoned");
 				if !pid_released {
-					self
-						.targets
-						.lock()
-						.expect("process target lock poisoned")
-						.add_pid(pid);
+					targets.add_pid(pid);
 				}
+				// A reaped leader leaves only a numeric PGID, which cleanup does not
+				// treat as authority. Capture identity-bound references for the
+				// group's surviving members now so cancellation can still reach them.
+				#[cfg(unix)]
+				if let Some(pgid) = process_group_id {
+					process::add_process_group_members(&mut targets, pgid);
+				}
+				drop(targets);
 				if let Some(pgid) = process_group_id {
 					self
 						.process_group_id
