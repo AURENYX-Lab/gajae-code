@@ -113,6 +113,15 @@ async function parseHashlineSection(
 		return parseHashlineWithWarnings(diff);
 	} catch (err) {
 		if (err instanceof HashlineMissingLineError) {
+			// When part of a range has a missing hash, suppress the "Did you mean" suggestion
+			// and require the full range to be re-supplied.
+			if (err.rangeRaw) {
+				throw new Error(
+					`Anchor "${err.hash}" lacks its line number. The range ${err.rangeRaw.start}..${err.rangeRaw.end} is incomplete. ` +
+						`Expected ${formatFullAnchorRequirement(err.hash)} Re-read the target to get the full range. ` +
+						`The edit was NOT applied.`,
+				);
+			}
 			const source = await readHashlineFile(absolutePath, pathText);
 			const fileLines = source.exists ? normalizeToLF(stripBom(source.rawContent).text).split("\n") : [];
 			let matchCount = 0;
@@ -127,11 +136,19 @@ async function parseHashlineSection(
 				throw new Error(`${suggestion.message} The edit was NOT applied.`);
 			}
 			throw new Error(
-				`${err.message} ${formatFullAnchorRequirement(err.hash)} ` +
+				`${err.message} Expected ${formatFullAnchorRequirement(err.hash)} ` +
 					`The hash matches ${matchCount} lines; re-read the target. The edit was NOT applied.`,
 			);
 		}
 		if (!(err instanceof HashlineMissingHashError)) throw err;
+		// When part of a range has a missing hash, suppress the copy-ready suggestion
+		// and require re-reading to get the full range.
+		if (err.rangeRaw) {
+			throw new Error(
+				`${err.message} The anchors are missing from the range ${err.rangeRaw.start}..${err.rangeRaw.end}. ` +
+					`Re-read the target to get the full range with hashes. The edit was NOT applied.`,
+			);
+		}
 		const source = await readHashlineFile(absolutePath, pathText);
 		if (!source.exists) throw err;
 		const fileLines = normalizeToLF(stripBom(source.rawContent).text).split("\n");

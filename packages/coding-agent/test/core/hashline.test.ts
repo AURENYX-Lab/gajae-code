@@ -636,6 +636,78 @@ describe("hashline — hash-less line references", () => {
 			await expect(run).rejects.toThrow("The edit was NOT applied. Line 40 does not exist (a.ts has 3 lines).");
 		});
 	});
+
+	it("rejects mixed range with hash on first endpoint only (≔22..23cd)", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const original = "line 1\nline 2\nline 3\n";
+			await Bun.write(filePath, original);
+
+			const message = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n≔22..23cd\n${pl("X")}\n`)),
+			);
+			// Should contain the full range in the error message, not just the bare endpoint
+			expect(message).toContain("22..23cd");
+			expect(message).toContain("missing");
+			// Should NOT have a copy-ready "Use" suggestion since one endpoint lacks a hash
+			expect(message).not.toMatch(/Use ≔\d+/);
+			// Should indicate the full range is missing anchors
+			expect(message).toContain("Re-read the target");
+			await expectFileBytesUnchanged(filePath, original);
+		});
+	});
+
+	it("rejects mixed range with hash on second endpoint only (≔ab..10cd)", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const original = "alpha\nbeta\n";
+			await Bun.write(filePath, original);
+
+			const message = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n≔ab..10cd\n${pl("X")}\n`)),
+			);
+			// Should contain the full range and a message about missing line numbers
+			expect(message).toContain("ab..10cd");
+			expect(message).toContain("lacks its line number");
+			// Should NOT have a copy-ready suggestion
+			expect(message).not.toMatch(/Did you mean ≔\d+ab/);
+			// Should indicate to re-read the target
+			expect(message).toContain("Re-read the target");
+			await expectFileBytesUnchanged(filePath, original);
+		});
+	});
+
+	it("rejects reversed mixed range (≔10cd..ab)", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const original = "first\nsecond\n";
+			await Bun.write(filePath, original);
+
+			const message = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n≔10cd..ab\n${pl("X")}\n`)),
+			);
+			expect(message).toContain("10cd..ab");
+			expect(message).toContain("lacks its line number");
+			expect(message).toContain("Re-read the target");
+			await expectFileBytesUnchanged(filePath, original);
+		});
+	});
+
+	it("rejects all-hash range (≔ab..cd)", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const original = "foo\nbar\n";
+			await Bun.write(filePath, original);
+
+			const message = await rejectionMessage(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, `§a.ts\n≔ab..cd\n${pl("X")}\n`)),
+			);
+			expect(message).toContain("ab..cd");
+			expect(message).toContain("lacks its line number");
+			expect(message).toContain("Re-read the target");
+			await expectFileBytesUnchanged(filePath, original);
+		});
+	});
 });
 
 describe("hashline — stale anchors", () => {

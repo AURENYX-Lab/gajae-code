@@ -34,6 +34,7 @@ export class HashlineMissingHashError extends Error {
 		message: string,
 		readonly lines: { start: number; end: number },
 		readonly opSigil: HashlineOpSigil,
+		readonly rangeRaw?: { start: string; end: string },
 	) {
 		super(message);
 		this.name = "HashlineMissingHashError";
@@ -45,6 +46,7 @@ export class HashlineMissingLineError extends Error {
 		readonly hash: string,
 		readonly lineNum: number | undefined,
 		readonly opSigil: HashlineOpSigil,
+		readonly rangeRaw?: { start: string; end: string },
 	) {
 		super(
 			lineNum === undefined
@@ -98,8 +100,30 @@ function parseRange(raw: string, lineNum: number, opSigil: HashlineOpSigil): Par
 				`For a one-line edit, repeat the same anchor on both sides.`,
 		);
 	}
-	const start = parseLid(startRaw, lineNum, opSigil);
-	const end = parseLid(endRaw, lineNum, opSigil);
+	let start: Anchor;
+	try {
+		start = parseLid(startRaw, lineNum, opSigil);
+	} catch (err) {
+		if (err instanceof HashlineMissingHashError) {
+			throw new HashlineMissingHashError(err.message, err.lines, err.opSigil, { start: startRaw, end: endRaw });
+		}
+		if (err instanceof HashlineMissingLineError) {
+			throw new HashlineMissingLineError(err.hash, err.lineNum, err.opSigil, { start: startRaw, end: endRaw });
+		}
+		throw err;
+	}
+	let end: Anchor;
+	try {
+		end = parseLid(endRaw, lineNum, opSigil);
+	} catch (err) {
+		if (err instanceof HashlineMissingHashError) {
+			throw new HashlineMissingHashError(err.message, err.lines, err.opSigil, { start: startRaw, end: endRaw });
+		}
+		if (err instanceof HashlineMissingLineError) {
+			throw new HashlineMissingLineError(err.hash, err.lineNum, err.opSigil, { start: startRaw, end: endRaw });
+		}
+		throw err;
+	}
 	if (end.line < start.line) {
 		throw new Error(`line ${lineNum}: range ${startRaw}..${endRaw} ends before it starts.`);
 	}
