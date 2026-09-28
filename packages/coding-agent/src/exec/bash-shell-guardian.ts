@@ -186,13 +186,28 @@ export function createDarwinAncestryTracker(
 			return { uniqueId: view.getBigUint64(16, true), parentUniqueId: view.getBigUint64(24, true) };
 		};
 		const uniqueIdentity = uniqueIdentityFn ?? defaultUniqueIdentity;
+		const incarnationOnlyAnchors: NativeProcess[] = [];
+		const seedAnchorDescendants = (anchor: NativeProcess): void => {
+			const pending = [...anchor.children()];
+			while (pending.length > 0) {
+				const child = pending.pop()!;
+				retainOwnedProcess(owned, child);
+				const childId = uniqueIdentity(child.pid)?.uniqueId;
+				if (childId !== undefined) knownUniqueIds.add(childId);
+				pending.push(...child.children());
+			}
+		};
 		const track = (processRef: NativeProcess, signedUniqueId?: bigint): boolean => {
 			const identity = signedUniqueId === undefined ? uniqueIdentity(processRef.pid) : undefined;
 			const uniqueId = signedUniqueId ?? identity?.uniqueId;
 			if (uniqueId === undefined) {
-				// When no unique id is available (incarnation-only record), retain the process anyway
-				// so scanOwnership doesn't fail and the periodic timer doesn't SIGKILL the supervisor.
+				// Incarnation-only record: the child has no unique id to anchor the
+				// ancestry graph. Keep it as an anchor whose live descendants poll()
+				// seeds by unique id, so their subtrees stay tracked after the child
+				// exits and they reparent (PPID discovery alone would lose them).
 				retainOwnedProcess(owned, processRef);
+				incarnationOnlyAnchors.push(processRef);
+				seedAnchorDescendants(processRef);
 				return true;
 			}
 			knownUniqueIds.add(uniqueId);
@@ -215,6 +230,7 @@ export function createDarwinAncestryTracker(
 			track,
 			trackGuardian,
 			poll() {
+				for (const anchor of incarnationOnlyAnchors) seedAnchorDescendants(anchor);
 				const capacity = proc.symbols.proc_listallpids(null, 0);
 				if (capacity <= 0) return false;
 				const pids = new Int32Array(capacity + 64);

@@ -70,24 +70,25 @@ struct OwnershipLedger {
 
 /// Optional Darwin evidence may be unavailable, but an incarnation must never
 /// be invented. A changed incarnation means the original child has exited.
+/// A later `Present` is only accepted when it matches the incarnation pinned at
+/// spawn: without a pin, the PID may already belong to an unrelated process
+/// that reused it, and signing or targeting that occupant is unsafe.
 #[cfg(any(target_os = "macos", test))]
 fn observed_spawn_incarnation(
 	incarnation: Option<String>,
 	observation: process::ProcessObservation,
 ) -> Result<Option<String>, ()> {
-	match observation {
-		process::ProcessObservation::Absent => Ok(None),
-		process::ProcessObservation::Present { incarnation: observed } => {
-			if incarnation
-				.as_ref()
-				.is_some_and(|pinned| pinned != &observed)
-			{
-				Ok(None)
+	match (incarnation, observation) {
+		(_, process::ProcessObservation::Absent) => Ok(None),
+		(Some(pinned), process::ProcessObservation::Present { incarnation: observed }) => {
+			if pinned == observed {
+				Ok(Some(pinned))
 			} else {
-				Ok(Some(observed))
+				Ok(None)
 			}
 		},
-		process::ProcessObservation::Unknown { .. } => incarnation.map(Some).ok_or(()),
+		(None, process::ProcessObservation::Present { .. }) => Err(()),
+		(pinned, process::ProcessObservation::Unknown { .. }) => pinned.map(Some).ok_or(()),
 	}
 }
 
@@ -2286,7 +2287,9 @@ mod tests {
 		let unknown = || Unknown { reason_code: "identity_unavailable".to_owned() };
 		assert_eq!(observed_spawn_incarnation(None, Absent), Ok(None));
 		assert_eq!(observed_spawn_incarnation(pinned(), Absent), Ok(None));
-		assert_eq!(observed_spawn_incarnation(None, present()), Ok(pinned()));
+		// No incarnation pinned at spawn: a later occupant of the PID must not be
+		// adopted as the spawned child.
+		assert_eq!(observed_spawn_incarnation(None, present()), Err(()));
 		assert_eq!(observed_spawn_incarnation(pinned(), present()), Ok(pinned()));
 		assert_eq!(observed_spawn_incarnation(pinned(), unknown()), Ok(pinned()));
 		assert_eq!(observed_spawn_incarnation(None, unknown()), Err(()));
