@@ -1,6 +1,7 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as childProcess from "node:child_process";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { type FSWatcher, watch } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -222,6 +223,10 @@ export function createDarwinAncestryTracker(
 				// ancestry graph. Keep it as an anchor whose live descendants poll()
 				// seeds by unique id, so their subtrees stay tracked after the child
 				// exits and they reparent (PPID discovery alone would lose them).
+				// Residual gap (accepted over #6085's exit 70): if the child forks a
+				// descendant that leaves the supervisor process group, then exits before
+				// this record is scanned, nothing links that descendant back to us. The
+				// ledger watcher scans on append to keep that window minimal.
 				retainOwnedProcess(owned, processRef);
 				incarnationOnlyAnchors.push(processRef);
 				seedAnchorDescendants(processRef);
@@ -388,28 +393,48 @@ export async function runBashShellGuardian(): Promise<void> {
 		return ownershipScan;
 	};
 	let periodicScanActive = false;
-	const ownershipScanTimer = darwinTracker
-		? setInterval(() => {
-				if (periodicScanActive) return;
-				periodicScanActive = true;
-				void scanOwnership()
-					.then(ok => {
-						if (ok || supervisor.exitCode !== null || supervisor.signalCode !== null) return;
-						if (supervisor.pid) {
-							try {
-								process.kill(-supervisor.pid, "SIGKILL");
-							} catch {}
-						}
-						supervisor.kill("SIGKILL");
-					})
-					.finally(() => {
-						periodicScanActive = false;
-					});
-			}, 100)
-		: undefined;
+	let periodicScanRequested = false;
+	const runPeriodicScan = (): void => {
+		if (periodicScanActive) {
+			periodicScanRequested = true;
+			return;
+		}
+		periodicScanActive = true;
+		void scanOwnership()
+			.then(ok => {
+				if (ok || supervisor.exitCode !== null || supervisor.signalCode !== null) return;
+				if (supervisor.pid) {
+					try {
+						process.kill(-supervisor.pid, "SIGKILL");
+					} catch {}
+				}
+				supervisor.kill("SIGKILL");
+			})
+			.finally(() => {
+				periodicScanActive = false;
+				if (periodicScanRequested && !cleaning) {
+					periodicScanRequested = false;
+					runPeriodicScan();
+				}
+			});
+	};
+	const ownershipScanTimer = darwinTracker ? setInterval(runPeriodicScan, 100) : undefined;
+	// Scan as soon as the supervisor appends a ledger record instead of waiting
+	// for the next tick. An incarnation-only record's descendants are only
+	// reachable while that child is alive, so the anchor must be taken promptly.
+	let ledgerWatcher: FSWatcher | undefined;
+	if (darwinTracker) {
+		try {
+			ledgerWatcher = watch(ownershipFilePath, runPeriodicScan);
+			ledgerWatcher.on("error", () => {});
+		} catch {
+			ledgerWatcher = undefined;
+		}
+	}
 	const cleanup = (): Promise<void> => {
 		cleaning ??= (async () => {
 			if (ownershipScanTimer) clearInterval(ownershipScanTimer);
+			ledgerWatcher?.close();
 			let trackingOk = await scanOwnership();
 			if (supervisor.exitCode === null && supervisor.signalCode === null) {
 				if (process.platform !== "win32" && supervisor.pid) {
