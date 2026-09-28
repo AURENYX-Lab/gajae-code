@@ -275,13 +275,11 @@ export function isRetryableStatus(status: number): boolean {
  * proxies surface these for any HTTP/2 stream reset.
  */
 export function isUnexpectedSocketCloseMessage(message: string): boolean {
-	return /\bclosed unexpectedly\b|\bsocket (?:was )?closed\b|\bsocket connection (?:was )?closed unexpectedly\b/i.test(
-		message,
-	);
+	return /\b(?:the\s+)?socket connection (?:was )?closed unexpectedly\b/i.test(message);
 }
 
 const TRANSIENT_MESSAGE_PATTERN =
-	/overloaded|rate.?limit|too many requests|service.?unavailable|server error|internal error|connection.?(?:error|refused|reset|closed|aborted)|unable to connect|fetch failed|network error|stream stall|other side closed/i;
+	/overloaded|rate.?limit|too many requests|service.?unavailable|server error|internal error|connection.?error|unable to connect|fetch failed|network error|stream stall|other side closed/i;
 
 const VALIDATION_MESSAGE_PATTERN =
 	/invalid|validation|bad request|unsupported|schema|missing required|not found|unauthorized|forbidden/i;

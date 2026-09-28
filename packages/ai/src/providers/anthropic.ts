@@ -1764,6 +1764,23 @@ function isTransientStreamEnvelopeError(error: unknown): boolean {
 	);
 }
 
+/**
+ * A request whose connection failed before the server returned any response:
+ * the SDK's connection error, or a reset/closed/refused socket with no HTTP status.
+ */
+function isPreResponseConnectionFailure(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	if (extractHttpStatusFromError(error) !== undefined) return false;
+	if (error instanceof Anthropic.APIConnectionTimeoutError) return false;
+	if (error instanceof Anthropic.APIConnectionError) return true;
+	const code = (error as { code?: unknown }).code;
+	if (typeof code === "string" && /^(?:ECONNRESET|ECONNREFUSED|EPIPE|ENOTFOUND|EAI_AGAIN)$/.test(code)) return true;
+	return (
+		isUnexpectedSocketCloseMessage(error.message) ||
+		/\b(?:ECONNRESET|ECONNREFUSED|EPIPE)\b|^connection error\.?$|other side closed/i.test(error.message)
+	);
+}
+
 function isProviderRetryableStreamEnvelopeError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	return /stream event order|before message_start/i.test(error.message);
@@ -2667,21 +2684,19 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 					});
 					// A ceiling-bound upload failed before stream iteration began (for
 					// example an immediate 529 from withResponse()): the grace clock
-					// never started, so the facts above cannot apply. However, we must
-					// distinguish between:
-					// 1. Transport failures (ECONNRESET, socket closed, connection refused)
-					//    that should be retried normally with standard retry logic
-					// 2. Actual timeout failures that occurred during the first-event window
-					//    which should have a one-attempt ceiling to avoid re-uploading
-					//    the large body after the server has already stalled
-					// Only apply the ceiling to genuine first-event timeout errors,
-					// not to transport-class failures that occur before any response.
-					const isTimeoutError =
-						streamFailure instanceof FirstEventTimeoutError ||
-						/timed?\s*out|timeout|first event/i.test(
-							streamFailure instanceof Error ? streamFailure.message : String(streamFailure),
-						);
-					if (requestUploadCeilingBound && firstEventWaitStartedAt === undefined && isTimeoutError) {
+					// never started, so the facts above cannot apply, but the one-attempt
+					// upload ceiling must still bound the outer provider retry loop.
+					// Otherwise the multi-megabyte body is re-uploaded up to the default
+					// streamMaxRetries budget despite the ceiling. Once iteration has
+					// begun, only the grace-clock path above decides.
+					// A connection that dropped before any response (reset, socket closed,
+					// connect failure) is exempt: the server never answered, so a retry is
+					// not a re-upload after a stall, and a network blip must not end the turn.
+					if (
+						requestUploadCeilingBound &&
+						firstEventWaitStartedAt === undefined &&
+						!isPreResponseConnectionFailure(streamFailure)
+					) {
 						Object.assign(streamFailure as Error, {
 							requestBytes,
 							endpointClass,
