@@ -2667,12 +2667,21 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 					});
 					// A ceiling-bound upload failed before stream iteration began (for
 					// example an immediate 529 from withResponse()): the grace clock
-					// never started, so the facts above cannot apply, but the one-attempt
-					// upload ceiling must still bound the outer provider retry loop.
-					// Otherwise the multi-megabyte body is re-uploaded up to the default
-					// streamMaxRetries budget despite the ceiling. Once iteration has
-					// begun, only the grace-clock path above decides.
-					if (requestUploadCeilingBound && firstEventWaitStartedAt === undefined) {
+					// never started, so the facts above cannot apply. However, we must
+					// distinguish between:
+					// 1. Transport failures (ECONNRESET, socket closed, connection refused)
+					//    that should be retried normally with standard retry logic
+					// 2. Actual timeout failures that occurred during the first-event window
+					//    which should have a one-attempt ceiling to avoid re-uploading
+					//    the large body after the server has already stalled
+					// Only apply the ceiling to genuine first-event timeout errors,
+					// not to transport-class failures that occur before any response.
+					const isTimeoutError =
+						streamFailure instanceof FirstEventTimeoutError ||
+						/timed?\s*out|timeout|first event/i.test(
+							streamFailure instanceof Error ? streamFailure.message : String(streamFailure),
+						);
+					if (requestUploadCeilingBound && firstEventWaitStartedAt === undefined && isTimeoutError) {
 						Object.assign(streamFailure as Error, {
 							requestBytes,
 							endpointClass,
