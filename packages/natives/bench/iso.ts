@@ -34,6 +34,8 @@ function validateOptionalReason(reason: unknown): void {
 	}
 }
 
+const PROBE_BATCH = 1000;
+
 const cases = [
 	{
 		id: "I01",
@@ -52,15 +54,24 @@ const cases = [
 		},
 	},
 	{
+		// I02: PROBE_BATCH Rcopy probes per sample. The default backend can shell
+		// out (Linux falls back to `fuse-overlayfs --version`), which a batch would
+		// multiply into millions of launches; the Rcopy probe is pure on every OS
+		// and exercises the same napi probe path.
 		id: "I02",
-		run: async () => {
-			const result = await isoProbe();
-			if (!result || typeof result !== "object") throw new Error("isoProbe() returned no result object");
-			if (typeof result.available !== "boolean") throw new Error("isoProbe() returned invalid availability flag");
-			if (!isBackendKind(result.kind)) throw new Error(`isoProbe() returned invalid kind ${String(result.kind)}`);
-			validateOptionalReason(result.reason);
-			if (!result.available && (typeof result.reason !== "string" || result.reason.trim().length === 0)) {
-				throw new Error("isoProbe() reported an unavailable backend without a reason");
+		run: () => {
+			// One probe is ~0.1us, below timer/await noise; a batch makes the
+			// sample measure the native call rather than the harness. The binding
+			// is synchronous, so the loop calls it directly and checks every result.
+			for (let i = 0; i < PROBE_BATCH; i++) {
+				const result = isoProbe(IsoBackendKind.Rcopy);
+				if (!result || typeof result !== "object") throw new Error("isoProbe() returned no result object");
+				if (typeof result.available !== "boolean") throw new Error("isoProbe() returned invalid availability flag");
+				if (result.kind !== IsoBackendKind.Rcopy) throw new Error(`isoProbe(Rcopy) returned kind ${String(result.kind)}`);
+				validateOptionalReason(result.reason);
+				if (!result.available && (typeof result.reason !== "string" || result.reason.trim().length === 0)) {
+					throw new Error("isoProbe() reported an unavailable backend without a reason");
+				}
 			}
 		},
 	},
