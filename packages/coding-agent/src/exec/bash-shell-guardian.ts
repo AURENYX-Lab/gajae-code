@@ -156,14 +156,18 @@ function findDarwinLedgerHolders(device: number, inode: bigint): NativeProcess[]
 	}
 }
 
-type DarwinAncestryTracker = {
+export type DarwinAncestryTracker = {
 	seed(uniqueId: bigint): void;
 	track(processRef: NativeProcess, uniqueId?: bigint): boolean;
+	trackGuardian(processRef: NativeProcess, uniqueId?: bigint): boolean;
 	poll(): boolean;
 	close(): void;
 };
 
-function createDarwinAncestryTracker(owned: Map<string, NativeProcess>): DarwinAncestryTracker | undefined {
+export function createDarwinAncestryTracker(
+	owned: Map<string, NativeProcess>,
+	uniqueIdentityFn?: (pid: number) => { uniqueId: bigint; parentUniqueId: bigint } | undefined,
+): DarwinAncestryTracker | undefined {
 	if (process.platform !== "darwin") return undefined;
 	try {
 		const proc = dlopen("/usr/lib/libproc.dylib", {
@@ -175,15 +179,30 @@ function createDarwinAncestryTracker(owned: Map<string, NativeProcess>): DarwinA
 		});
 		const knownUniqueIds = new Set<bigint>();
 		const { Process } = require("@gajae-code/natives") as NativeProcessBindings;
-		const uniqueIdentity = (pid: number): { uniqueId: bigint; parentUniqueId: bigint } | undefined => {
+		const defaultUniqueIdentity = (pid: number): { uniqueId: bigint; parentUniqueId: bigint } | undefined => {
 			const info = new Uint8Array(56);
 			if (proc.symbols.proc_pidinfo(pid, 17, 0, ptr(info), info.byteLength) !== info.byteLength) return undefined;
 			const view = new DataView(info.buffer);
 			return { uniqueId: view.getBigUint64(16, true), parentUniqueId: view.getBigUint64(24, true) };
 		};
+		const uniqueIdentity = uniqueIdentityFn ?? defaultUniqueIdentity;
 		const track = (processRef: NativeProcess, signedUniqueId?: bigint): boolean => {
 			const identity = signedUniqueId === undefined ? uniqueIdentity(processRef.pid) : undefined;
 			const uniqueId = signedUniqueId ?? identity?.uniqueId;
+			if (uniqueId === undefined) {
+				// When no unique id is available (incarnation-only record), retain the process anyway
+				// so scanOwnership doesn't fail and the periodic timer doesn't SIGKILL the supervisor.
+				retainOwnedProcess(owned, processRef);
+				return true;
+			}
+			knownUniqueIds.add(uniqueId);
+			retainOwnedProcess(owned, processRef);
+			return true;
+		};
+		const trackGuardian = (processRef: NativeProcess, signedUniqueId?: bigint): boolean => {
+			const identity = signedUniqueId === undefined ? uniqueIdentity(processRef.pid) : undefined;
+			const uniqueId = signedUniqueId ?? identity?.uniqueId;
+			// Guardian registration is strict: must have a unique id
 			if (uniqueId === undefined) return false;
 			knownUniqueIds.add(uniqueId);
 			retainOwnedProcess(owned, processRef);
@@ -194,6 +213,7 @@ function createDarwinAncestryTracker(owned: Map<string, NativeProcess>): DarwinA
 				knownUniqueIds.add(uniqueId);
 			},
 			track,
+			trackGuardian,
 			poll() {
 				const capacity = proc.symbols.proc_listallpids(null, 0);
 				if (capacity <= 0) return false;
@@ -258,7 +278,7 @@ export async function runBashShellGuardian(): Promise<void> {
 	if (darwinTracker) {
 		const { Process } = require("@gajae-code/natives") as NativeProcessBindings;
 		const guardian = Process.fromPid(process.pid);
-		if (!guardian || !darwinTracker.track(guardian)) {
+		if (!guardian || !darwinTracker.trackGuardian(guardian)) {
 			darwinTracker.close();
 			await ledger.close();
 			await fs.rm(ownershipFilePath, { force: true });
