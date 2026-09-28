@@ -9,11 +9,12 @@ const cases = [
 	{
 		// A01: DETECT_BATCH appearance queries per sample.
 		id: "A01",
-		run: async () => {
-			let appearance: unknown = await native.detectMacOSAppearance();
-			for (let i = 1; i < DETECT_BATCH; i++) appearance = await native.detectMacOSAppearance();
-			if (appearance !== null && appearance !== undefined && appearance !== "dark" && appearance !== "light") {
-				throw new Error(`Unexpected macOS appearance: ${String(appearance)}`);
+		run: () => {
+			for (let i = 0; i < DETECT_BATCH; i++) {
+				const appearance: unknown = native.detectMacOSAppearance();
+				if (appearance !== null && appearance !== undefined && appearance !== "dark" && appearance !== "light") {
+					throw new Error(`Unexpected macOS appearance: ${String(appearance)}`);
+				}
 			}
 		},
 	},
