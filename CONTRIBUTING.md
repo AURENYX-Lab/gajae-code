@@ -87,8 +87,4 @@ The `CI` workflow publishes a scheduled nightly prerelease from `main` at 04:23 
 
 Merges to `dev` require one approving GitHub review from a write-access maintainer on the exact current head. This is enforced by the repository's native GitHub ruleset.
 
-For an agent verdict or owner self-approval, compute the digest after the final commit and rebase with:
-
-
-
 Metadata-only PR edits must not manufacture successful required checks by skipping the aggregate jobs. Dev CI validates those events through real code-validation jobs; separate metadata concurrency preserves an already-running code-validation run. Pending, failed, cancelled, or missing dependency evidence cannot satisfy the aggregate. State-gate relevance is decided before native provisioning, with runtime prompt Markdown in dependency workspaces treated as executable input rather than documentation.

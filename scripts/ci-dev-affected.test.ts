@@ -144,12 +144,12 @@ describe("dev-ci canonical-plan workflow contract", () => {
 		}
 	});
 
-	test("skips code-validation roots for metadata edits while retaining the contract", async () => {
+	test("skips code-validation roots for metadata-only edits", async () => {
 		const workflow = await Bun.file(path.join(import.meta.dir, "..", ".github", "workflows", "dev-ci.yml")).text();
-		// `edited` must stay in the trigger list: the verdict line lives in the PR
-		// body, so `pr-contract-bootstrap` has to re-check it on every body change.
+		// `edited` stays in the trigger list because retargeting a PR to another base
+		// is an `edited` event that must re-validate; body/title-only edits are skipped below.
 		expect(workflow).toContain("types: [opened, edited, synchronize, reopened, ready_for_review]");
-		expect(workflow).toContain("  pr-contract-bootstrap:\n    name: PR contract bootstrap\n    if: ${{ github.event_name == 'pull_request' }}");
+		expect(workflow).not.toContain("pr-contract-bootstrap:");
 
 		// Every job that validates code must opt out of a metadata-only edit.
 		// Metadata changes no tree, so running them re-queues an identical matrix and
