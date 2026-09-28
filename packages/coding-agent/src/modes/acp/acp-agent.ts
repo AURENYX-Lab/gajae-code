@@ -1139,6 +1139,15 @@ function frameMessageRole(event: JsonObject | undefined): string | undefined {
 	return typeof role === "string" ? role : undefined;
 }
 
+function frameMessageHasToolCall(event: JsonObject | undefined): boolean {
+	const content = object(event?.message)?.content;
+	if (!Array.isArray(content)) return false;
+	return content.some(block => {
+		const value = object(block);
+		return value?.type === "toolCall" || value?.type === "tool_use";
+	});
+}
+
 const ACP_CONFIG_OPTIONS = [
 	{ id: MODEL_CONFIG_ID, name: "Model", category: "model", options: [] },
 	{ id: THINKING_CONFIG_ID, name: "Thinking", category: "thought_level", options: [] },
@@ -4229,6 +4238,7 @@ export class AcpAgent implements Agent {
 			typeof event?.type === "string" ? event.type : undefined,
 			typeof event?.toolCallId === "string" ? event.toolCallId : undefined,
 			frameMessageRole(event),
+			frameMessageHasToolCall(event),
 		);
 	}
 
