@@ -173,6 +173,47 @@
       ]
     },
     {
+      "suite": "clipboard",
+      "verdict": "PASS",
+      "baseSha": "01511ffd5f9ab55111ce7300a20449fd626f6112",
+      "headSha": "f7aaeb741b08b920cd060b2889f8d83be3262c78",
+      "host": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "bun": "1.4.0",
+        "loadAverage1m": 2.30029296875,
+        "physicalCores": 18
+      },
+      "adapter": {
+        "path": "packages/natives/bench/clipboard.ts",
+        "sha256": "3ace5bbc57119f9cd9b04d5d5abb5a6b0692f410454104978a75fd52fcd0508f"
+      },
+      "rounds": [
+        {
+          "blocks": 15,
+          "verdict": "INCONCLUSIVE"
+        },
+        {
+          "blocks": 30,
+          "verdict": "PASS"
+        }
+      ],
+      "cases": [
+        {
+          "id": "C01",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9911190717584769,
+            "upper": 1.0067748363222317
+          },
+          "p95": {
+            "lower": 0.9503068651745733,
+            "upper": 1.0596570582260492
+          }
+        }
+      ]
+    },
+    {
       "suite": "crash",
       "verdict": "PASS",
       "baseSha": "01511ffd5f9ab55111ce7300a20449fd626f6112",
