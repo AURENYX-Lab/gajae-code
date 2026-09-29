@@ -97,10 +97,10 @@ gjc stats --summary
 
 ### JSON output for scripting
 
-`gjc stats --json` prints a `Synced N new entries ...` status line and a blank line on stdout before the JSON object (sync progress goes to stderr). Skip to the first line that opens the object before piping into `jq`:
+With `--json`, stdout carries only the JSON document; the sync progress and the `Synced N new entries ...` summary go to stderr.
 
 ```bash
-gjc stats --json | sed -n '/^{/,$p' | jq '.overall.totalCost'
+gjc stats --json | jq '.overall.totalCost'
 ```
 
 ### Dashboard on a custom port
