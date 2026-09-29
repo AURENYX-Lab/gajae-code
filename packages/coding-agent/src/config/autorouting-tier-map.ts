@@ -77,11 +77,21 @@ export const CURATED_TIER_LABELS = {
 /** Generated from packages/ai/src/models.json at feature land: 3936 in-scope baseline skips. */
 export const TIER_MAP_SKIP_LIST = {
 	"amazon-bedrock/anthropic.claude-sonnet-5-5": { rationale: "Sonnet 5.5 catalog addition (#6111); not yet curated" },
-	"amazon-bedrock/au.anthropic.claude-sonnet-5-5": { rationale: "Sonnet 5.5 catalog addition (#6111); not yet curated" },
-	"amazon-bedrock/eu.anthropic.claude-sonnet-5-5": { rationale: "Sonnet 5.5 catalog addition (#6111); not yet curated" },
-	"amazon-bedrock/global.anthropic.claude-sonnet-5-5": { rationale: "Sonnet 5.5 catalog addition (#6111); not yet curated" },
-	"amazon-bedrock/jp.anthropic.claude-sonnet-5-5": { rationale: "Sonnet 5.5 catalog addition (#6111); not yet curated" },
-	"amazon-bedrock/us.anthropic.claude-sonnet-5-5": { rationale: "Sonnet 5.5 catalog addition (#6111); not yet curated" },
+	"amazon-bedrock/au.anthropic.claude-sonnet-5-5": {
+		rationale: "Sonnet 5.5 catalog addition (#6111); not yet curated",
+	},
+	"amazon-bedrock/eu.anthropic.claude-sonnet-5-5": {
+		rationale: "Sonnet 5.5 catalog addition (#6111); not yet curated",
+	},
+	"amazon-bedrock/global.anthropic.claude-sonnet-5-5": {
+		rationale: "Sonnet 5.5 catalog addition (#6111); not yet curated",
+	},
+	"amazon-bedrock/jp.anthropic.claude-sonnet-5-5": {
+		rationale: "Sonnet 5.5 catalog addition (#6111); not yet curated",
+	},
+	"amazon-bedrock/us.anthropic.claude-sonnet-5-5": {
+		rationale: "Sonnet 5.5 catalog addition (#6111); not yet curated",
+	},
 	"kiro/claude-opus-5-5": { rationale: "post-rebase catalog addition from dev; not yet curated" },
 	"kiro/claude-opus-5.5": { rationale: "post-rebase catalog addition from dev; not yet curated" },
 	"alibaba-token-plan/qwen3.8-flash": { rationale: "post-rebase catalog addition from dev; not yet curated" },
