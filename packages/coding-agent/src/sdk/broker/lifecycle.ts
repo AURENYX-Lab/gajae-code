@@ -4849,7 +4849,7 @@ async function terminateSpawnedChild(
 	const unregisteredTerminationDeadlineAt =
 		processExitDeadlineAt - Math.max(POLL_MS, Math.floor((processExitDeadlineAt - terminationStartDeadlineAt) / 2));
 	const observe = (): ProcessObservation =>
-		child.exitCode !== null
+		child.exitCode !== null || child.signalCode !== null
 			? "exited"
 			: observeProcess(pid, incarnation, value => processIncarnationForBroker(broker, value));
 	let ownedExitObserved = child.exitCode !== null || child.signalCode !== null;
@@ -4859,10 +4859,8 @@ async function terminateSpawnedChild(
 		ownedExit.resolve();
 	};
 	child.once("exit", observeOwnedExit);
-	child.once("error", observeOwnedExit);
 	const cleanupOwnedExitListeners = (): void => {
 		child.removeListener("exit", observeOwnedExit);
-		child.removeListener("error", observeOwnedExit);
 	};
 	try {
 		const waitForExit = async (until: number): Promise<ProcessObservation> => {
@@ -4961,7 +4959,15 @@ async function terminateSpawnedChild(
 						proofBudget,
 					);
 					const endpointGone = await endpointRemoved(root, id);
-					if (artifactsRemoved && endpointGone && lifecycleProofWithinDeadline(proofBudget)) return true;
+					// A signal-delivery error can be emitted while the child still runs. Recheck
+					// exact process absence after cleanup before reporting a proven reap.
+					if (
+						artifactsRemoved &&
+						endpointGone &&
+						(observe() === "exited" || ownedExitObserved) &&
+						lifecycleProofWithinDeadline(proofBudget)
+					)
+						return true;
 					return failClosed();
 				}
 			}

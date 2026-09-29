@@ -8861,6 +8861,109 @@ setInterval(() => {}, 1_000_000);
 	}
 }, 10_000);
 
+test("unregistered cutoff retains artifacts when child signal error does not prove exit", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-signal-error-cutoff-"));
+	const agentDir = path.join(root, "agent");
+	const fixture = path.join(root, "signal-error-cutoff.ts");
+	const pidPath = path.join(root, "child.pid");
+	const requestPath = path.join(root, "child.request.json");
+	const deadlines = deriveLifecycleDeadlines(1_000, 4_000);
+	let nowMs = deadlines.receivedAt;
+	let childPid: number | undefined;
+	let receiptPublished = false;
+	let signalErrors = 0;
+	const broker = new Broker({ agentDir });
+	await fs.writeFile(
+		fixture,
+		`await Bun.write(${JSON.stringify(pidPath)}, String(process.pid));
+await Bun.write(${JSON.stringify(requestPath)}, process.env.GJC_SDK_LIFECYCLE_REQUEST ?? "");
+setInterval(() => {}, 1_000_000);
+`,
+	);
+	setLifecycleCommandResolverForTest(broker, () => ({ file: process.execPath, args: ["run", fixture] }));
+	setLifecycleTimingForTest(broker, {
+		now: () => nowMs,
+		sleep: async ms => {
+			if (!(await Bun.file(requestPath).exists())) {
+				await Bun.sleep(1);
+				return;
+			}
+			childPid ??= Number(await fs.readFile(pidPath, "utf8"));
+			nowMs += ms;
+			if (!receiptPublished && nowMs >= deadlines.terminationStartDeadlineAt - 100) {
+				const request = JSON.parse(await fs.readFile(requestPath, "utf8")) as {
+					sessionId: string;
+					stateRoot: string;
+					effectMarker: string;
+				};
+				const incarnation = processIncarnation(childPid);
+				if (!incarnation) throw new Error("Expected a readable child process incarnation.");
+				await writeSessionLifecycleFailure(
+					request.stateRoot,
+					request.sessionId,
+					request.effectMarker,
+					{ phase: "startup", reason: "pending", message: "incomplete cutoff receipt" },
+					{
+						endpointGeneration: null,
+						fenced: false,
+						runtimeRemoved: false,
+						hostStopped: false,
+						brokerRegistrationReleased: false,
+					},
+					undefined,
+					incarnation,
+					childPid,
+				);
+				receiptPublished = true;
+			}
+			await Bun.sleep(1);
+		},
+	});
+	const killSpy = vi.spyOn(ChildProcess.prototype, "kill").mockImplementation(function (this: ChildProcess) {
+		if (this.pid === childPid) {
+			signalErrors++;
+			this.emit("error", new Error("synthetic signal delivery failure"));
+			return true;
+		}
+		return false;
+	});
+	try {
+		await broker.start();
+		const response = await broker.handleRequest(
+			"session.create",
+			{ cwd: root, readinessTimeoutMs: deadlines.requestedReadinessTimeoutMs },
+			"signal-error-cutoff",
+		);
+		const request = JSON.parse(await fs.readFile(requestPath, "utf8")) as {
+			sessionId: string;
+			stateRoot: string;
+			effectMarker: string;
+		};
+		expect(receiptPublished).toBe(true);
+		expect(signalErrors).toBeGreaterThan(0);
+		expect(response).toMatchObject({ ok: false, error: { code: "terminal_uncertain" } });
+		await broker.index.refresh();
+		expect(broker.index.listSessions().sessions).toContainEqual(
+			expect.objectContaining({ sessionId: request.sessionId, pid: childPid, terminalUncertain: true }),
+		);
+		expect(() => process.kill(childPid!, 0)).not.toThrow();
+		await expect(
+			fs.access(path.join(request.stateRoot, "sdk", `${request.sessionId}.lifecycle.json`)),
+		).resolves.toBeNull();
+	} finally {
+		killSpy.mockRestore();
+		setLifecycleTimingForTest(broker, undefined);
+		setLifecycleCommandResolverForTest(broker, undefined);
+		if (childPid) {
+			try {
+				process.kill(childPid, "SIGKILL");
+			} catch {}
+		}
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 10_000);
+
 test("unregistered readiness cutoff reserves proof time after a delayed SIGKILL exit", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-unregistered-cutoff-"));
 	const agentDir = path.join(root, "agent");
