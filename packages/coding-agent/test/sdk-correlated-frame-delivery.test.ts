@@ -282,6 +282,108 @@ isolatedSdkHostTest("oversized non-text message_end does not fabricate assistant
 	expect(JSON.stringify(messageEnd)).not.toContain("[truncated]");
 });
 
+isolatedSdkHostTest("oversized message_end preserves aggregate text across multiple blocks", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-oversized-multi-text-"));
+	dirs.push(cwd);
+	const sessionId = `sdk-oversized-multi-text-${Date.now()}`;
+	const sessionContext = context(cwd, sessionId);
+	const handlers = start(sessionContext, () => new Promise<never>(() => {}) as never);
+	const { socket, frames } = await connect(cwd, sessionId);
+	socket.send(
+		JSON.stringify({
+			type: "control_request",
+			id: "oversized-multi-text",
+			operation: "turn.prompt",
+			input: { text: "stream" },
+		}),
+	);
+	await waitFor(
+		() => frames.some(frame => frame.type === "control_response" && frame.id === "oversized-multi-text"),
+		"prompt acknowledgement",
+	);
+	await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+	const textBlocks = Array.from({ length: 9 }, (_, index) => String.fromCharCode(97 + index).repeat(120_000));
+	const message = {
+		role: "assistant",
+		content: textBlocks.map(text => ({ type: "text", text })),
+	};
+	await handlers.get("message_end")?.({ type: "message_end", message }, sessionContext);
+	await waitFor(
+		() => frames.some(frame => frame.type === "event" && frame.kind === "message_end"),
+		"message_end",
+		2000,
+	);
+	const messageEnd = frames.find(frame => frame.type === "event" && frame.kind === "message_end");
+	expect(messageEnd).toBeDefined();
+	expect(Buffer.byteLength(JSON.stringify(messageEnd))).toBeLessThanOrEqual(RESPONSE_CEILING_BYTES);
+	const content = (
+		messageEnd?.payload as { event?: { message?: { content?: Array<{ type?: string; text?: string }> } } }
+	).event?.message?.content;
+	expect(content?.every(block => block.type === "text")).toBe(true);
+	const joinedText = content?.map(block => block.text ?? "").join("") ?? "";
+	expect(joinedText.length).toBeGreaterThan(8 * 120_000);
+	expect(joinedText).toBe(textBlocks.join("").slice(0, joinedText.length));
+	expect(content?.length).toBeGreaterThan(1);
+	const boundedMessage = (
+		messageEnd?.payload as { event?: { message?: { textTruncated?: boolean; omittedTextBlocks?: number } } }
+	).event?.message;
+	expect(boundedMessage?.textTruncated).toBe(true);
+	expect(boundedMessage?.omittedTextBlocks ?? 0).toBe(textBlocks.length - (content?.length ?? 0));
+	expect(JSON.stringify(messageEnd)).not.toContain("[truncated]");
+});
+
+isolatedSdkHostTest("oversized message_end keeps every text block when text fits", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-fitting-multi-text-"));
+	dirs.push(cwd);
+	const sessionId = `sdk-fitting-multi-text-${Date.now()}`;
+	const sessionContext = context(cwd, sessionId);
+	const handlers = start(sessionContext, () => new Promise<never>(() => {}) as never);
+	const { socket, frames } = await connect(cwd, sessionId);
+	socket.send(
+		JSON.stringify({
+			type: "control_request",
+			id: "fitting-multi-text",
+			operation: "turn.prompt",
+			input: { text: "stream" },
+		}),
+	);
+	await waitFor(
+		() => frames.some(frame => frame.type === "control_response" && frame.id === "fitting-multi-text"),
+		"prompt acknowledgement",
+	);
+	await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+	const textBlocks = ["one", "two", "three"];
+	const message = {
+		role: "assistant",
+		content: [
+			{ type: "image", data: "x".repeat(RESPONSE_CEILING_BYTES), mimeType: "image/png" },
+			...textBlocks.map(text => ({ type: "text", text })),
+		],
+	};
+	await handlers.get("message_end")?.({ type: "message_end", message }, sessionContext);
+	await waitFor(
+		() => frames.some(frame => frame.type === "event" && frame.kind === "message_end"),
+		"message_end",
+		2000,
+	);
+	const messageEnd = frames.find(frame => frame.type === "event" && frame.kind === "message_end");
+	expect(messageEnd).toBeDefined();
+	const boundedMessage = (
+		messageEnd?.payload as {
+			event?: {
+				message?: {
+					content?: Array<{ type?: string; text?: string }>;
+					textTruncated?: boolean;
+					omittedTextBlocks?: number;
+				};
+			};
+		}
+	).event?.message;
+	expect(boundedMessage?.content).toEqual(textBlocks.map(text => ({ type: "text", text })));
+	expect(boundedMessage?.textTruncated).toBeUndefined();
+	expect(boundedMessage?.omittedTextBlocks).toBeUndefined();
+});
+
 test("oversized agent_end preserves finalText truncation metadata", () => {
 	const agentEnd = boundedCorrelatedAgentEndFrame({
 		type: "agent_end",

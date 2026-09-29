@@ -5410,31 +5410,85 @@ export function createNotificationsExtension(
 					event?: { message?: { role?: string; content?: Array<{ type?: string; text?: string }> } };
 				};
 				const message = payload.event?.message;
-				const text = message?.content?.find(block => block.type === "text" && block.text)?.text;
-				const textTruncated = typeof text === "string" && text.length > RESPONSE_CEILING_BYTES / 8;
-				return [
-					{
-						...frame,
-						payload: {
-							event_type: "message_end",
-							event: {
-								type: "message_end",
-								message: {
-									role: message?.role ?? "assistant",
-									content:
-										typeof text === "string"
-											? [
-													{
-														type: "text",
-														text: textTruncated ? text.slice(0, RESPONSE_CEILING_BYTES / 8) : text,
-													},
-												]
-											: [],
-									...(textTruncated ? { textTruncated: true } : {}),
-								},
+				const textBlocks =
+					message?.content
+						?.filter(
+							(block): block is { type: "text"; text: string } =>
+								block.type === "text" && typeof block.text === "string",
+						)
+						.map(block => block.text) ?? [];
+				const makeMessageEndFrame = (
+					content: Array<{ type: "text"; text: string }>,
+					textTruncated?: true,
+					omittedTextBlocks?: number,
+				): Record<string, unknown> => ({
+					...frame,
+					payload: {
+						event_type: "message_end",
+						event: {
+							type: "message_end",
+							message: {
+								role: message?.role ?? "assistant",
+								content,
+								...(textTruncated ? { textTruncated } : {}),
+								...(omittedTextBlocks ? { omittedTextBlocks } : {}),
 							},
 						},
 					},
+				});
+				const fits = (candidate: Record<string, unknown>): boolean =>
+					Buffer.byteLength(JSON.stringify(candidate)) <= RESPONSE_CEILING_BYTES;
+				const content: Array<{ type: "text"; text: string }> = [];
+				let textTruncated = false;
+				let omittedTextBlocks = 0;
+				for (const [index, textBlock] of textBlocks.entries()) {
+					const wholeBlock = [...content, { type: "text" as const, text: textBlock }];
+					if (fits(makeMessageEndFrame(wholeBlock))) {
+						content.push({ type: "text", text: textBlock });
+						continue;
+					}
+					textTruncated = true;
+					const remainingTextBlocks = textBlocks.length - index;
+					let low = 1;
+					let high = textBlock.length + 1;
+					let bestEnd = 0;
+					while (low < high) {
+						const candidateLength = Math.floor((low + high) / 2);
+						let candidateEnd = candidateLength;
+						if (
+							candidateEnd < textBlock.length &&
+							textBlock.charCodeAt(candidateEnd) >= 0xdc00 &&
+							textBlock.charCodeAt(candidateEnd) <= 0xdfff
+						)
+							candidateEnd += 1;
+						const candidateContent = [
+							...content,
+							...(candidateEnd > 0 ? [{ type: "text" as const, text: textBlock.slice(0, candidateEnd) }] : []),
+						];
+						const candidateOmittedTextBlocks = remainingTextBlocks - (candidateEnd > 0 ? 1 : 0);
+						if (
+							fits(
+								makeMessageEndFrame(
+									candidateContent,
+									true,
+									candidateOmittedTextBlocks > 0 ? candidateOmittedTextBlocks : undefined,
+								),
+							)
+						) {
+							bestEnd = candidateEnd;
+							low = candidateLength + 1;
+						} else high = candidateLength;
+					}
+					if (bestEnd > 0) content.push({ type: "text", text: textBlock.slice(0, bestEnd) });
+					omittedTextBlocks = remainingTextBlocks - (bestEnd > 0 ? 1 : 0);
+					break;
+				}
+				return [
+					makeMessageEndFrame(
+						content,
+						textTruncated ? true : undefined,
+						omittedTextBlocks > 0 ? omittedTextBlocks : undefined,
+					),
 				];
 			}
 			if (frame.type === "agent_end") {
