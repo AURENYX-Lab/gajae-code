@@ -34,8 +34,11 @@ interface SSHConfigFile {
 
 function parsePort(value: number | string | undefined): number | undefined {
 	if (value === undefined) return undefined;
-	// Same rule as `/ssh add --port`: `Number.parseInt` accepts trailing garbage
-	// (parseInt("22oops") === 22), so a string must be plain digits.
+	// The JSON is not validated against SSHConfigFile, so anything else (e.g. an
+	// array, which parseInt would coerce: parseInt([2222]) === 2222) is rejected.
+	if (typeof value !== "number" && typeof value !== "string") return undefined;
+	// `Number.parseInt` accepts trailing garbage (parseInt("22oops") === 22), so a
+	// string must be plain digits.
 	if (typeof value === "string" && !/^\d+$/.test(value)) return undefined;
 	const port = typeof value === "number" ? value : Number.parseInt(value, 10);
 	return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : undefined;

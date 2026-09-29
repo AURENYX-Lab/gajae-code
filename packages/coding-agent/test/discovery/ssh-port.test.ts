@@ -24,7 +24,7 @@ describe("SSH discovery port validation", () => {
 	}
 
 	it("given malformed ports, when ssh.json loads, then the port is dropped with a warning", async () => {
-		const malformed = {
+		const malformed: Record<string, unknown> = {
 			"trailing-garbage": "22oops",
 			"fractional-string": "2222.5",
 			"signed-string": "+22",
@@ -32,6 +32,8 @@ describe("SSH discovery port validation", () => {
 			zero: 0,
 			"too-large": 70000,
 			"too-large-string": "65536",
+			array: [2222],
+			boolean: true,
 		};
 		const hosts = Object.fromEntries(
 			Object.entries(malformed).map(([name, port]) => [name, { host: "example.test", port }]),
@@ -41,7 +43,7 @@ describe("SSH discovery port validation", () => {
 
 		for (const name of Object.keys(malformed)) {
 			expect(ports).toHaveProperty(name, undefined);
-			const warning = `Invalid port for SSH entry ${name}: ${malformed[name as keyof typeof malformed]}`;
+			const warning = `Invalid port for SSH entry ${name}: ${String(malformed[name])}`;
 			expect(warnings).toEqual(expect.arrayContaining([expect.stringContaining(warning)]));
 		}
 	});
