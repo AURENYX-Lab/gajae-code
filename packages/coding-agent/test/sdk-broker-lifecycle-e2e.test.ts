@@ -8704,13 +8704,6 @@ test("model profile cutoff returns only proven rollback or retained uncertainty"
 			startupFailure: {
 				phase: "startup",
 				reason: "pending",
-				rollback: {
-					endpointGeneration: null,
-					fenced: true,
-					runtimeRemoved: true,
-					hostStopped: true,
-					brokerRegistrationReleased: true,
-				},
 				cleanupProof: {
 					processExited: true,
 					endpointRemoved: true,
@@ -8718,6 +8711,39 @@ test("model profile cutoff returns only proven rollback or retained uncertainty"
 				},
 			},
 		});
+		if (response.ok || !response.startupFailure) throw new Error("Expected startup failure evidence.");
+		const startupFailure = response.startupFailure;
+		const rollback = startupFailure.rollback;
+		const fullyComplete = {
+			endpointGeneration: null,
+			fenced: true,
+			runtimeRemoved: true,
+			hostStopped: true,
+			brokerRegistrationReleased: true,
+		};
+		if (
+			rollback.endpointGeneration === null &&
+			rollback.fenced &&
+			rollback.runtimeRemoved &&
+			rollback.hostStopped &&
+			rollback.brokerRegistrationReleased
+		) {
+			expect(rollback).toEqual(fullyComplete);
+		} else {
+			expect(rollback).toEqual({
+				endpointGeneration: null,
+				fenced: false,
+				runtimeRemoved: false,
+				hostStopped: false,
+				brokerRegistrationReleased: false,
+			});
+			expect(startupFailure.cleanupProof).toMatchObject({
+				processExited: true,
+				endpointRemoved: true,
+				hostUnregistered: { state: "not_registered" },
+				rollback: fullyComplete,
+			});
+		}
 		expect(await broker.handleRequest("session.create", input, "profile-cutoff")).toEqual(response);
 	} finally {
 		if (previous === undefined) delete process.env.GJC_SDK_TEST_HANG_MODEL_PROFILE;
