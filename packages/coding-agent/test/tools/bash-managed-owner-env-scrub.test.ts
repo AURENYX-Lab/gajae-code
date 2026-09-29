@@ -44,6 +44,18 @@ function textOf(result: unknown): string {
 const managedOwnerEnvNames = [...MANAGED_OWNER_BASH_ENV];
 
 describe("issue #6140: managed-owner env scrub at the bash boundary", () => {
+	it("covers the full tmux-owner tuple, not a subset", () => {
+		// ownerTerminalContextFromEnvironment() treats any partial tuple as "invalid".
+		for (const name of [
+			"GJC_TMUX_OWNER_GENERATION",
+			"GJC_TMUX_OWNER_STATE_DIR",
+			"GJC_TMUX_OWNER_SERVER_KEY",
+			"GJC_TMUX_LAUNCHED",
+		]) {
+			expect(managedOwnerEnvNames as readonly string[]).toContain(name);
+		}
+	});
+
 	it("scrubs inherited managed-owner env vars from bash child", async () => {
 		const namesToRestore = managedOwnerEnvNames;
 		const previousEnv = new Map(namesToRestore.map(name => [name, process.env[name]]));

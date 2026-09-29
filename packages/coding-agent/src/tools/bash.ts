@@ -28,6 +28,8 @@ import {
 	GJC_RALPLAN_ARTIFACT_ENV,
 	GJC_RESTRICTED_ROLE_AGENT_BASH_ENV,
 } from "../gjc-runtime/restricted-role-agent-bash";
+import { GJC_TMUX_OWNER_SERVER_KEY_ENV } from "../gjc-runtime/session-state-sidecar";
+import { GJC_TMUX_LAUNCHED_ENV } from "../gjc-runtime/windows-powershell-command";
 import { InternalUrlRouter } from "../internal-urls";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { highlightCode, type Theme } from "../modes/theme/theme";
@@ -121,6 +123,12 @@ export const MANAGED_OWNER_BASH_ENV = [
 	MANAGED_OWNER_PREDECESSOR_RUN_ID_ENV,
 	MANAGED_OWNER_PREDECESSOR_INCARNATION_ENV,
 	MANAGED_OWNER_TRANSCRIPT_PATH_ENV,
+	// The rest of the tmux-owner tuple (tmux-sessions.ts managedEnvironment): leaving
+	// either behind makes ownerTerminalContextFromEnvironment() report "invalid" in a
+	// nested gjc, because a server key or GJC_TMUX_LAUNCHED=1 without generation/state
+	// dir is an incomplete owner context.
+	GJC_TMUX_OWNER_SERVER_KEY_ENV,
+	GJC_TMUX_LAUNCHED_ENV,
 ] as const;
 
 const COORDINATOR_ONLY_BASH_ENV = [

@@ -108,6 +108,8 @@ const coordinatorOnlyEnvNames = [
 	MANAGED_OWNER_PREDECESSOR_RUN_ID_ENV,
 	MANAGED_OWNER_PREDECESSOR_INCARNATION_ENV,
 	MANAGED_OWNER_TRANSCRIPT_PATH_ENV,
+	"GJC_TMUX_OWNER_SERVER_KEY",
+	"GJC_TMUX_LAUNCHED",
 ];
 
 describe("issue #5374: session identity on the bash tool-env path", () => {
