@@ -20,7 +20,10 @@ import type { Anchor, HashlineCursor, HashlineEdit } from "./types";
 const LID_CAPTURE_RE = new RegExp(`^\\s*[>+\\-*]*\\s*${HL_HASH_CAPTURE_RE_RAW}(?:\\|.*)?\\s*$`);
 const regexEscape = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-const BARE_LINE_REF_RE = /^\s*[>+\-*]*\s*([1-9]\d*)(?:\s*(?:-|\.\.)\s*([1-9]\d*))?(?:\|(?:(?!\.\.).)*)?\s*$/;
+// Dots in copied text are literal unless followed by a possible range endpoint.
+// Ambiguous copied ranges still require a re-read instead of a one-line retry.
+const BARE_LINE_REF_RE =
+	/^\s*[>+\-*]*\s*([1-9]\d*)(?:\s*(?:-|\.\.)\s*([1-9]\d*))?(?:\|(?:(?!\.\.\s*[>+\-*]*\s*(?:[1-9]\d*|[a-z]{2}(?:\||\s*$))).)*)?\s*$/;
 const HASH_ONLY_REF_RE = /^\s*[>+\-*]*\s*([a-z]{2})(?:\|.*)?\s*$/;
 type HashlineOpSigil = typeof HL_OP_INSERT_BEFORE | typeof HL_OP_INSERT_AFTER | typeof HL_OP_REPLACE;
 
