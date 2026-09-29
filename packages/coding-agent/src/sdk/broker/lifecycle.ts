@@ -8138,6 +8138,26 @@ export interface LifecycleExecutionOutcome {
 	deferredArtifactCleanup?: () => Promise<void>;
 }
 
+export function classifyLateAdmissionSpawnFailure(
+	response: BrokerResponse,
+	effectIntent: LifecycleEffectIntentWithDeadline | undefined,
+	now: number,
+	messageSource: BrokerResponse,
+): BrokerResponse {
+	if (
+		response.ok ||
+		response.error.code !== "spawn_failed" ||
+		effectIntent?.childOwnershipEstablished !== true ||
+		effectIntent.admissionCleanupDeadlineAt === undefined ||
+		now < effectIntent.admissionCleanupDeadlineAt
+	)
+		return response;
+	return {
+		...response,
+		error: { code: "terminal_uncertain", message: terminalUncertainStartupMessage(messageSource) },
+	};
+}
+
 /** Returns the response together with every durable lifecycle fact needed for truthful replay. */
 export async function executeLifecycle(
 	broker: Broker,
@@ -8200,16 +8220,25 @@ export async function executeLifecycle(
 			const binding = validateLifecycleDeleteMetadataBinding(broker, operation, input, identity, cleanup);
 			if (binding) return { response: binding };
 		}
+		const reconciled = await reconcileLifecycleCleanup(
+			broker,
+			identity,
+			cleanup,
+			operation === "session.delete"
+				? { ok: true, result: { sessionId: cleanup.sessionId } }
+				: fail("spawn_failed", "No ready SDK endpoint remains available."),
+			proofBudget,
+		);
 		return {
-			response: await reconcileLifecycleCleanup(
-				broker,
-				identity,
-				cleanup,
+			response:
 				operation === "session.delete"
-					? { ok: true, result: { sessionId: cleanup.sessionId } }
-					: fail("spawn_failed", "No ready SDK endpoint remains available."),
-				proofBudget,
-			),
+					? reconciled
+					: classifyLateAdmissionSpawnFailure(
+							reconciled,
+							broker.ledger.get(identity)?.effectIntent,
+							timing.now(),
+							reconciled,
+						),
 		};
 	}
 	const response = await executeLifecycleResponse(broker, operation, input, identity, cleanup);

@@ -9166,6 +9166,83 @@ setInterval(() => {}, 1_000_000);
 	}
 }, 10_000);
 
+test("persisted lifecycle cleanup replay classifies only completed late spawn failure", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-late-cleanup-replay-"));
+	const agentDir = path.join(root, "agent");
+	const stateRoot = path.join(root, ".gjc", "state");
+	const sessionId = "late-cleanup-replay";
+	const markerPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`);
+	const identity = "late-cleanup-replay-identity";
+	const deadlines = deriveLifecycleDeadlines(1_000, 4_000);
+	const nowMs = deadlines.lifecycleCleanupDeadlineAt - 1;
+	const broker = new Broker({ agentDir });
+	try {
+		await fs.mkdir(path.dirname(markerPath), { recursive: true });
+		await fs.writeFile(
+			markerPath,
+			JSON.stringify({ pid: process.pid, effectMarker: identity, incarnation: identity }),
+		);
+		const [stat, parent, bytes] = await Promise.all([
+			fs.stat(markerPath, { bigint: true }),
+			fs.stat(path.dirname(markerPath), { bigint: true }),
+			fs.readFile(markerPath),
+		]);
+		const cleanup: BrokerCleanupEvidence = {
+			phase: "lifecycle",
+			sessionId,
+			metadataRoot: stateRoot,
+			lifecycleParentIdentity: { dev: parent.dev.toString(), ino: parent.ino.toString() },
+			lifecycleFiles: [
+				{
+					path: markerPath,
+					identity: {
+						dev: stat.dev.toString(),
+						ino: stat.ino.toString(),
+						nlink: stat.nlink.toString(),
+						size: Number(stat.size),
+						mtimeNs: stat.mtimeNs.toString(),
+						sha256: createHash("sha256").update(bytes).digest("hex"),
+					},
+					attempt: 1,
+					plannedPath: path.join(stateRoot, "sdk", ".gjc-delete-late-cleanup-replay"),
+				},
+			],
+		};
+		await broker.start();
+		await broker.ledger.begin(identity, "late-cleanup-request");
+		const effectIntent = {
+			sessionId,
+			stateRoot,
+			childOwnershipEstablished: true,
+			admissionCleanupDeadlineAt: deadlines.terminationStartDeadlineAt,
+			lifecycleCleanupDeadlineAt: deadlines.lifecycleCleanupDeadlineAt,
+		};
+		await broker.ledger.transition(identity, "effect_started", {
+			intendedSessionId: sessionId,
+			effectIntent,
+			response: { ok: false, error: { code: "cleanup_pending", message: "replay", cleanup } },
+		});
+		setLifecycleTimingForTest(broker, { now: () => nowMs, sleep: async () => {} });
+		const unlinkSpy = vi
+			.spyOn(native, "exactUnlink")
+			.mockImplementation(() => ({ ok: false, code: "cleanup_pending" }));
+		try {
+			const pending = await executeLifecycle(broker, "session.create", { cwd: root }, identity, cleanup);
+			expect(pending.response).toMatchObject({ ok: false, error: { code: "cleanup_pending" } });
+		} finally {
+			unlinkSpy.mockRestore();
+		}
+		const completed = await executeLifecycle(broker, "session.create", { cwd: root }, identity, cleanup);
+		expect(nowMs).toBeGreaterThanOrEqual(deadlines.terminationStartDeadlineAt);
+		expect(nowMs).toBeLessThan(deadlines.lifecycleCleanupDeadlineAt);
+		expect(completed.response).toMatchObject({ ok: false, error: { code: "terminal_uncertain" } });
+	} finally {
+		setLifecycleTimingForTest(broker, undefined);
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+});
+
 test("production post-registration startup failure proves cleanup and exact replay", async () => {
 	if (process.platform !== "linux") return;
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-production-failure-"));
