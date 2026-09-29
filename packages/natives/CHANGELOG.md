@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-09-29
+
+### Fixed
+
+- `MacAppearanceObserver.stop()` no longer hangs forever when called right after `start()`: a stop that arrived before the observer thread entered its run loop was lost.
+- `detectMacOSAppearance()` is no longer wrapped in a work-profile region, whose bookkeeping added ~7% to the sub-microsecond query.
+
+- Restored `glob`/`find` speed on large trees: the walker's collect path re-summed every retained path on each new entry, so a 40k-entry scan took ~1.5s (even from the scan cache) instead of ~0.2s.
+
+- macOS directory scans use `getattrlistbulk` again: the attribute request lacked `ATTR_CMN_RETURNED_ATTRS`, so the kernel rejected it and every directory fell back to `std::fs::read_dir`.
+
 ## [0.18.0] - 2026-09-27
 
 ### Added
