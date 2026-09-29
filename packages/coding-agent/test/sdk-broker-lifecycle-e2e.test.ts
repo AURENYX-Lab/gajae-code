@@ -1,4 +1,5 @@
 import { afterEach, expect, test, vi } from "bun:test";
+import { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as syncFs from "node:fs";
 import { renameSync, writeFileSync } from "node:fs";
@@ -8826,6 +8827,115 @@ setInterval(() => {}, 1_000_000);
 	} finally {
 		setLifecycleTimingForTest(broker, undefined);
 		setLifecycleCommandResolverForTest(broker, undefined);
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 10_000);
+
+test("unregistered readiness cutoff reserves proof time after a delayed SIGKILL exit", async () => {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-unregistered-cutoff-"));
+	const agentDir = path.join(root, "agent");
+	const fixture = path.join(root, "unregistered-cutoff.ts");
+	const pidPath = path.join(root, "child.pid");
+	const requestPath = path.join(root, "child.request.json");
+	const receivedAt = 1_000;
+	const deadlines = deriveLifecycleDeadlines(receivedAt, 4_000);
+	let nowMs = receivedAt;
+	let childPid: number | undefined;
+	let exitDeliveredAt: number | undefined;
+	const signals: { signal: NodeJS.Signals; at: number }[] = [];
+	const broker = new Broker({ agentDir });
+	const originalKill = ChildProcess.prototype.kill;
+	const originalEmit = ChildProcess.prototype.emit;
+	await fs.writeFile(
+		fixture,
+		`process.on("SIGTERM", () => {});
+await Bun.write(${JSON.stringify(pidPath)}, String(process.pid));
+await Bun.write(${JSON.stringify(requestPath)}, process.env.GJC_SDK_LIFECYCLE_REQUEST ?? "");
+setInterval(() => {}, 1_000_000);
+`,
+	);
+	setLifecycleCommandResolverForTest(broker, () => ({ file: process.execPath, args: ["run", fixture] }));
+	setLifecycleTimingForTest(broker, {
+		now: () => nowMs,
+		sleep: async milliseconds => {
+			const requestReady = await fs.access(requestPath).then(
+				() => true,
+				() => false,
+			);
+			if (!requestReady) {
+				await Bun.sleep(1);
+				return;
+			}
+			childPid ??= Number(await fs.readFile(pidPath, "utf8"));
+			nowMs += milliseconds;
+			await Bun.sleep(1);
+		},
+	});
+	const killSpy = vi.spyOn(ChildProcess.prototype, "kill").mockImplementation(function (
+		this: ChildProcess,
+		signal?: NodeJS.Signals | number,
+	): boolean {
+		if (this.pid === childPid && (signal === "SIGTERM" || signal === "SIGKILL")) {
+			signals.push({ signal, at: nowMs });
+			const result = originalKill.call(this, signal);
+			if (signal === "SIGKILL") {
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);
+				nowMs += 400;
+			}
+			return result;
+		}
+		return originalKill.call(this, signal);
+	});
+	const emitSpy = vi.spyOn(ChildProcess.prototype, "emit").mockImplementation(function (
+		this: ChildProcess,
+		event: string | symbol,
+		...args: unknown[]
+	): boolean {
+		if (event === "exit" && this.pid === childPid) exitDeliveredAt = nowMs;
+		return originalEmit.call(this, event, ...args);
+	});
+	try {
+		await broker.start();
+		const response = await broker.handleRequest(
+			"session.create",
+			{ cwd: root, readinessTimeoutMs: deadlines.requestedReadinessTimeoutMs },
+			"unregistered-delayed-sigkill-exit",
+		);
+		const { sessionId } = JSON.parse(await fs.readFile(requestPath, "utf8")) as { sessionId: string };
+
+		expect(response).toMatchObject({
+			ok: false,
+			error: { code: "readiness_timeout" },
+		});
+		expect(signals).toEqual([
+			{ signal: "SIGTERM", at: deadlines.terminationStartDeadlineAt },
+			{ signal: "SIGKILL", at: expect.any(Number) },
+		]);
+		expect(signals[1]!.at - signals[0]!.at).toBeLessThanOrEqual(200);
+		expect(exitDeliveredAt).toBe(signals[1]!.at + 400);
+		expect(deadlines.lifecycleCleanupDeadlineAt - exitDeliveredAt!).toBeGreaterThanOrEqual(250);
+		expect(nowMs).toBeLessThanOrEqual(deadlines.lifecycleCleanupDeadlineAt);
+		expect(
+			(await fs.readdir(path.join(root, ".gjc", "state", "sdk"))).filter(
+				entry =>
+					entry === `${sessionId}.lifecycle.json` ||
+					entry === `${sessionId}.lifecycle.ready.json` ||
+					entry.startsWith(`${sessionId}.lifecycle.failure.`),
+			),
+		).toEqual([]);
+		await expect(fs.access(path.join(root, ".gjc", "state", "sdk", `${sessionId}.json`))).rejects.toThrow();
+		expect(() => process.kill(childPid!, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
+	} finally {
+		killSpy.mockRestore();
+		emitSpy.mockRestore();
+		setLifecycleTimingForTest(broker, undefined);
+		setLifecycleCommandResolverForTest(broker, undefined);
+		if (childPid) {
+			try {
+				process.kill(childPid, "SIGKILL");
+			} catch {}
+		}
 		await broker.stop();
 		await fs.rm(root, { recursive: true, force: true });
 	}

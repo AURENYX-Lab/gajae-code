@@ -4842,10 +4842,10 @@ async function terminateSpawnedChild(
 	await broker.index.refresh();
 	if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
 	const registered = expected ? broker.index.hasHostRegistrationForLifecycle(id, pid, expected.effectMarker) : false;
-	// Keep one poll interval inside the lifecycle deadline for the final exact
-	// cleanup proof. Registered sessions retain the original deadline partition;
-	// only an unregistered child needs this extra bounded margin.
-	const processExitDeadlineAt = expected && !registered ? deadline - POLL_MS : deadline;
+	// Reserve a quarter of the termination phase for the exact post-exit proof
+	// and ledger-backed artifact cleanup. Registered hosts retain their deadline.
+	const postExitProofReserveMs = Math.max(POLL_MS, Math.floor((deadline - terminationStartDeadlineAt) / 4));
+	const processExitDeadlineAt = expected && !registered ? deadline - postExitProofReserveMs : deadline;
 	const unregisteredTerminationDeadlineAt =
 		processExitDeadlineAt - Math.max(POLL_MS, Math.floor((processExitDeadlineAt - terminationStartDeadlineAt) / 2));
 	const observe = (): ProcessObservation =>
@@ -4885,20 +4885,14 @@ async function terminateSpawnedChild(
 		};
 		if (observation === "alive") {
 			if (expected && !registered) {
-				// A child that has not registered yet owns the cutoff receipt. Give it
-				// the bounded pre-registration window to publish that proof, but reserve
-				// the final proof interval for post-signal observation inside the request
-				// deadline. A valid receipt does not interrupt the child's own rollback.
-				while (timing.now() < unregisteredTerminationDeadlineAt) {
-					const failure = await readLifecycleFailureArtifact(
-						lifecycleFailurePath(root, id, expected.effectMarker),
-						expected,
-					);
-					if (failure) {
-						await waitUntil(timing, unregisteredTerminationDeadlineAt);
-					} else
-						await timing.sleep(Math.max(0, Math.min(POLL_MS, unregisteredTerminationDeadlineAt - timing.now())));
-				}
+				await waitUntil(timing, terminationStartDeadlineAt);
+				// A child with a published cutoff receipt owns its rollback. Without one,
+				// waiting for a blocked module to publish is wasted signal/exit time.
+				const failure = await readLifecycleFailureArtifact(
+					lifecycleFailurePath(root, id, expected.effectMarker),
+					expected,
+				);
+				if (failure) await waitUntil(timing, unregisteredTerminationDeadlineAt);
 			} else {
 				await waitUntil(timing, terminationStartDeadlineAt);
 			}
@@ -4918,7 +4912,9 @@ async function terminateSpawnedChild(
 				}
 			} else {
 				const remaining = Math.max(0, processExitDeadlineAt - timing.now());
-				const gracefulDeadline = timing.now() + Math.min(CLOSE_TIMEOUT_MS, Math.floor(remaining / 2));
+				const gracefulDeadline =
+					timing.now() +
+					Math.min(CLOSE_TIMEOUT_MS, Math.floor(remaining * (expected && !registered ? 0.15 : 0.5)));
 				observation = await waitForExit(gracefulDeadline);
 			}
 		}
