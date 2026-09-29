@@ -4828,6 +4828,7 @@ async function terminateSpawnedChild(
 	terminationStartDeadlineAt: number,
 	expected: EffectMarker | undefined,
 	timing: LifecycleTiming,
+	reapUnregisteredCutoff = false,
 ): Promise<boolean> {
 	const pid = child.pid;
 	if (!pid || (expected && pid !== expected.pid)) return false;
@@ -4841,100 +4842,226 @@ async function terminateSpawnedChild(
 	await broker.index.refresh();
 	if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
 	const registered = expected ? broker.index.hasHostRegistrationForLifecycle(id, pid, expected.effectMarker) : false;
-	// Keep one poll interval inside the lifecycle deadline for the final exact
-	// cleanup proof. Registered sessions retain the original deadline partition;
-	// only an unregistered child needs this extra bounded margin.
-	const processExitDeadlineAt = expected && !registered ? deadline - POLL_MS : deadline;
+	// Reserve a quarter of the termination phase for the exact post-exit proof
+	// and ledger-backed artifact cleanup. Registered hosts retain their deadline.
+	const postExitProofReserveMs = Math.max(POLL_MS, Math.floor((deadline - terminationStartDeadlineAt) / 4));
+	const processExitDeadlineAt = expected && !registered ? deadline - postExitProofReserveMs : deadline;
 	const unregisteredTerminationDeadlineAt =
 		processExitDeadlineAt - Math.max(POLL_MS, Math.floor((processExitDeadlineAt - terminationStartDeadlineAt) / 2));
 	const observe = (): ProcessObservation =>
-		child.exitCode !== null
+		child.exitCode !== null || child.signalCode !== null
 			? "exited"
 			: observeProcess(pid, incarnation, value => processIncarnationForBroker(broker, value));
-	const waitForExit = async (until: number): Promise<ProcessObservation> => {
+	let ownedExitObserved = child.exitCode !== null || child.signalCode !== null;
+	const ownedExit = Promise.withResolvers<void>();
+	const observeOwnedExit = (): void => {
+		ownedExitObserved = true;
+		ownedExit.resolve();
+	};
+	child.once("exit", observeOwnedExit);
+	const cleanupOwnedExitListeners = (): void => {
+		child.removeListener("exit", observeOwnedExit);
+	};
+	try {
+		const waitForExit = async (until: number): Promise<ProcessObservation> => {
+			let observation = observe();
+			while (observation !== "exited" && timing.now() < until) {
+				await Promise.race([ownedExit.promise, timing.sleep(Math.max(0, Math.min(POLL_MS, until - timing.now())))]);
+				if (ownedExitObserved) observation = "exited";
+				else observation = observe();
+			}
+
+			return observation;
+		};
+
 		let observation = observe();
-		while (observation !== "exited" && timing.now() < until) {
-			await timing.sleep(Math.max(0, Math.min(POLL_MS, until - timing.now())));
-			observation = observe();
-		}
-
-		return observation;
-	};
-
-	let observation = observe();
-	const recheckOwnedExitObservation = async (): Promise<void> => {
-		if (observation !== "uncertain") return;
-		// This direct ChildProcess is owned by this broker invocation. A process-incarnation
-		// read can briefly lag its exit event, so recheck only this owned child before failing.
-		observation = await waitForExit(processExitDeadlineAt);
-	};
-	if (observation === "alive") {
-		if (expected && !registered) {
-			// A child that has not registered yet owns the cutoff receipt. Give it
-			// the bounded pre-registration window to publish that proof, but reserve
-			// the final proof interval for post-signal observation inside the request
-			// deadline. A valid receipt does not interrupt the child's own rollback.
-			while (timing.now() < unregisteredTerminationDeadlineAt) {
-				if (await readLifecycleFailureArtifact(lifecycleFailurePath(root, id, expected.effectMarker), expected))
-					await waitUntil(timing, unregisteredTerminationDeadlineAt);
-				else await timing.sleep(Math.max(0, Math.min(POLL_MS, unregisteredTerminationDeadlineAt - timing.now())));
-			}
-		} else {
-			await waitUntil(timing, terminationStartDeadlineAt);
-		}
-		observation = observe();
-	}
-	if (observation === "alive") {
-		if (!(await signalVerifiedSession({ locator: { stateRoot: root }, pid }, id, "SIGTERM", expected))) {
-			observation = observe();
-			await recheckOwnedExitObservation();
-			if (observation !== "exited") {
-				await recordTerminalUncertain(broker, id, root, pid);
-				return false;
-			}
-		} else {
-			const remaining = Math.max(0, processExitDeadlineAt - timing.now());
-			const gracefulDeadline = timing.now() + Math.min(CLOSE_TIMEOUT_MS, Math.floor(remaining / 2));
-			observation = await waitForExit(gracefulDeadline);
-		}
-	}
-	if (observation === "alive") {
-		if (!(await signalVerifiedSession({ locator: { stateRoot: root }, pid }, id, "SIGKILL", expected))) {
-			observation = observe();
-			await recheckOwnedExitObservation();
-			if (observation !== "exited") {
-				await recordTerminalUncertain(broker, id, root, pid);
-				return false;
-			}
-		} else {
+		const recheckOwnedExitObservation = async (): Promise<void> => {
+			if (observation !== "uncertain") return;
+			// This direct ChildProcess is owned by this broker invocation. A process-incarnation
+			// read can briefly lag its exit event, so recheck only this owned child before failing.
 			observation = await waitForExit(processExitDeadlineAt);
+		};
+		if (observation === "alive") {
+			if (expected && !registered) {
+				await waitUntil(timing, terminationStartDeadlineAt);
+				// A child with a published cutoff receipt owns its rollback. Without one,
+				// waiting for a blocked module to publish is wasted signal/exit time.
+				const failure = await readLifecycleFailureArtifact(
+					lifecycleFailurePath(root, id, expected.effectMarker),
+					expected,
+				);
+				if (failure) await waitUntil(timing, unregisteredTerminationDeadlineAt);
+			} else {
+				await waitUntil(timing, terminationStartDeadlineAt);
+			}
+			observation = observe();
 		}
-	}
-	await recheckOwnedExitObservation();
-	if (observation !== "exited" || !lifecycleProofWithinDeadline(proofBudget)) return failClosed();
-	let rollbackGeneration: number | null | undefined;
-	if (expected) {
-		const failure = await readLifecycleFailureArtifact(
-			lifecycleFailurePath(root, id, expected.effectMarker),
-			expected,
-		);
-		if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
-		const rollbackComplete =
-			failure?.artifact.rollback.fenced === true &&
-			failure.artifact.rollback.runtimeRemoved &&
-			failure.artifact.rollback.hostStopped &&
-			failure.artifact.rollback.brokerRegistrationReleased;
-		if (!rollbackComplete) {
-			if (!readyThenExitToleranceEnabled()) {
-				// A child that exited with a non-zero status before publishing any
-				// lifecycle receipt has no durable rollback to wait for. Prove the
-				// owned artifacts are gone and release its registration, but retain
-				// terminal uncertainty for timeouts, clean exits, and child-authored
-				// startup receipts whose rollback is incomplete.
-				if (failure || child.exitCode === null || child.exitCode === 0) return failClosed();
+		if (observation === "alive") {
+			const signalResult =
+				expected && !registered
+					? child.kill("SIGTERM")
+					: await signalVerifiedSession({ locator: { stateRoot: root }, pid }, id, "SIGTERM", expected);
+			if (!signalResult) {
+				observation = observe();
+				await recheckOwnedExitObservation();
+				if (observation !== "exited") {
+					await recordTerminalUncertain(broker, id, root, pid);
+					return false;
+				}
+			} else {
+				const remaining = Math.max(0, processExitDeadlineAt - timing.now());
+				const gracefulDeadline =
+					timing.now() +
+					Math.min(CLOSE_TIMEOUT_MS, Math.floor(remaining * (expected && !registered ? 0.15 : 0.5)));
+				observation = await waitForExit(gracefulDeadline);
+			}
+		}
+		if (observation === "alive") {
+			const signalResult =
+				expected && !registered
+					? child.kill("SIGKILL")
+					: await signalVerifiedSession({ locator: { stateRoot: root }, pid }, id, "SIGKILL", expected);
+			if (!signalResult) {
+				observation = observe();
+				await recheckOwnedExitObservation();
+				if (observation !== "exited") {
+					await recordTerminalUncertain(broker, id, root, pid);
+					return false;
+				}
+			} else {
+				observation = await waitForExit(processExitDeadlineAt);
+			}
+		}
+		await recheckOwnedExitObservation();
+		if (observation !== "exited" || !lifecycleProofWithinDeadline(proofBudget)) return failClosed();
+		let rollbackGeneration: number | null | undefined;
+		if (expected) {
+			const failure = await readLifecycleFailureArtifact(
+				lifecycleFailurePath(root, id, expected.effectMarker),
+				expected,
+			);
+			if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
+			const rollbackComplete =
+				failure?.artifact.rollback.fenced === true &&
+				failure.artifact.rollback.runtimeRemoved &&
+				failure.artifact.rollback.hostStopped &&
+				failure.artifact.rollback.brokerRegistrationReleased;
+			if (failure && expected && !rollbackComplete) {
+				await broker.index.refresh();
+				const hasRegistration = broker.index.hasHostRegistrationForLifecycle(id, pid, expected.effectMarker);
+				if (!hasRegistration) {
+					const artifactsRemoved = await removeOwnedLifecycleArtifacts(
+						root,
+						id,
+						expected,
+						undefined,
+						undefined,
+						proofBudget,
+					);
+					const endpointGone = await endpointRemoved(root, id);
+					// A signal-delivery error can be emitted while the child still runs. Recheck
+					// exact process absence after cleanup before reporting a proven reap.
+					if (
+						artifactsRemoved &&
+						endpointGone &&
+						(observe() === "exited" || ownedExitObserved) &&
+						lifecycleProofWithinDeadline(proofBudget)
+					)
+						return true;
+					return failClosed();
+				}
+			}
+			if (!rollbackComplete) {
+				if (!readyThenExitToleranceEnabled()) {
+					// A child that exited with a non-zero status before publishing any
+					// lifecycle receipt has no durable rollback to wait for. Prove the
+					// owned artifacts are gone and release its registration, but retain
+					// terminal uncertainty for timeouts, clean exits, and child-authored
+					// startup receipts whose rollback is incomplete.
+					await broker.index.refresh();
+					const uncertainRegistration = broker.index
+						.listSessions()
+						.sessions.some(
+							session => session.sessionId === id && session.pid === pid && session.terminalUncertain === true,
+						);
+					if (
+						failure ||
+						uncertainRegistration ||
+						(child.exitCode === null && child.signalCode === null) ||
+						child.exitCode === 0
+					)
+						return failClosed();
+					if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
+					const publishedReady = (await probePublishedReadyAuthority(root, id, expected)).kind === "matched";
+					if (publishedReady) return failClosed();
+					if (reapUnregisteredCutoff && !(await endpointRemoved(root, id))) return failClosed();
+					const artifactsRemoved = await removeOwnedLifecycleArtifacts(
+						root,
+						id,
+						expected,
+						undefined,
+						undefined,
+						proofBudget,
+					);
+					if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
+					await broker.index.refresh();
+					if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
+					const registered = broker.index
+						.listSessions()
+						.sessions.find(session => session.sessionId === id && session.pid === pid);
+					let registrationReleased =
+						!broker.index.hasHostRegistrationForLifecycle(id, pid, expected.effectMarker) ||
+						registered?.terminal === true ||
+						registered?.terminalUncertain === true;
+					if (registered && !registrationReleased) {
+						registrationReleased = await broker.index.unregisterIfCurrent(registered);
+						if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
+						await broker.index.refresh();
+						registrationReleased =
+							registrationReleased ||
+							!broker.index.hasHostRegistrationForLifecycle(id, pid, expected.effectMarker);
+					}
+					const stillExited =
+						observeProcess(pid, expected.incarnation, value => processIncarnationForBroker(broker, value)) ===
+						"exited";
+					const endpointGone = await endpointRemoved(root, id);
+					if (
+						stillExited &&
+						artifactsRemoved &&
+						endpointGone &&
+						registrationReleased &&
+						registered?.terminalUncertain !== true &&
+						lifecycleProofWithinDeadline(proofBudget)
+					) {
+						if (!reapUnregisteredCutoff) return true;
+						try {
+							await writeSessionLifecycleFailure(
+								root,
+								id,
+								expected.effectMarker,
+								{ phase: "startup", reason: "failed", message: `Session ${id} exited at readiness cutoff.` },
+								{
+									endpointGeneration: null,
+									fenced: true,
+									runtimeRemoved: true,
+									hostStopped: true,
+									brokerRegistrationReleased: true,
+								},
+								undefined,
+								expected.incarnation,
+								expected.pid,
+							);
+						} catch {
+							return failClosed();
+						}
+						if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
+						return true;
+					}
+					return failClosed();
+				}
 				if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
 				const publishedReady = (await probePublishedReadyAuthority(root, id, expected)).kind === "matched";
-				if (publishedReady) return failClosed();
+				if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
 				const artifactsRemoved = await removeOwnedLifecycleArtifacts(
 					root,
 					id,
@@ -4949,21 +5076,50 @@ async function terminateSpawnedChild(
 				const registered = broker.index
 					.listSessions()
 					.sessions.find(session => session.sessionId === id && session.pid === pid);
+				const registeredRowTerminal = registered?.terminal === true || registered?.terminalUncertain === true;
 				let registrationReleased =
-					!broker.index.hasHostRegistrationForLifecycle(id, pid, expected.effectMarker) ||
-					registered?.terminal === true ||
-					registered?.terminalUncertain === true;
+					!broker.index.hasHostRegistrationForLifecycle(id, pid, expected.effectMarker) || registeredRowTerminal;
 				if (registered && !registrationReleased) {
+					if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
 					registrationReleased = await broker.index.unregisterIfCurrent(registered);
 					if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
 					await broker.index.refresh();
+					if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
 					registrationReleased =
 						registrationReleased || !broker.index.hasHostRegistrationForLifecycle(id, pid, expected.effectMarker);
 				}
 				const stillExited =
 					observeProcess(pid, expected.incarnation, value => processIncarnationForBroker(broker, value)) ===
 					"exited";
+				if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
 				const endpointGone = await endpointRemoved(root, id);
+				if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
+				try {
+					if (publishedReady && !failure) {
+						await writeSessionLifecycleFailure(
+							root,
+							id,
+							expected.effectMarker,
+							{
+								phase: "startup",
+								reason: "failed",
+								message: `Session ${id} ${READY_THEN_EXIT_MESSAGE}.`,
+							},
+							{
+								endpointGeneration: registered?.endpointGeneration ?? null,
+								fenced: stillExited && registrationReleased,
+								runtimeRemoved: artifactsRemoved && endpointGone,
+								hostStopped: stillExited,
+								brokerRegistrationReleased: registrationReleased,
+							},
+							undefined,
+							expected.incarnation,
+							expected.pid,
+						);
+					}
+				} catch {
+					// A missing broker-authored receipt must not hide a proven dead child.
+				}
 				if (
 					stillExited &&
 					artifactsRemoved &&
@@ -4974,102 +5130,35 @@ async function terminateSpawnedChild(
 					return true;
 				return failClosed();
 			}
-			if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
-			const publishedReady = (await probePublishedReadyAuthority(root, id, expected)).kind === "matched";
-			if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
-			const artifactsRemoved = await removeOwnedLifecycleArtifacts(
-				root,
-				id,
-				expected,
-				undefined,
-				undefined,
-				proofBudget,
-			);
-			if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
-			await broker.index.refresh();
-			if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
-			const registered = broker.index
-				.listSessions()
-				.sessions.find(session => session.sessionId === id && session.pid === pid);
-			const registeredRowTerminal = registered?.terminal === true || registered?.terminalUncertain === true;
-			let registrationReleased =
-				!broker.index.hasHostRegistrationForLifecycle(id, pid, expected.effectMarker) || registeredRowTerminal;
-			if (registered && !registrationReleased) {
-				if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
-				registrationReleased = await broker.index.unregisterIfCurrent(registered);
-				if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
-				await broker.index.refresh();
-				if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
-				registrationReleased =
-					registrationReleased || !broker.index.hasHostRegistrationForLifecycle(id, pid, expected.effectMarker);
-			}
-			const stillExited =
-				observeProcess(pid, expected.incarnation, value => processIncarnationForBroker(broker, value)) === "exited";
-			if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
-			const endpointGone = await endpointRemoved(root, id);
-			if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
-			try {
-				if (publishedReady && !failure) {
-					await writeSessionLifecycleFailure(
-						root,
-						id,
-						expected.effectMarker,
-						{
-							phase: "startup",
-							reason: "failed",
-							message: `Session ${id} ${READY_THEN_EXIT_MESSAGE}.`,
-						},
-						{
-							endpointGeneration: registered?.endpointGeneration ?? null,
-							fenced: stillExited && registrationReleased,
-							runtimeRemoved: artifactsRemoved && endpointGone,
-							hostStopped: stillExited,
-							brokerRegistrationReleased: registrationReleased,
-						},
-						undefined,
-						expected.incarnation,
-						expected.pid,
-					);
-				}
-			} catch {
-				// A missing broker-authored receipt must not hide a proven dead child.
-			}
-			if (
-				stillExited &&
-				artifactsRemoved &&
-				endpointGone &&
-				registrationReleased &&
-				lifecycleProofWithinDeadline(proofBudget)
-			)
-				return true;
+			rollbackGeneration = failure.artifact.rollback.endpointGeneration;
+		}
+		if (expected && !(await removeOwnedLifecycleArtifacts(root, id, expected, undefined, undefined, proofBudget)))
+			return failClosed();
+		if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
+		await broker.index.refresh();
+		if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
+		if (
+			rollbackGeneration === null &&
+			expected &&
+			!broker.index.hasHostRegistrationForLifecycle(id, pid, expected.effectMarker)
+		)
+			return lifecycleProofWithinDeadline(proofBudget) ? true : failClosed();
+		const registeredBeforeTermination =
+			rollbackGeneration === undefined || rollbackGeneration === null
+				? undefined
+				: broker.index.findHostRegistration(id, rollbackGeneration, pid, expected?.effectMarker);
+		const unregistered = registeredBeforeTermination
+			? broker.index.hostUnregisteredAfter(registeredBeforeTermination)
+			: undefined;
+		if (!registeredBeforeTermination || !unregistered) {
 			return failClosed();
 		}
-		rollbackGeneration = failure.artifact.rollback.endpointGeneration;
+		if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
+		const endpointGone = await endpointRemoved(root, id);
+		return endpointGone && lifecycleProofWithinDeadline(proofBudget) ? true : failClosed();
+	} finally {
+		cleanupOwnedExitListeners();
 	}
-	if (expected && !(await removeOwnedLifecycleArtifacts(root, id, expected, undefined, undefined, proofBudget)))
-		return failClosed();
-	if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
-	await broker.index.refresh();
-	if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
-	if (
-		rollbackGeneration === null &&
-		expected &&
-		!broker.index.hasHostRegistrationForLifecycle(id, pid, expected.effectMarker)
-	)
-		return lifecycleProofWithinDeadline(proofBudget) ? true : failClosed();
-	const registeredBeforeTermination =
-		rollbackGeneration === undefined || rollbackGeneration === null
-			? undefined
-			: broker.index.findHostRegistration(id, rollbackGeneration, pid, expected?.effectMarker);
-	const unregistered = registeredBeforeTermination
-		? broker.index.hostUnregisteredAfter(registeredBeforeTermination)
-		: undefined;
-	if (!registeredBeforeTermination || !unregistered) {
-		return failClosed();
-	}
-	if (!lifecycleProofWithinDeadline(proofBudget)) return failClosed();
-	const endpointGone = await endpointRemoved(root, id);
-	return endpointGone && lifecycleProofWithinDeadline(proofBudget) ? true : failClosed();
 }
 
 async function signalVerifiedSession(
@@ -6863,6 +6952,7 @@ async function executeLifecycleResponse(
 											knownSecrets,
 										)
 									: undefined;
+				const ledgerUncertain = broker.ledger.get(identity)?.state === "terminal_uncertain";
 				const terminated = await terminateSpawnedChild(
 					child,
 					broker,
@@ -6872,8 +6962,8 @@ async function executeLifecycleResponse(
 					terminationStartDeadline,
 					spawnedAuthority,
 					timing,
+					readiness.kind === "timeout",
 				);
-
 				if (!terminated)
 					return readiness.kind === "ready_probe_failed"
 						? fail(
@@ -6884,6 +6974,11 @@ async function executeLifecycleResponse(
 								"terminal_uncertain",
 								`Session ${launch.id} did not become ready and its spawned process could not be verified dead. ${diagnostic ?? "stage=readiness waiting_for=session_ready child=uncertain exit=not_observed signal=not_observed stderr=none"}`,
 							);
+				if (ledgerUncertain)
+					return fail(
+						"terminal_uncertain",
+						`Lifecycle startup cleanup could not be proven; retained artifacts require reconciliation. Original launch failure: Session ${launch.id} did not become ready and its spawned process could not be verified dead.`,
+					);
 				return readiness.kind === "startup_failed"
 					? fail(
 							readiness.failure.code ?? "spawn_failed",
@@ -7880,6 +7975,7 @@ async function exactCleanupProof(
 	evidence: { artifact: LifecycleFailureArtifact } | undefined,
 	proofBudget?: LifecycleProofBudget,
 	allowObservedWindowsReadyExit = false,
+	allowObservedUnregisteredCutoff = false,
 ): Promise<LifecycleCleanupProof | undefined> {
 	const rollback = evidence?.artifact.rollback;
 	const durableRollbackComplete =
@@ -7887,6 +7983,16 @@ async function exactCleanupProof(
 		rollback.runtimeRemoved &&
 		rollback.hostStopped &&
 		rollback.brokerRegistrationReleased;
+	// An owned child reaped before registration cannot finish its cutoff receipt.
+	// The broker may retire that receipt only after independently proving process,
+	// endpoint, and registration absence through this exact cleanup transaction.
+	const observedUnregisteredCutoff =
+		allowObservedUnregisteredCutoff &&
+		rollback?.endpointGeneration === null &&
+		rollback.fenced === false &&
+		rollback.runtimeRemoved === false &&
+		rollback.hostStopped === false &&
+		rollback.brokerRegistrationReleased === false;
 	// Windows deliberately keeps the failure receipt incomplete because its
 	// directory-entry publication cannot be flushed. A broker-observed
 	// ready-then-exit can still authorize the separate ledger-backed exact
@@ -7904,7 +8010,7 @@ async function exactCleanupProof(
 		!root ||
 		!id ||
 		!expected ||
-		(!durableRollbackComplete && !observedWindowsReadyExit) ||
+		(!durableRollbackComplete && !observedWindowsReadyExit && !observedUnregisteredCutoff) ||
 		observeProcess(expected.pid, expected.incarnation, value => processIncarnationForBroker(broker, value)) !==
 			"exited"
 	)
@@ -8090,6 +8196,7 @@ export async function executeLifecycle(
 		evidence,
 		proofBudget,
 		!response.ok && response.error.code === "ready_then_exited",
+		!response.ok && response.error.code === "readiness_timeout",
 	);
 	const startupFailure: LifecycleStartupFailureReceipt | undefined = evidence
 		? {
@@ -8189,44 +8296,54 @@ export async function executeLifecycle(
 				? response
 				: response.error.code === "endpoint_unreadable"
 					? response
-					: // An unreadable/corrupt endpoint is already the fail-closed honest
-						// terminal classification (it names the artifact, not the
-						// child); the reconciliation wrapper must not erase it.
-						response.error.code === "ready_then_exited" && (cleanupProof || provenDeadCleanup)
+					: response.error.code === "readiness_timeout" &&
+							cleanupProof &&
+							lifecycleCleanupResponse &&
+							!lifecycleCleanupResponse.ok &&
+							lifecycleCleanupResponse.error.code === "spawn_failed"
 						? {
 								...response,
 								...(durableEffects ? { durableEffects } : {}),
 								...(startupFailure ? { startupFailure } : {}),
 							}
-						: startupFailure && cleanupProof
+						: // An unreadable/corrupt endpoint is already the fail-closed honest
+							// terminal classification (it names the artifact, not the
+							// child); the reconciliation wrapper must not erase it.
+							response.error.code === "ready_then_exited" && (cleanupProof || provenDeadCleanup)
 							? {
-									ok: false,
-									error: startupFailure.code
-										? {
-												code: startupFailure.code,
-												message: startupFailure.message,
-												details: startupFailure.details!,
-												endpoint: "unavailable" as const,
-											}
-										: {
-												code: "spawn_failed",
-												message: startupFailure.message,
-												endpoint: "unavailable" as const,
-											},
+									...response,
 									...(durableEffects ? { durableEffects } : {}),
-									startupFailure,
+									...(startupFailure ? { startupFailure } : {}),
 								}
-							: provenDeadCleanup && response.error.code !== "terminal_uncertain"
-								? response
-								: {
+							: startupFailure && cleanupProof
+								? {
 										ok: false,
-										error: {
-											code: "terminal_uncertain",
-											message: terminalUncertainStartupMessage(response),
-										},
+										error: startupFailure.code
+											? {
+													code: startupFailure.code,
+													message: startupFailure.message,
+													details: startupFailure.details!,
+													endpoint: "unavailable" as const,
+												}
+											: {
+													code: "spawn_failed",
+													message: startupFailure.message,
+													endpoint: "unavailable" as const,
+												},
 										...(durableEffects ? { durableEffects } : {}),
-										...(startupFailure ? { startupFailure } : {}),
+										startupFailure,
 									}
+								: provenDeadCleanup && response.error.code !== "terminal_uncertain"
+									? response
+									: {
+											ok: false,
+											error: {
+												code: "terminal_uncertain",
+												message: terminalUncertainStartupMessage(response),
+											},
+											...(durableEffects ? { durableEffects } : {}),
+											...(startupFailure ? { startupFailure } : {}),
+										}
 			: response;
 	return {
 		response: terminalResponse,
