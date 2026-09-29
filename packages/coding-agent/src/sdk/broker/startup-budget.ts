@@ -100,10 +100,8 @@ export function lifecycleStartupBudgetMs(requestedReadinessTimeoutMs: number): n
  * the startup to a durably persisted terminal result.
  *
  * Worktree launches add independent preparation budgets so git add / install cannot
- * cut the caller while the broker still owns the request. Broker-derived non-worktree
- * launches also add their bounded pre-spawn bookkeeping allowance before the broker
- * grants a fresh readiness window. Caller-supplied deadline tuples keep today's value
- * because the broker does not restart readiness for them.
+ * cut the caller while the broker still owns the request. One-arg
+ * {@link lifecycleStartupBudgetMs} stays queue+readiness for no-worktree callers.
  */
 export function lifecycleRequestTimeoutMs(operation: string, input: Record<string, unknown>): number | undefined {
 	const deadlineFields = [
@@ -128,9 +126,7 @@ export function lifecycleRequestTimeoutMs(operation: string, input: Record<strin
 		const readiness = supplied ?? DEFAULT_READINESS_TIMEOUT_MS;
 		const preparation = preparationBudgetMs(input);
 		if (preparation === undefined) return undefined;
-		const preSpawn =
-			!hasDeadlineTuple && !lifecycleRequestHasWorktree(input) ? DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS : 0;
-		return lifecycleStartupBudgetMs(readiness) + preSpawn + preparation + CALLER_DEADLINE_SLACK_MS;
+		return lifecycleStartupBudgetMs(readiness) + preparation + CALLER_DEADLINE_SLACK_MS;
 	}
 	return supplied === undefined ? undefined : supplied + CALLER_DEADLINE_SLACK_MS;
 }

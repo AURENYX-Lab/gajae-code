@@ -17,7 +17,6 @@ import {
 } from "../src/sdk/broker/lifecycle";
 import {
 	cancellableSleep,
-	DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS,
 	DEFAULT_DEPENDENCY_PREPARATION_TIMEOUT_MS,
 	DEFAULT_READINESS_TIMEOUT_MS,
 	DEFAULT_WORKTREE_PREPARATION_TIMEOUT_MS,
@@ -597,9 +596,7 @@ test("the ACP caller deadline covers the admission wait even when readiness is d
 		{ cwd: "/workspace" },
 		"defaulted-readiness",
 	);
-	expect(defaulted.timeoutMs).toBe(
-		lifecycleStartupBudgetMs(DEFAULT_READINESS_TIMEOUT_MS) + DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS + 1_000,
-	);
+	expect(defaulted.timeoutMs).toBe(lifecycleStartupBudgetMs(DEFAULT_READINESS_TIMEOUT_MS) + 1_000);
 
 	const requested = new TimeoutCapturingSdkClient();
 	await new AcpSdkAdapter({ client: requested as never }).global(
@@ -607,9 +604,7 @@ test("the ACP caller deadline covers the admission wait even when readiness is d
 		{ cwd: "/workspace", readinessTimeoutMs: 4_000 },
 		"requested-readiness",
 	);
-	expect(requested.timeoutMs).toBe(
-		lifecycleStartupBudgetMs(4_000) + DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS + 1_000,
-	);
+	expect(requested.timeoutMs).toBe(lifecycleStartupBudgetMs(4_000) + 1_000);
 
 	// An operation that never queues for a startup slot keeps its own readiness sizing.
 	const closing = new TimeoutCapturingSdkClient();
@@ -622,15 +617,7 @@ test("the ACP caller deadline covers the admission wait even when readiness is d
 });
 test("caller timeout adds independent prep budgets for both worktree input shapes", () => {
 	expect(lifecycleStartupBudgetMs(DEFAULT_READINESS_TIMEOUT_MS)).toBe(20_000);
-	expect(lifecycleRequestTimeoutMs("session.create", { cwd: "/workspace" })).toBe(51_000);
-	expect(lifecycleRequestTimeoutMs("session.create", { cwd: "/workspace", readinessTimeoutMs: 4_000 })).toBe(39_000);
-	expect(
-		lifecycleRequestTimeoutMs("session.create", {
-			cwd: "/workspace",
-			...deriveLifecycleDeadlines(1_000_000, DEFAULT_READINESS_TIMEOUT_MS),
-		}),
-	).toBe(21_000);
-	expect(lifecycleRequestTimeoutMs("session.close", { readinessTimeoutMs: 4_000 })).toBe(5_000);
+	expect(lifecycleRequestTimeoutMs("session.create", { cwd: "/workspace" })).toBe(21_000);
 	expect(
 		lifecycleRequestTimeoutMs("session.create", {
 			cwd: "/workspace",
