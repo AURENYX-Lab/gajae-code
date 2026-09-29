@@ -165,9 +165,17 @@ export type DarwinAncestryTracker = {
 	close(): void;
 };
 
+export type DarwinIdentity = { uniqueId: bigint; parentUniqueId: bigint };
+
+/** Test seams for the Darwin tracker; production uses libproc and the natives binding. */
+export type DarwinAncestryTrackerDeps = {
+	uniqueIdentity?: (pid: number) => DarwinIdentity | undefined;
+	fromPid?: (pid: number) => NativeProcess | null | undefined;
+};
+
 export function createDarwinAncestryTracker(
 	owned: Map<string, NativeProcess>,
-	uniqueIdentityFn?: (pid: number) => { uniqueId: bigint; parentUniqueId: bigint } | undefined,
+	deps: DarwinAncestryTrackerDeps = {},
 ): DarwinAncestryTracker | undefined {
 	if (process.platform !== "darwin") return undefined;
 	try {
@@ -184,6 +192,7 @@ export function createDarwinAncestryTracker(
 		// own children still chain, but it is retried on every poll until retained.
 		const retainedUniqueIds = new Set<bigint>();
 		const { Process } = require("@gajae-code/natives") as NativeProcessBindings;
+		const fromPid = deps.fromPid ?? ((pid: number) => Process.fromPid(pid));
 		// Reuse buffer across poll iterations to avoid allocations inside the loop.
 		const identityBuffer = new Uint8Array(56);
 		const identityView = new DataView(identityBuffer.buffer);
@@ -195,7 +204,7 @@ export function createDarwinAncestryTracker(
 				parentUniqueId: identityView.getBigUint64(24, true),
 			};
 		};
-		const uniqueIdentity = uniqueIdentityFn ?? defaultUniqueIdentity;
+		const uniqueIdentity = deps.uniqueIdentity ?? defaultUniqueIdentity;
 		const incarnationOnlyAnchors: NativeProcess[] = [];
 		const anchorKeys = new Set<string>();
 		const addIncarnationOnlyAnchor = (processRef: NativeProcess): void => {
@@ -212,9 +221,9 @@ export function createDarwinAncestryTracker(
 				// The unique id is read from a bare pid, so bracket it with incarnation
 				// checks against this handle: a pid reused in between would otherwise
 				// seed an unrelated process (and its descendants) as owned.
-				if (Process.fromPid(child.pid)?.incarnation === child.incarnation) {
+				if (fromPid(child.pid)?.incarnation === child.incarnation) {
 					const childId = uniqueIdentity(child.pid)?.uniqueId;
-					if (Process.fromPid(child.pid)?.incarnation === child.incarnation) {
+					if (fromPid(child.pid)?.incarnation === child.incarnation) {
 						if (childId !== undefined) {
 							knownUniqueIds.add(childId);
 							retainedUniqueIds.add(childId);
@@ -236,7 +245,7 @@ export function createDarwinAncestryTracker(
 			let identity: { uniqueId: bigint; parentUniqueId: bigint } | undefined;
 			if (signedUniqueId === undefined) {
 				const queried = uniqueIdentity(processRef.pid);
-				if (Process.fromPid(processRef.pid)?.incarnation !== processRef.incarnation) {
+				if (fromPid(processRef.pid)?.incarnation !== processRef.incarnation) {
 					// Exited (or reused) since authentication: retain nothing new.
 					return true;
 				}
@@ -285,7 +294,7 @@ export function createDarwinAncestryTracker(
 				for (let index = incarnationOnlyAnchors.length - 1; index >= 0; index--) {
 					const anchor = incarnationOnlyAnchors[index]!;
 					seedAnchorDescendants(anchor);
-					if (Process.fromPid(anchor.pid)?.incarnation !== anchor.incarnation) {
+					if (fromPid(anchor.pid)?.incarnation !== anchor.incarnation) {
 						incarnationOnlyAnchors.splice(index, 1);
 						anchorKeys.delete(`${anchor.pid}:${anchor.incarnation}`);
 					}
@@ -309,10 +318,10 @@ export function createDarwinAncestryTracker(
 				extendOwnedDarwinAncestry(knownUniqueIds, identities);
 				for (const [pid, listed] of identities) {
 					if (!knownUniqueIds.has(listed.uniqueId) || retainedUniqueIds.has(listed.uniqueId)) continue;
-					const before = Process.fromPid(pid);
+					const before = fromPid(pid);
 					if (!before) continue;
 					const identity = uniqueIdentity(pid);
-					const after = Process.fromPid(pid);
+					const after = fromPid(pid);
 					if (identity?.uniqueId === listed.uniqueId && after?.incarnation === before.incarnation) {
 						retainOwnedProcess(owned, after);
 						retainedUniqueIds.add(listed.uniqueId);

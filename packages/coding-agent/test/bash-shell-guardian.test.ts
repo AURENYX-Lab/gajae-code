@@ -3,10 +3,24 @@ import { createHmac } from "node:crypto";
 import type { Process as NativeProcess } from "@gajae-code/natives";
 import {
 	authenticateOwnershipRecord,
+	createDarwinAncestryTracker,
 	extendOwnedDarwinAncestry,
 	parseOwnershipRecord,
 	retainOwnedProcess,
 } from "../src/exec/bash-shell-guardian";
+
+type ProcessDouble = { pid: number; incarnation: string; children: () => NativeProcess[] };
+
+/** Typed double for the members of the native Process contract the guardian reads. */
+function processDouble(pid: number, incarnation: string, children: () => NativeProcess[] = () => []): NativeProcess {
+	const double: ProcessDouble = { pid, incarnation, children };
+	return double as unknown as NativeProcess;
+}
+
+/** Process lookup over a fixed set of live doubles, standing in for the native table. */
+function lookupOf(...live: NativeProcess[]): (pid: number) => NativeProcess | undefined {
+	return pid => live.find(processRef => processRef.pid === pid);
+}
 
 /**
  * Tests for bash-shell-guardian ownership tracking and Darwin ancestry tracking.
@@ -104,27 +118,27 @@ describe("bash-shell-guardian", () => {
 
 	describe("retainOwnedProcess", () => {
 		it("retains a process by pid:incarnation key", () => {
-			const owned = new Map<string, Partial<NativeProcess>>();
-			const processRef: Partial<NativeProcess> = { pid: 1234, incarnation: "uuid-abc" };
-			const result = retainOwnedProcess(owned, processRef as any);
+			const owned = new Map<string, NativeProcess>();
+			const processRef = processDouble(1234, "uuid-abc");
+			const result = retainOwnedProcess(owned, processRef);
 			expect(result).toBe(true);
 			expect(owned.get("1234:uuid-abc")).toBe(processRef);
 		});
 
 		it("returns false if process pid matches guardian pid", () => {
-			const owned = new Map<string, Partial<NativeProcess>>();
-			const processRef: Partial<NativeProcess> = { pid: process.pid, incarnation: "uuid-abc" };
-			const result = retainOwnedProcess(owned, processRef as any);
+			const owned = new Map<string, NativeProcess>();
+			const processRef = processDouble(process.pid, "uuid-abc");
+			const result = retainOwnedProcess(owned, processRef);
 			expect(result).toBe(false);
 			expect(owned.size).toBe(0);
 		});
 
 		it("allows overwriting process with same key", () => {
-			const owned = new Map<string, Partial<NativeProcess>>();
-			const processRef1: Partial<NativeProcess> = { pid: 1234, incarnation: "uuid-abc" };
-			const processRef2: Partial<NativeProcess> = { pid: 1234, incarnation: "uuid-abc" };
-			retainOwnedProcess(owned, processRef1 as any);
-			retainOwnedProcess(owned, processRef2 as any);
+			const owned = new Map<string, NativeProcess>();
+			const processRef1 = processDouble(1234, "uuid-abc");
+			const processRef2 = processDouble(1234, "uuid-abc");
+			retainOwnedProcess(owned, processRef1);
+			retainOwnedProcess(owned, processRef2);
 			expect(owned.size).toBe(1);
 			expect(owned.get("1234:uuid-abc")).toBe(processRef2);
 		});
@@ -160,58 +174,50 @@ describe("bash-shell-guardian", () => {
 		});
 	});
 
-	describe("Darwin ancestry tracker (with mocked uniqueIdentity)", () => {
-		it("retains incarnation-only records when uniqueIdentity returns undefined via track()", () => {
-			// Import the tracker after the mock is set up
-			const { createDarwinAncestryTracker } = require("../src/exec/bash-shell-guardian");
+	describe("Darwin ancestry tracker (injected identity and process lookup)", () => {
+		const noUniqueIdentity = (): undefined => undefined;
 
-			// Mock uniqueIdentity to return undefined for all pids
-			const mockUniqueIdentity = (): undefined => undefined;
-
-			const owned = new Map<string, Partial<NativeProcess>>();
-			const tracker = createDarwinAncestryTracker(owned, mockUniqueIdentity);
-
-			if (!tracker) {
-				// On non-Darwin platforms, createDarwinAncestryTracker returns undefined
-				// This is expected behavior
-				expect(true).toBe(true);
-				return;
-			}
-
-			// With uniqueIdentity returning undefined and no signedUniqueId,
-			// track() should still return true and retain the process
-			const processRef: Partial<NativeProcess> = { pid: 12345, incarnation: "test-incarnation", children: () => [] };
-			const result = tracker.track(processRef as any);
-
-			// The process should be retained
+		it("retains incarnation-only records when the unique-id query is denied", () => {
+			const processRef = processDouble(12345, "test-incarnation");
+			const owned = new Map<string, NativeProcess>();
+			const tracker = createDarwinAncestryTracker(owned, {
+				uniqueIdentity: noUniqueIdentity,
+				fromPid: lookupOf(processRef),
+			});
+			if (!tracker) return; // Darwin-only tracker.
+			expect(tracker.track(processRef)).toBe(true);
 			expect(owned.get("12345:test-incarnation")).toBe(processRef);
+			tracker.close();
+		});
 
-			// This is the key behavior change: track() returns true even without unique id
-			expect(result).toBe(true);
-
+		it("does not retain a record whose pid was reused after authentication", () => {
+			const recorded = processDouble(12345, "recorded");
+			const owned = new Map<string, NativeProcess>();
+			const tracker = createDarwinAncestryTracker(owned, {
+				uniqueIdentity: noUniqueIdentity,
+				fromPid: lookupOf(processDouble(12345, "replacement")),
+			});
+			if (!tracker) return;
+			expect(tracker.track(recorded)).toBe(true);
+			expect(owned.size).toBe(0);
 			tracker.close();
 		});
 
 		it("anchors descendants of an incarnation-only record by their unique ids (#6086)", () => {
-			const { createDarwinAncestryTracker } = require("../src/exec/bash-shell-guardian");
-			// The direct child (pid 100) has no unique id; its descendant (pid 101) does.
 			const ids = new Map<number, { uniqueId: bigint; parentUniqueId: bigint }>([
 				[101, { uniqueId: 9001n, parentUniqueId: 0n }],
 			]);
-			const owned = new Map<string, Partial<NativeProcess>>();
-			const tracker = createDarwinAncestryTracker(owned, (pid: number) => ids.get(pid));
-			if (!tracker) return;
-
-			const grandchild: Partial<NativeProcess> = { pid: 101, incarnation: "g", children: () => [] };
+			const grandchild = processDouble(101, "g");
 			let spawned = false;
-			const child: Partial<NativeProcess> = {
-				pid: 100,
-				incarnation: "c",
-				children: () => (spawned ? [grandchild as NativeProcess] : []),
-			};
-			expect(tracker.track(child as any)).toBe(true);
+			const child = processDouble(100, "c", () => (spawned ? [grandchild] : []));
+			const owned = new Map<string, NativeProcess>();
+			const tracker = createDarwinAncestryTracker(owned, {
+				uniqueIdentity: pid => ids.get(pid),
+				fromPid: lookupOf(child, grandchild),
+			});
+			if (!tracker) return;
+			expect(tracker.track(child)).toBe(true);
 			expect(owned.has("101:g")).toBe(false);
-
 			// A descendant forked after the ledger record was read is picked up by the
 			// next poll, which re-walks the incarnation-only anchor.
 			spawned = true;
@@ -220,58 +226,18 @@ describe("bash-shell-guardian", () => {
 			tracker.close();
 		});
 
-		it("requires unique id for trackGuardian() - returns false when uniqueIdentity returns undefined", () => {
-			const { createDarwinAncestryTracker } = require("../src/exec/bash-shell-guardian");
-
-			// Mock uniqueIdentity to return undefined for all pids
-			const mockUniqueIdentity = (): undefined => undefined;
-
-			const owned = new Map<string, Partial<NativeProcess>>();
-			const tracker = createDarwinAncestryTracker(owned, mockUniqueIdentity);
-
-			if (!tracker) {
-				// On non-Darwin platforms, createDarwinAncestryTracker returns undefined
-				expect(true).toBe(true);
-				return;
-			}
-
-			// trackGuardian is strict: it should return false when no unique id is available
-			const processRef: Partial<NativeProcess> = { pid: 12345, incarnation: "test-incarnation" };
-			const result = tracker.trackGuardian(processRef as any);
-
-			// The process should NOT be retained because guardian registration is strict
+		it("trackGuardian() requires a unique id", () => {
+			const processRef = processDouble(12345, "test-incarnation");
+			const owned = new Map<string, NativeProcess>();
+			const tracker = createDarwinAncestryTracker(owned, {
+				uniqueIdentity: noUniqueIdentity,
+				fromPid: lookupOf(processRef),
+			});
+			if (!tracker) return;
+			expect(tracker.trackGuardian(processRef)).toBe(false);
 			expect(owned.size).toBe(0);
-
-			// trackGuardian() returns false, making guardian registration fail as expected
-			expect(result).toBe(false);
-
-			tracker.close();
-		});
-
-		it("trackGuardian succeeds when signedUniqueId is provided", () => {
-			const { createDarwinAncestryTracker } = require("../src/exec/bash-shell-guardian");
-
-			// Mock uniqueIdentity to return undefined for all pids
-			const mockUniqueIdentity = (): undefined => undefined;
-
-			const owned = new Map<string, Partial<NativeProcess>>();
-			const tracker = createDarwinAncestryTracker(owned, mockUniqueIdentity);
-
-			if (!tracker) {
-				expect(true).toBe(true);
-				return;
-			}
-
-			// With a signedUniqueId provided, trackGuardian should succeed
-			const processRef: Partial<NativeProcess> = { pid: 12345, incarnation: "test-incarnation" };
-			const result = tracker.trackGuardian(processRef as any, BigInt(999));
-
-			// The process should be retained
+			expect(tracker.trackGuardian(processRef, 999n)).toBe(true);
 			expect(owned.get("12345:test-incarnation")).toBe(processRef);
-
-			// trackGuardian succeeds when given a signed unique id
-			expect(result).toBe(true);
-
 			tracker.close();
 		});
 	});

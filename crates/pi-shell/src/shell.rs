@@ -108,52 +108,32 @@ impl ExternalProcessObserver for CommandProcessObserver {
 			// (absent, or the pid now holds a different incarnation). Re-resolving
 			// the numeric pid would then target an unrelated occupant, so only the
 			// process group is recorded.
-			// `pid_reused` means the pid now holds a different incarnation, so the
-			// numeric pgid may belong to the new occupant too and is not rescanned.
 			#[cfg(target_os = "macos")]
-			let (incarnation, pid_released, pid_reused) = if darwin_unique_id.is_none() {
-				let observation = process::Process::observe(pid);
-				let reused = matches!(
-					(&incarnation, &observation),
-					(Some(pinned), process::ProcessObservation::Present { incarnation: observed })
-						if pinned != observed
-				);
-				match observed_spawn_incarnation(incarnation, observation) {
-					Ok(Some(incarnation)) => (Some(incarnation), false, false),
-					Ok(None) => (None, true, reused),
+			let (incarnation, pid_released) = if darwin_unique_id.is_none() {
+				match observed_spawn_incarnation(incarnation, process::Process::observe(pid)) {
+					Ok(Some(incarnation)) => (Some(incarnation), false),
+					Ok(None) => (None, true),
 					Err(()) => std::process::exit(70),
 				}
 			} else {
-				(incarnation, false, false)
+				(incarnation, false)
 			};
 			#[cfg(not(target_os = "macos"))]
-			let (pid_released, pid_reused) = (false, false);
+			let pid_released = false;
 			let Some(incarnation) = incarnation else {
 				let mut targets = self.targets.lock().expect("process target lock poisoned");
 				if !pid_released {
 					targets.add_pid(pid);
 				}
-				// A reaped leader (confirmed Absent) leaves only a numeric PGID, which
-				// cleanup does not treat as authority. With the pid absent, no
-				// replacement can lead that group yet, so its surviving members are
-				// ours: capture identity-bound references now so cancellation can
-				// still reach them. After a reuse the group is not rescanned.
-				//
-				// The numeric PGID is published as signal authority only while a pinned
-				// member keeps the group alive (a pgid is not reused while it has
-				// members). A confirmed-vacant or reused group is not published: once
-				// empty, its id could be reused and a group signal would hit a stranger.
-				#[cfg(unix)]
-				let group_held = !pid_released
-					|| (!pid_reused
-						&& process_group_id.is_some_and(|pgid| {
-							process::pin_process_group_members(&mut targets, pgid)
-								.is_some_and(|pinned| pinned > 0)
-						}));
-				#[cfg(not(unix))]
-				let group_held = !pid_released;
 				drop(targets);
-				if group_held && let Some(pgid) = process_group_id {
+				// A released leader (Absent or reused) leaves only a numeric PGID. Any
+				// later lookup by that number can race a reuse (the group may empty
+				// and be reassigned between observation and lookup), so the group is
+				// neither rescanned nor published as signal authority: adopting a
+				// stranger's group is worse than missing an escaped member. Members
+				// still reachable from owned processes are covered by the guardian's
+				// ancestry tracking and the session/descendant scans at cleanup.
+				if !pid_released && let Some(pgid) = process_group_id {
 					self
 						.process_group_id
 						.compare_exchange(0, pgid, Ordering::SeqCst, Ordering::SeqCst)
@@ -2353,7 +2333,10 @@ mod tests {
 		let pid = i32::try_from(child.id()).expect("pid fits");
 		child.wait().expect("reap child");
 		observer.spawned(pid, Some(pid));
-		assert_eq!(observer.process_group_id.load(Ordering::SeqCst), pid);
+		// On macOS the reaped child is confirmed Absent, so its numeric pgid is not
+		// published as signal authority. Elsewhere the pid path still records it.
+		let expected_pgid = if cfg!(target_os = "macos") { 0 } else { pid };
+		assert_eq!(observer.process_group_id.load(Ordering::SeqCst), expected_pgid);
 		assert_eq!(fs::read_to_string(&path).expect("read ledger"), "");
 		fs::remove_file(path).expect("remove ledger");
 	}

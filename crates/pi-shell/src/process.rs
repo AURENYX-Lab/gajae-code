@@ -2277,18 +2277,13 @@ impl TerminationTargets {
 /// Pin every currently visible member of an owned process group.
 /// Returns false when the process table could not be observed.
 pub fn add_process_group_members(targets: &mut TerminationTargets, pgid: i32) -> bool {
-	pin_process_group_members(targets, pgid).is_some()
-}
-
-/// Pin every currently visible member of an owned process group and return how
-/// many were pinned, or `None` when the process table could not be observed.
-pub fn pin_process_group_members(targets: &mut TerminationTargets, pgid: i32) -> Option<usize> {
-	let processes = platform::processes_in_group(pgid)?;
-	let count = processes.len();
+	let Some(processes) = platform::processes_in_group(pgid) else {
+		return false;
+	};
 	for process in processes {
 		targets.add_process(Process::from_inner(process));
 	}
-	Some(count)
+	true
 }
 
 #[cfg(unix)]
