@@ -138,12 +138,22 @@ impl ExternalProcessObserver for CommandProcessObserver {
 				// replacement can lead that group yet, so its surviving members are
 				// ours: capture identity-bound references now so cancellation can
 				// still reach them. After a reuse the group is not rescanned.
+				//
+				// The numeric PGID is published as signal authority only while a pinned
+				// member keeps the group alive (a pgid is not reused while it has
+				// members). A confirmed-vacant or reused group is not published: once
+				// empty, its id could be reused and a group signal would hit a stranger.
 				#[cfg(unix)]
-				if !pid_reused && let Some(pgid) = process_group_id {
-					process::add_process_group_members(&mut targets, pgid);
-				}
+				let group_held = !pid_released
+					|| (!pid_reused
+						&& process_group_id.is_some_and(|pgid| {
+							process::pin_process_group_members(&mut targets, pgid)
+								.is_some_and(|pinned| pinned > 0)
+						}));
+				#[cfg(not(unix))]
+				let group_held = !pid_released;
 				drop(targets);
-				if let Some(pgid) = process_group_id {
+				if group_held && let Some(pgid) = process_group_id {
 					self
 						.process_group_id
 						.compare_exchange(0, pgid, Ordering::SeqCst, Ordering::SeqCst)
