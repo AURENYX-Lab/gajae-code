@@ -1567,6 +1567,10 @@ test("tab-worker graph changes always include install-methods and are Darwin rel
 		const tasks = targeted(["packages/coding-agent/src/sdk/prompt-deadline-lease.ts"]);
 		expect(tasks.map(task => task.key)).toContain("test:packages/coding-agent/test/sdk-prompt-deadline-manager.test.ts");
 	});
+	test("broker lifecycle changes select the lifecycle e2e suite", () => {
+		const tasks = targeted(["packages/coding-agent/src/sdk/broker/lifecycle.ts"]);
+		expect(tasks.map(task => task.key)).toContain("test:packages/coding-agent/test/sdk-broker-lifecycle-e2e.test.ts");
+	});
 	test("agent-session source changes select the promotion and concurrency suites", () => {
 		const tasks = targeted(["packages/coding-agent/src/session/agent-session.ts"]);
 		const keys = tasks.map(task => task.key);
