@@ -5404,6 +5404,15 @@ export function createNotificationsExtension(
 			const activeRuntime = runtime;
 			if (!activeRuntime) return;
 			const fail = (cause: string, frameBytes: number) => {
+				// A non-terminal frame only reports progress from a still-running
+				// prompt. Abandon its delivery on failure instead of publishing a
+				// synthetic terminal that could race the real run and make ACP
+				// settle the prompt while provider/tool execution continues.
+				if (frame.type !== "agent_end" && frame.type !== "agent_failed") {
+					logger.warn(`sdk: correlated non-terminal delivery abandoned: cause=${cause} frameBytes=${frameBytes}`);
+					abandonPrompt(submission);
+					return;
+				}
 				const safeCause = isSafePromptFailureCode(cause) ? cause : "unknown";
 				const correlation = { commandId: String(frame.commandId), turnId: String(frame.turnId) };
 				const outcome = failedPromptOutcome({

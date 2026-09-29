@@ -192,7 +192,7 @@ isolatedSdkHostTest("oversized correlated snapshots still reach a prompt termina
 });
 
 isolatedSdkHostTest(
-	"failed correlated delivery sends a classified terminal",
+	"failed correlated terminal delivery sends a classified terminal",
 	async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-delivery-failure-"));
 		dirs.push(cwd);
@@ -222,17 +222,13 @@ isolatedSdkHostTest(
 			connectionId,
 			json,
 		) {
-			if (JSON.parse(json).kind === "message_update")
+			if (JSON.parse(json).type === "agent_end")
 				throw new Error("sdk directed delivery rejected: cause=writer_backlog_full frameBytes=200");
 			return original.call(this, connectionId, json);
 		});
 		try {
-			await handlers.get("message_update")?.(
-				{
-					type: "message_update",
-					message: { role: "assistant", content: [] },
-					assistantMessageEvent: { type: "text_delta", delta: "text" },
-				},
+			await handlers.get("agent_end")?.(
+				{ type: "agent_end", stopReason: "completed", messages: [] },
 				sessionContext,
 			);
 			await waitFor(
@@ -253,6 +249,62 @@ isolatedSdkHostTest(
 			expect(failure.error.cause).toBe("writer_backlog_full");
 			expect(failure.error.frameBytes).toBeLessThan(RESPONSE_CEILING_BYTES);
 			expect(failure.outcome.providerCode).toBe("writer_backlog_full");
+		} finally {
+			send.mockRestore();
+		}
+	},
+	10_000,
+);
+
+isolatedSdkHostTest(
+	"failed correlated non-terminal delivery does not terminalize an active prompt",
+	async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-delivery-race-"));
+		dirs.push(cwd);
+		const sessionId = `sdk-delivery-race-${Date.now()}`;
+		const sessionContext = context(cwd, sessionId);
+		const handlers = start(sessionContext, () => new Promise<never>(() => {}) as never);
+		const { socket, frames } = await connect(cwd, sessionId);
+		socket.send(
+			JSON.stringify({
+				type: "control_request",
+				id: "delivery-race",
+				operation: "turn.prompt",
+				input: { text: "stream" },
+			}),
+		);
+		await waitFor(
+			() => frames.some(frame => frame.type === "control_response" && frame.id === "delivery-race"),
+			"prompt acknowledgement",
+		);
+		const original = NotificationServer.prototype.sendTo;
+		let failedNonTerminalSend = false;
+		let syntheticTerminalSend = false;
+		const send = spyOn(NotificationServer.prototype, "sendTo").mockImplementation(function (
+			this: NotificationServer,
+			connectionId,
+			json,
+		) {
+			const frame = JSON.parse(json) as { type?: string; kind?: string };
+			if (!failedNonTerminalSend && frame.type === "event" && frame.kind === "message_update") {
+				failedNonTerminalSend = true;
+				throw new Error("sdk directed delivery rejected: cause=writer_backlog_full frameBytes=200");
+			}
+			if (frame.type === "agent_failed") syntheticTerminalSend = true;
+			return original.call(this, connectionId, json);
+		});
+		try {
+			await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+			await handlers.get("message_update")?.(
+				{
+					type: "message_update",
+					message: { role: "assistant", content: [] },
+					assistantMessageEvent: { type: "text_delta", delta: "active run" },
+				},
+				sessionContext,
+			);
+			expect(failedNonTerminalSend).toBe(true);
+			expect(syntheticTerminalSend).toBe(false);
 		} finally {
 			send.mockRestore();
 		}
