@@ -84,6 +84,7 @@ const SUITES: Record<
 	// Each builtins sample loops the builtin 10,000 times (~0.3-0.55 s), so 200
 	// samples per case would blow the 10-minute adapter timeout and the job budget.
 	builtins: { adapter: "packages/natives/bench/builtins.ts", actualSuite: "builtins", cases: ["B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08"], defaultIterations: 20 },
+	clipboard: { adapter: "packages/natives/bench/clipboard.ts", actualSuite: "clipboard", cases: ["C01"] },
 	rss: { adapter: "", actualSuite: "rss", cases: [] },
 };
 
