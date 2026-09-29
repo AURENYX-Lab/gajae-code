@@ -49,6 +49,7 @@ import { SessionIndex, type SessionIndexEvent } from "../src/sdk/broker/session-
 import { runSdkSessionCli } from "../src/sdk/cli";
 import { SdkClient } from "../src/sdk/client";
 import { readSdkBrokerDiscovery } from "../src/sdk/client/discovery";
+import { createSessionLifecycleService } from "../src/sdk/lifecycle/client";
 import type { CreateLifecycleAgentSessionResult } from "../src/sdk/lifecycle-session";
 import { createSdkMcpServer } from "../src/sdk/mcp";
 import { SessionRouter } from "../src/sdk/router";
@@ -88,6 +89,80 @@ async function waitFor<T>(read: () => Promise<T | undefined>, label: string): Pr
 		await Bun.sleep(25);
 	}
 	throw new Error(`Timed out waiting for ${label}`);
+}
+
+async function expectReadinessCutoffReapsBlockedExtension(extensionSource: string, name: string): Promise<void> {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", `gjc-lifecycle-${name}-`));
+	const agentDir = path.join(root, "agent");
+	const target = path.join(root, "workspace");
+	const stateRoot = path.join(target, ".gjc", "state");
+	const service = createSessionLifecycleService(agentDir);
+	let fixture: Awaited<ReturnType<typeof startFixtureBrokerWithLeaseForTest>> | undefined;
+	let child: { pid: number; incarnation: string; sessionId: string } | undefined;
+	try {
+		await fs.mkdir(path.join(agentDir, "extensions"), { recursive: true });
+		await fs.writeFile(path.join(agentDir, "extensions", `${name}.ts`), extensionSource);
+		fixture = await startFixtureBrokerWithLeaseForTest({ agentDir });
+
+		const create = service.createExternal({
+			actor: { id: "cutoff-regression", namespace: "sdk-broker-lifecycle-e2e" },
+			capability: "session.create",
+			requestKey: `${name}-readiness-cutoff`,
+			readinessTimeoutMs: 4_000,
+			target: { kind: "plain_dir", path: target },
+		});
+		const observedChild = await waitFor(async () => {
+			const sdk = path.join(stateRoot, "sdk");
+			const markerName = (await fs.readdir(sdk).catch(() => [] as string[])).find(entry =>
+				entry.endsWith(".lifecycle.json"),
+			);
+			if (!markerName) return undefined;
+			try {
+				const parsed = JSON.parse(await fs.readFile(path.join(sdk, markerName), "utf8")) as {
+					pid?: unknown;
+					incarnation?: unknown;
+				};
+				if (typeof parsed.pid !== "number" || typeof parsed.incarnation !== "string") return undefined;
+				return {
+					pid: parsed.pid,
+					incarnation: parsed.incarnation,
+					sessionId: markerName.slice(0, -".lifecycle.json".length),
+				};
+			} catch {
+				return undefined;
+			}
+		}, `${name} lifecycle child`);
+		child = observedChild;
+
+		const response = await create;
+		expect(response).toMatchObject({
+			ok: false,
+			operation: "session.create",
+			certainty: "retryable",
+			error: { code: "readiness_timeout" },
+		});
+		expect(response).not.toMatchObject({ error: { code: "terminal_uncertain" } });
+		await waitFor(async () => {
+			try {
+				process.kill(observedChild.pid, 0);
+				return undefined;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+				throw error;
+			}
+		}, `${name} lifecycle child exit`);
+		const sdkEntries = await fs.readdir(path.join(stateRoot, "sdk")).catch(() => [] as string[]);
+		expect(sdkEntries.filter(entry => entry.startsWith(observedChild.sessionId))).toEqual([]);
+		await expect(fs.access(path.join(stateRoot, "sdk", `${observedChild.sessionId}.json`))).rejects.toThrow();
+	} finally {
+		if (child && observeProcessForTest(child.pid, child.incarnation) === "alive") {
+			try {
+				process.kill(child.pid, "SIGKILL");
+			} catch {}
+		}
+		await fixture?.lease.close();
+		await fs.rm(root, { recursive: true, force: true });
+	}
 }
 
 async function createSessionHostFixture(
@@ -8417,6 +8492,24 @@ test("broker starts from the production broker entrypoint with no sessions", asy
 		await fs.rm(agentDir, { recursive: true, force: true });
 	}
 });
+
+test("createExternal reaps an async module-load extension when readiness expires", async () => {
+	await expectReadinessCutoffReapsBlockedExtension(
+		`await Bun.sleep(6_000);
+export default function() {}
+`,
+		"async-extension-load",
+	);
+}, 15_000);
+
+test("createExternal reaps a synchronous Atomics.wait extension when readiness expires", async () => {
+	await expectReadinessCutoffReapsBlockedExtension(
+		`Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 6_000);
+export default function() {}
+`,
+		"sync-extension-load",
+	);
+}, 15_000);
 
 test("shipped sdk session-host-internal stays alive only after a semantic ready event and serves real requests", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-subprocess-"));
