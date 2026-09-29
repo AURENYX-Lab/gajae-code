@@ -56,6 +56,7 @@ export const CURATED_TIER_LABELS = {
 		{ tier: "balanced", effort: "medium", rank: 1 },
 	],
 	"openai-codex/gpt-6-sol": [{ tier: "strong", effort: "high", rank: 1 }],
+	"openai-codex/gpt-6.1-sol": [{ tier: "strong", effort: "high", rank: 2 }],
 	"google/gemini-3.5-flash-lite": [{ tier: "fast", rank: 1 }],
 	"google/gemini-2.5-flash-lite": [{ tier: "fast", rank: 2 }],
 	"google/gemini-3.5-flash": [{ tier: "balanced", rank: 1 }],
