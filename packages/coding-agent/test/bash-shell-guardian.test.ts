@@ -22,6 +22,16 @@ function lookupOf(...live: NativeProcess[]): (pid: number) => NativeProcess | un
 	return pid => live.find(processRef => processRef.pid === pid);
 }
 
+type Observation = { status: "present" | "absent" | "unknown"; incarnation?: string };
+
+/** Native observation over the same doubles: present with its incarnation, else absent. */
+function observeOf(...live: NativeProcess[]): (pid: number) => Observation {
+	return pid => {
+		const found = live.find(processRef => processRef.pid === pid);
+		return found ? { status: "present", incarnation: found.incarnation } : { status: "absent" };
+	};
+}
+
 /**
  * Tests for bash-shell-guardian ownership tracking and Darwin ancestry tracking.
  */
@@ -183,6 +193,7 @@ describe("bash-shell-guardian", () => {
 			const tracker = createDarwinAncestryTracker(owned, {
 				uniqueIdentity: noUniqueIdentity,
 				fromPid: lookupOf(processRef),
+				observe: observeOf(processRef),
 			});
 			if (!tracker) return; // Darwin-only tracker.
 			expect(tracker.track(processRef)).toBe(true);
@@ -196,10 +207,27 @@ describe("bash-shell-guardian", () => {
 			const tracker = createDarwinAncestryTracker(owned, {
 				uniqueIdentity: noUniqueIdentity,
 				fromPid: lookupOf(processDouble(12345, "replacement")),
+				observe: observeOf(processDouble(12345, "replacement")),
 			});
 			if (!tracker) return;
 			expect(tracker.track(recorded)).toBe(true);
 			expect(owned.size).toBe(0);
+			tracker.close();
+		});
+
+		it("keeps a record as an anchor when the post-query lookup is inconclusive", () => {
+			const processRef = processDouble(12345, "recorded");
+			const owned = new Map<string, NativeProcess>();
+			const tracker = createDarwinAncestryTracker(owned, {
+				// A unique id is returned but cannot be vouched for without a conclusive
+				// incarnation check, so it must not be seeded.
+				uniqueIdentity: () => ({ uniqueId: 77n, parentUniqueId: 0n }),
+				fromPid: () => null,
+				observe: () => ({ status: "unknown" }),
+			});
+			if (!tracker) return;
+			expect(tracker.track(processRef)).toBe(true);
+			expect(owned.get("12345:recorded")).toBe(processRef);
 			tracker.close();
 		});
 
@@ -214,6 +242,7 @@ describe("bash-shell-guardian", () => {
 			const tracker = createDarwinAncestryTracker(owned, {
 				uniqueIdentity: pid => ids.get(pid),
 				fromPid: lookupOf(child, grandchild),
+				observe: observeOf(child, grandchild),
 			});
 			if (!tracker) return;
 			expect(tracker.track(child)).toBe(true);

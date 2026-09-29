@@ -171,6 +171,7 @@ export type DarwinIdentity = { uniqueId: bigint; parentUniqueId: bigint };
 export type DarwinAncestryTrackerDeps = {
 	uniqueIdentity?: (pid: number) => DarwinIdentity | undefined;
 	fromPid?: (pid: number) => NativeProcess | null | undefined;
+	observe?: (pid: number) => { status: "present" | "absent" | "unknown"; incarnation?: string };
 };
 
 export function createDarwinAncestryTracker(
@@ -193,6 +194,7 @@ export function createDarwinAncestryTracker(
 		const retainedUniqueIds = new Set<bigint>();
 		const { Process } = require("@gajae-code/natives") as NativeProcessBindings;
 		const fromPid = deps.fromPid ?? ((pid: number) => Process.fromPid(pid));
+		const observe = deps.observe ?? ((pid: number) => Process.observe(pid));
 		// Reuse buffer across poll iterations to avoid allocations inside the loop.
 		const identityBuffer = new Uint8Array(56);
 		const identityView = new DataView(identityBuffer.buffer);
@@ -245,11 +247,18 @@ export function createDarwinAncestryTracker(
 			let identity: { uniqueId: bigint; parentUniqueId: bigint } | undefined;
 			if (signedUniqueId === undefined) {
 				const queried = uniqueIdentity(processRef.pid);
-				if (fromPid(processRef.pid)?.incarnation !== processRef.incarnation) {
-					// Exited (or reused) since authentication: retain nothing new.
+				const after = observe(processRef.pid);
+				if (
+					after.status === "absent" ||
+					(after.status === "present" && after.incarnation !== processRef.incarnation)
+				) {
+					// Confirmed exited or reused since authentication: retain nothing new.
 					return true;
 				}
-				identity = queried;
+				// Present with the same incarnation keeps the queried id. An
+				// inconclusive lookup cannot vouch for it, so the record falls through
+				// as incarnation-only and is kept as an anchor rather than dropped.
+				identity = after.status === "present" ? queried : undefined;
 			}
 			const uniqueId = signedUniqueId ?? identity?.uniqueId;
 			if (uniqueId === undefined) {
