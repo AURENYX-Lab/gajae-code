@@ -221,8 +221,16 @@ export function createDarwinAncestryTracker(
 			anchorKeys.add(key);
 			incarnationOnlyAnchors.push(processRef);
 		};
+		// children() validates its parent and then snapshots the process table; the
+		// parent can exit and its pid be reused in between, returning a stranger's
+		// children. Only trust a snapshot if the parent still holds its incarnation
+		// after it was taken.
+		const childrenOf = (parent: NativeProcess): NativeProcess[] => {
+			const children = parent.children();
+			return fromPid(parent.pid)?.incarnation === parent.incarnation ? children : [];
+		};
 		const seedAnchorDescendants = (anchor: NativeProcess): void => {
-			const pending = [...anchor.children()];
+			const pending = [...childrenOf(anchor)];
 			while (pending.length > 0) {
 				const child = pending.pop()!;
 				retainOwnedProcess(owned, child);
@@ -243,7 +251,7 @@ export function createDarwinAncestryTracker(
 						}
 					}
 				}
-				pending.push(...child.children());
+				pending.push(...childrenOf(child));
 			}
 		};
 		const track = (processRef: NativeProcess, signedUniqueId?: bigint): boolean => {

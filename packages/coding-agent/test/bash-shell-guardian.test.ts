@@ -242,6 +242,30 @@ describe("bash-shell-guardian", () => {
 			tracker.close();
 		});
 
+		it("ignores an anchor's child snapshot once the anchor pid was reused", () => {
+			const stranger = processDouble(200, "stranger");
+			let reused = false;
+			// The anchor is live and valid when tracked; its pid is reused while
+			// children() takes the snapshot, which therefore lists a stranger's child.
+			const anchor = processDouble(100, "anchor", () => {
+				reused = true;
+				return [stranger];
+			});
+			const current = (pid: number): NativeProcess =>
+				pid === 100 ? (reused ? processDouble(100, "replacement") : anchor) : stranger;
+			const owned = new Map<string, NativeProcess>();
+			const tracker = createDarwinAncestryTracker(owned, {
+				uniqueIdentity: () => undefined,
+				fromPid: current,
+				observe: pid => ({ status: "present", incarnation: current(pid).incarnation }),
+			});
+			if (!tracker) return;
+			expect(tracker.track(anchor)).toBe(true);
+			expect(owned.get("100:anchor")).toBe(anchor);
+			expect(owned.has("200:stranger")).toBe(false);
+			tracker.close();
+		});
+
 		it("anchors descendants of an incarnation-only record by their unique ids (#6086)", () => {
 			const ids = new Map<number, { uniqueId: bigint; parentUniqueId: bigint }>([
 				[101, { uniqueId: 9001n, parentUniqueId: 0n }],
