@@ -11,6 +11,20 @@ import { type BashArtifactSaveResult, type BashResult, executeBash } from "../ex
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { buildGjcRuntimeSessionEnv } from "../gjc-runtime/goal-mode-request";
 import {
+	MANAGED_OWNER_PREDECESSOR_GENERATION_ENV,
+	MANAGED_OWNER_PREDECESSOR_INCARNATION_ENV,
+	MANAGED_OWNER_PREDECESSOR_RUN_ID_ENV,
+	MANAGED_OWNER_PREDECESSOR_TOKEN_ENV,
+	MANAGED_OWNER_TRANSCRIPT_PATH_ENV,
+} from "../gjc-runtime/managed-owner-admission";
+import {
+	MANAGED_OWNER_CHILD_TOKEN_ENV,
+	MANAGED_OWNER_GENERATION_ENV,
+	MANAGED_OWNER_INCARNATION_ENV,
+	MANAGED_OWNER_RUN_ID_ENV,
+	MANAGED_OWNER_STATE_DIR_ENV,
+} from "../gjc-runtime/managed-owner-supervisor";
+import {
 	GJC_RALPLAN_ARTIFACT_ENV,
 	GJC_RESTRICTED_ROLE_AGENT_BASH_ENV,
 } from "../gjc-runtime/restricted-role-agent-bash";
@@ -94,6 +108,21 @@ const ARTIFACT_SAVE_DIAGNOSTIC_MAX_BYTES = 256;
 const BASH_ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MASTER_CAPABILITY_ENV = "GJC_MASTER_CAPABILITY";
 const MASTER_OWNER_SESSION_ENV = "GJC_MASTER_OWNER_SESSION_ID";
+// Managed-owner env vars that must be scrubbed from child processes.
+// Exported for testing the env scrubbing behavior.
+export const MANAGED_OWNER_BASH_ENV = [
+	MANAGED_OWNER_STATE_DIR_ENV,
+	MANAGED_OWNER_GENERATION_ENV,
+	MANAGED_OWNER_RUN_ID_ENV,
+	MANAGED_OWNER_INCARNATION_ENV,
+	MANAGED_OWNER_CHILD_TOKEN_ENV,
+	MANAGED_OWNER_PREDECESSOR_TOKEN_ENV,
+	MANAGED_OWNER_PREDECESSOR_GENERATION_ENV,
+	MANAGED_OWNER_PREDECESSOR_RUN_ID_ENV,
+	MANAGED_OWNER_PREDECESSOR_INCARNATION_ENV,
+	MANAGED_OWNER_TRANSCRIPT_PATH_ENV,
+] as const;
+
 const COORDINATOR_ONLY_BASH_ENV = [
 	"GJC_COORDINATOR_SESSION_STATE_FILE",
 	"GJC_COORDINATOR_SESSION_ID",
@@ -102,6 +131,8 @@ const COORDINATOR_ONLY_BASH_ENV = [
 	"GJC_COORDINATOR_SESSION_READINESS_FILE",
 	"GJC_COORDINATOR_SIDECAR_SIGNATURE_REQUIRED",
 	"GJC_COORDINATOR_SIDECAR_KEY_ID",
+	// Managed-owner env family from managed-owner-supervisor.ts and managed-owner-admission.ts
+	...MANAGED_OWNER_BASH_ENV,
 ] as const;
 const DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS = 60_000;
 const ACP_RELEASE_TIMEOUT_MS = 1_000;
