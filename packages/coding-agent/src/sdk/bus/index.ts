@@ -4248,6 +4248,16 @@ export function shouldAwaitNotificationStartup(event: {
 	return event.type !== "session_switch" || event.transition?.origin !== INTERACTIVE_SELECTOR_RESUME_ORIGIN;
 }
 
+export function boundedCorrelatedAgentEndFrame(frame: Record<string, unknown>): Record<string, unknown> {
+	const finalText = typeof frame.finalText === "string" ? frame.finalText : "";
+	if (finalText.length <= RESPONSE_CEILING_BYTES / 8) return frame;
+	return {
+		...frame,
+		finalText: `${finalText.slice(0, RESPONSE_CEILING_BYTES / 8)}[truncated]`,
+		finalTextTruncated: true,
+	};
+}
+
 export function createNotificationsExtension(
 	api: ExtensionAPI,
 	options: {
@@ -5369,7 +5379,7 @@ export function createNotificationsExtension(
 					event?: { message?: { role?: string; content?: Array<{ type?: string; text?: string }> } };
 				};
 				const message = payload.event?.message;
-				const text = message?.content?.find(block => block.type === "text")?.text ?? "";
+				const text = message?.content?.find(block => block.type === "text" && block.text)?.text;
 				return {
 					...frame,
 					payload: {
@@ -5378,17 +5388,26 @@ export function createNotificationsExtension(
 							type: "message_end",
 							message: {
 								role: message?.role ?? "assistant",
-								content: [{ type: "text", text: `${text.slice(0, RESPONSE_CEILING_BYTES / 8)}[truncated]` }],
+								content:
+									typeof text === "string"
+										? [
+												{
+													type: "text",
+													text:
+														text.length > RESPONSE_CEILING_BYTES / 8
+															? `${text.slice(0, RESPONSE_CEILING_BYTES / 8)}[truncated]`
+															: text,
+												},
+											]
+										: [],
 							},
 						},
 					},
 				};
 			}
-			if (frame.type === "agent_end")
-				return {
-					...frame,
-					finalText: `${typeof frame.finalText === "string" ? frame.finalText.slice(0, RESPONSE_CEILING_BYTES / 8) : ""}[truncated]`,
-				};
+			if (frame.type === "agent_end") {
+				return boundedCorrelatedAgentEndFrame(frame);
+			}
 			if (frame.type === "agent_failed") {
 				const outcome = frame.outcome as Extract<SdkPromptTerminalOutcome, { kind: "failed" }> | undefined;
 				return {

@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { NotificationServer } from "@gajae-code/natives";
 import type { ExtensionActions, ExtensionAPI } from "../src/extensibility/extensions/types";
 import { brokerOwnerForTest } from "../src/sdk/broker/ensure";
-import { createNotificationsExtension } from "../src/sdk/bus";
+import { boundedCorrelatedAgentEndFrame, createNotificationsExtension } from "../src/sdk/bus";
 import { RESPONSE_CEILING_BYTES } from "../src/sdk/host/query/handlers";
 
 /**
@@ -189,6 +189,72 @@ isolatedSdkHostTest("oversized correlated snapshots still reach a prompt termina
 	expect(messageEnd).toBeDefined();
 	expect(Buffer.byteLength(JSON.stringify(messageEnd))).toBeLessThanOrEqual(RESPONSE_CEILING_BYTES);
 	expect(JSON.stringify(messageEnd)).toContain("[truncated]");
+});
+
+isolatedSdkHostTest("oversized non-text message_end does not fabricate assistant text", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-oversized-non-text-"));
+	dirs.push(cwd);
+	const sessionId = `sdk-oversized-non-text-${Date.now()}`;
+	const sessionContext = context(cwd, sessionId);
+	const handlers = start(sessionContext, () => new Promise<never>(() => {}) as never);
+	const { socket, frames } = await connect(cwd, sessionId);
+	socket.send(
+		JSON.stringify({
+			type: "control_request",
+			id: "oversized-non-text",
+			operation: "turn.prompt",
+			input: { text: "stream" },
+		}),
+	);
+	await waitFor(
+		() => frames.some(frame => frame.type === "control_response" && frame.id === "oversized-non-text"),
+		"prompt acknowledgement",
+	);
+	await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+	const largeImage = {
+		role: "assistant",
+		content: [{ type: "image", data: "x".repeat(RESPONSE_CEILING_BYTES), mimeType: "image/png" }],
+	};
+	await handlers.get("message_update")?.(
+		{
+			type: "message_update",
+			message: { role: "assistant", content: [] },
+			assistantMessageEvent: { type: "thinking_delta", delta: "x" },
+		},
+		sessionContext,
+	);
+	await handlers.get("message_end")?.({ type: "message_end", message: largeImage }, sessionContext);
+	await waitFor(
+		() => frames.some(frame => frame.type === "event" && frame.kind === "message_end"),
+		"message_end",
+		2000,
+	);
+	const messageEnd = frames.find(frame => frame.type === "event" && frame.kind === "message_end");
+	expect(messageEnd).toBeDefined();
+	expect(Buffer.byteLength(JSON.stringify(messageEnd))).toBeLessThanOrEqual(RESPONSE_CEILING_BYTES);
+	const content = (
+		messageEnd?.payload as { event?: { message?: { content?: Array<{ type?: string; text?: string }> } } }
+	).event?.message?.content;
+	expect(content).toEqual([]);
+	expect(JSON.stringify(messageEnd)).not.toContain("[truncated]");
+});
+
+test("oversized agent_end preserves finalText truncation metadata", () => {
+	const agentEnd = boundedCorrelatedAgentEndFrame({
+		type: "agent_end",
+		finalText: "x".repeat(RESPONSE_CEILING_BYTES),
+	});
+	expect(agentEnd.finalTextTruncated).toBe(true);
+	expect((agentEnd.finalText as string).length).toBeLessThan(RESPONSE_CEILING_BYTES);
+	expect(agentEnd.finalText).toContain("[truncated]");
+	const alreadyTruncated = boundedCorrelatedAgentEndFrame({
+		type: "agent_end",
+		finalText: "x".repeat(RESPONSE_CEILING_BYTES),
+		finalTextTruncated: true,
+	});
+	expect(alreadyTruncated.finalTextTruncated).toBe(true);
+	const short = boundedCorrelatedAgentEndFrame({ type: "agent_end", finalText: "short", finalTextTruncated: true });
+	expect(short).toEqual({ type: "agent_end", finalText: "short", finalTextTruncated: true });
 });
 
 isolatedSdkHostTest(
