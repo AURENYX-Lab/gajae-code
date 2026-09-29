@@ -791,8 +791,8 @@ export interface RegistrySelectorIndex {
 	exact: ReadonlySet<string>;
 	/** `id` alone. */
 	ids: ReadonlySet<string>;
-	/** `provider\0id`, for parsed `provider/id` selectors. */
-	providerIds: ReadonlySet<string>;
+	/** Model ids per provider, for parsed `provider/id` selectors (nested, so no delimiter can collide). */
+	providerIds: ReadonlyMap<string, ReadonlySet<string>>;
 	/** Every `/`-delimited suffix of each id (`a/b/c` → `b/c`, `c`). */
 	idSuffixes: ReadonlySet<string>;
 }
@@ -800,7 +800,7 @@ export interface RegistrySelectorIndex {
 export function createRegistrySelectorIndex(models: readonly Model<Api>[]): RegistrySelectorIndex {
 	const exact = new Set<string>();
 	const ids = new Set<string>();
-	const providerIds = new Set<string>();
+	const providerIds = new Map<string, Set<string>>();
 	const idSuffixes = new Set<string>();
 	for (const model of models) {
 		const id = model.id.toLowerCase();
@@ -808,7 +808,12 @@ export function createRegistrySelectorIndex(models: readonly Model<Api>[]): Regi
 		ids.add(id);
 		exact.add(id);
 		exact.add(`${provider}/${id}`);
-		providerIds.add(`${provider}\0${id}`);
+		let providerModelIds = providerIds.get(provider);
+		if (!providerModelIds) {
+			providerModelIds = new Set<string>();
+			providerIds.set(provider, providerModelIds);
+		}
+		providerModelIds.add(id);
 		for (let slash = id.indexOf("/"); slash !== -1; slash = id.indexOf("/", slash + 1)) {
 			idSuffixes.add(id.slice(slash + 1));
 		}
@@ -822,7 +827,7 @@ export function registrySelectorResolvesToModel(selector: string, index: Registr
 	const suffix = splitSelectorThinkingSuffix(normalizedSelector);
 	const baseSelector = suffix.thinkingLevel === undefined ? normalizedSelector : suffix.selector;
 	const parsed = parseModelString(baseSelector);
-	if (parsed) return index.providerIds.has(`${parsed.provider}\0${parsed.id}`);
+	if (parsed) return index.providerIds.get(parsed.provider)?.has(parsed.id) ?? false;
 	return index.ids.has(baseSelector) || index.idSuffixes.has(baseSelector);
 }
 

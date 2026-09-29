@@ -31,6 +31,13 @@ describe("registry selector index", () => {
 		expect(registrySelectorResolvesToModel("openai/gpt-5:high", index)).toBe(true);
 	});
 
+	it("keeps provider/id pairs distinct even when a part contains NUL", () => {
+		// provider "a" + id "b\0c" must not collide with provider "a\0b" + id "c".
+		const nulIndex = createRegistrySelectorIndex([model("a", "b\u0000c")]);
+		expect(registrySelectorResolvesToModel("a/b\u0000c", nulIndex)).toBe(true);
+		expect(registrySelectorResolvesToModel("a\u0000b/c", nulIndex)).toBe(false);
+	});
+
 	it("rejects unknown selectors and partial id prefixes", () => {
 		expect(registrySelectorResolvesToModel("gpt-4o", index)).toBe(false);
 		expect(registrySelectorResolvesToModel("sonnet-4", index)).toBe(false);
