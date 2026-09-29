@@ -317,6 +317,26 @@ export async function isSdkInternalRuntimeImagePresent(file: string): Promise<bo
 	}
 }
 
+const RUNTIME_IMAGE_PROBE_TIMED_OUT = Symbol("runtime-image-probe-timed-out");
+
+/**
+ * `fsp.stat` bounded by the runtime-image probe timeout. A metadata request on a
+ * stalled mount can never settle; the timeout sentinel lets callers treat that as
+ * inconclusive instead of pending forever.
+ */
+async function statRuntimeImageBounded(file: string): Promise<fs.Stats | typeof RUNTIME_IMAGE_PROBE_TIMED_OUT> {
+	const timedOut = Promise.withResolvers<typeof RUNTIME_IMAGE_PROBE_TIMED_OUT>();
+	const timer: NodeJS.Timeout = setTimeout(
+		() => timedOut.resolve(RUNTIME_IMAGE_PROBE_TIMED_OUT),
+		RUNTIME_IMAGE_PROBE_TIMEOUT_MS,
+	);
+	try {
+		return await Promise.race([fsp.stat(file), timedOut.promise]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 /**
  * Capture the runtime image identity (dev, ino, mtimeMs, size) at startup.
  * Used to detect if the binary at the same path has been replaced.
@@ -324,8 +344,9 @@ export async function isSdkInternalRuntimeImagePresent(file: string): Promise<bo
 export async function captureRuntimeImageIdentity(file: string): Promise<SdkInternalRuntimeImageIdentity | undefined> {
 	try {
 		const resolved = path.resolve(file);
-		const stats = await fsp.stat(resolved);
-		if (!stats.isFile()) return undefined;
+		const stats = await statRuntimeImageBounded(resolved);
+		// A timed-out probe leaves the identity unknown, like any other failure.
+		if (stats === RUNTIME_IMAGE_PROBE_TIMED_OUT || !stats.isFile()) return undefined;
 		return {
 			path: resolved,
 			dev: stats.dev,
@@ -350,7 +371,9 @@ export async function isSdkInternalRuntimeImageReplaced(
 	if (startupIdentity === undefined) return false;
 
 	try {
-		const stats = await fsp.stat(startupIdentity.path);
+		const stats = await statRuntimeImageBounded(startupIdentity.path);
+		// A timed-out probe is inconclusive, not proof of replacement.
+		if (stats === RUNTIME_IMAGE_PROBE_TIMED_OUT) return false;
 		if (!stats.isFile()) return false; // Not a file, but not proven gone
 		// dev/ino catch a replacement at the same path; size and mtime catch an
 		// in-place rewrite that keeps the inode (mtime also covers same-size bytes).

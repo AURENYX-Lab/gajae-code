@@ -219,6 +219,27 @@ describe("Broker recovery with replaced runtime image", () => {
 		expect(await isSdkInternalRuntimeImageReplaced(startupIdentity)).toBe(true);
 	});
 
+	it("treats a never-settling runtime image stat as inconclusive", async () => {
+		const fsp = await import("node:fs/promises");
+		const { captureRuntimeImageIdentity, isSdkInternalRuntimeImageReplaced } = await import(
+			"../src/sdk/broker/runtime"
+		);
+		const runtimeImagePath = path.join(tempDir.path(), "runtime-stalled");
+		await Bun.write(runtimeImagePath, "bytes");
+		const identity = await captureRuntimeImageIdentity(runtimeImagePath);
+		// A stalled mount: stat never settles. Both probes must resolve on their bound.
+		const neverSettles = (): Promise<never> => new Promise<never>(() => {});
+		const stall = vi.spyOn(fsp, "stat").mockImplementation(neverSettles as typeof fsp.stat);
+		try {
+			const started = Date.now();
+			expect(await captureRuntimeImageIdentity(runtimeImagePath)).toBeUndefined();
+			expect(await isSdkInternalRuntimeImageReplaced(identity)).toBe(false);
+			expect(Date.now() - started).toBeLessThan(5_000);
+		} finally {
+			stall.mockRestore();
+		}
+	});
+
 	it("backoff schedule blocks recovery attempts until time passes", async () => {
 		const agentDir = path.join(tempDir.path(), "agent");
 
