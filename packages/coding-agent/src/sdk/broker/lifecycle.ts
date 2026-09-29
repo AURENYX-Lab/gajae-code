@@ -8418,20 +8418,8 @@ export async function executeLifecycle(
 			: response;
 	// The extended proof window may reconcile artifacts after the original
 	// admission deadline, but cannot retroactively prove a timely spawn failure.
-	const admissionCleanupDeadlineAt = (entry?.effectIntent as LifecycleEffectIntentWithDeadline | undefined)
-		?.admissionCleanupDeadlineAt;
-	const lateSpawnFailure =
-		!terminalResponse.ok &&
-		terminalResponse.error.code === "spawn_failed" &&
-		admissionCleanupDeadlineAt !== undefined &&
-		timing.now() >= admissionCleanupDeadlineAt;
 	return {
-		response: lateSpawnFailure
-			? {
-					...terminalResponse,
-					error: { code: "terminal_uncertain", message: terminalUncertainStartupMessage(response) },
-				}
-			: terminalResponse,
+		response: classifyLateAdmissionSpawnFailure(terminalResponse, entry?.effectIntent, timing.now(), response),
 		...(durableEffects ? { durableEffects } : {}),
 		...(startupFailure ? { startupFailure } : {}),
 	};

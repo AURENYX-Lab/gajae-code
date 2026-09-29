@@ -24,6 +24,7 @@ import { brokerOwnerForTest, startFixtureBrokerWithLeaseForTest } from "../src/s
 import { deriveIdempotencyIdentity } from "../src/sdk/broker/identity";
 import {
 	canonicalDeleteLocatorPath,
+	classifyLateAdmissionSpawnFailure,
 	deriveLifecycleDeadlines,
 	executeLifecycle,
 	hasValidLifecycleDeadlines,
@@ -9241,6 +9242,17 @@ test("persisted lifecycle cleanup replay classifies only completed late spawn fa
 		await broker.stop();
 		await fs.rm(root, { recursive: true, force: true });
 	}
+});
+
+test("preownership spawn failure remains proven after admission cleanup deadline", () => {
+	const failure: BrokerResponse = { ok: false, error: { code: "spawn_failed", message: "pre-PID failure" } };
+	const effectIntent = {
+		sessionId: "preownership",
+		stateRoot: "/unused",
+		childOwnershipEstablished: false,
+		admissionCleanupDeadlineAt: 2_000,
+	};
+	expect(classifyLateAdmissionSpawnFailure(failure, effectIntent, 2_001, failure)).toEqual(failure);
 });
 
 test("production post-registration startup failure proves cleanup and exact replay", async () => {
