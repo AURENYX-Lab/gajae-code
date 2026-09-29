@@ -629,7 +629,10 @@ export function hasValidLifecycleDeadlines(value: LifecycleDeadlines, now = Date
 type Input = Record<string, unknown>;
 // The admitted launch deadline must survive the response phase: executeLifecycle
 // receives the caller's original input after startup admission has expanded it.
-type LifecycleEffectIntentWithDeadline = LifecycleEffectIntent & { lifecycleCleanupDeadlineAt?: number };
+type LifecycleEffectIntentWithDeadline = LifecycleEffectIntent & {
+	lifecycleCleanupDeadlineAt?: number;
+	admissionCleanupDeadlineAt?: number;
+};
 export const isCanonicalSessionId = (value: string): boolean => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
 const defaultStateRoot = (cwd: string) => path.join(path.resolve(cwd), ".gjc", "state");
 const hasDefaultStateRoot = (cwd: string, root: string) => path.resolve(root) === defaultStateRoot(cwd);
@@ -6639,6 +6642,9 @@ async function executeLifecycleResponse(
 			childOwnershipEstablished: false,
 			lifecycleCleanupDeadlineAt:
 				outerCleanupDeadlineAt ?? (childDeadlines as LifecycleDeadlines).lifecycleCleanupDeadlineAt,
+			...(brokerAdmission
+				? { admissionCleanupDeadlineAt: (childDeadlines as LifecycleDeadlines).lifecycleCleanupDeadlineAt }
+				: {}),
 			...(plannedWorktreeIntent ? { worktree: plannedWorktreeIntent } : {}),
 		};
 
@@ -8132,6 +8138,26 @@ export interface LifecycleExecutionOutcome {
 	deferredArtifactCleanup?: () => Promise<void>;
 }
 
+export function classifyLateAdmissionSpawnFailure(
+	response: BrokerResponse,
+	effectIntent: LifecycleEffectIntentWithDeadline | undefined,
+	now: number,
+	messageSource: BrokerResponse,
+): BrokerResponse {
+	if (
+		response.ok ||
+		response.error.code !== "spawn_failed" ||
+		effectIntent?.childOwnershipEstablished !== true ||
+		effectIntent.admissionCleanupDeadlineAt === undefined ||
+		now < effectIntent.admissionCleanupDeadlineAt
+	)
+		return response;
+	return {
+		...response,
+		error: { code: "terminal_uncertain", message: terminalUncertainStartupMessage(messageSource) },
+	};
+}
+
 /** Returns the response together with every durable lifecycle fact needed for truthful replay. */
 export async function executeLifecycle(
 	broker: Broker,
@@ -8140,6 +8166,7 @@ export async function executeLifecycle(
 	identity: string,
 	cleanup?: CleanupEvidence,
 ): Promise<LifecycleExecutionOutcome> {
+	const timing = lifecycleTiming(broker);
 	let proofBudget = lifecycleProofBudgetFromInput(broker, input);
 	if (!proofBudget)
 		proofBudget = lifecycleProofBudgetFromEffectIntent(broker, broker.ledger.get(identity)?.effectIntent);
@@ -8193,16 +8220,25 @@ export async function executeLifecycle(
 			const binding = validateLifecycleDeleteMetadataBinding(broker, operation, input, identity, cleanup);
 			if (binding) return { response: binding };
 		}
+		const reconciled = await reconcileLifecycleCleanup(
+			broker,
+			identity,
+			cleanup,
+			operation === "session.delete"
+				? { ok: true, result: { sessionId: cleanup.sessionId } }
+				: fail("spawn_failed", "No ready SDK endpoint remains available."),
+			proofBudget,
+		);
 		return {
-			response: await reconcileLifecycleCleanup(
-				broker,
-				identity,
-				cleanup,
+			response:
 				operation === "session.delete"
-					? { ok: true, result: { sessionId: cleanup.sessionId } }
-					: fail("spawn_failed", "No ready SDK endpoint remains available."),
-				proofBudget,
-			),
+					? reconciled
+					: classifyLateAdmissionSpawnFailure(
+							reconciled,
+							broker.ledger.get(identity)?.effectIntent,
+							timing.now(),
+							reconciled,
+						),
 		};
 	}
 	const response = await executeLifecycleResponse(broker, operation, input, identity, cleanup);
@@ -8380,8 +8416,10 @@ export async function executeLifecycle(
 											...(startupFailure ? { startupFailure } : {}),
 										}
 			: response;
+	// The extended proof window may reconcile artifacts after the original
+	// admission deadline, but cannot retroactively prove a timely spawn failure.
 	return {
-		response: terminalResponse,
+		response: classifyLateAdmissionSpawnFailure(terminalResponse, entry?.effectIntent, timing.now(), response),
 		...(durableEffects ? { durableEffects } : {}),
 		...(startupFailure ? { startupFailure } : {}),
 	};
