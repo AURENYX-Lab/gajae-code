@@ -14,13 +14,17 @@ function quoteShellString(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-// One Shell.run costs milliseconds of spawn/process-tracking overhead that
-// would drown the builtin itself, so each sample loops the builtin LOOP times
-// inside the same command and checks the exact repeated stdout.
-const LOOP = 200;
+// Every Shell.run pays a fixed ~90ms (on a busy host) for the descendant
+// baseline scan of the whole process session, on the pre-port base and on dev
+// alike. That floor and its variance would drown one builtin call, so each
+// sample loops the builtin LOOP times inside one command (the builtin work is
+// then ~100-230ms) and checks the exact repeated stdout.
+const LOOP = 5000;
 
 function looped(command: string): string {
-	return `for __builtins_ab_i in $(seq ${LOOP}); do ${command}; done`;
+	// Counter loop built only from builtins: `$(seq ...)` would spawn an external
+	// process per sample and add its fork/exec variance to every measurement.
+	return `__builtins_ab_i=0; while [ "$__builtins_ab_i" -lt ${LOOP} ]; do ${command}; __builtins_ab_i=$((__builtins_ab_i + 1)); done`;
 }
 
 async function runBuiltin(command: string, expectedStdout: string): Promise<void> {
@@ -99,7 +103,7 @@ const cases = [
 ];
 
 try {
-	await runAbSuite("builtins", cases, 10);
+	await runAbSuite("builtins", cases, 20);
 } finally {
 	try {
 		await shell.close();
