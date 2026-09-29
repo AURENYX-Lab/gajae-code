@@ -142,6 +142,24 @@ isolatedSdkHostTest("oversized correlated snapshots still reach a prompt termina
 	const correlation = acknowledgement.result;
 	await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
 	const largeMessage = { role: "assistant", content: [{ type: "text", text: "x".repeat(RESPONSE_CEILING_BYTES) }] };
+	const oversizedTextDelta = "text-😀".repeat(RESPONSE_CEILING_BYTES / 4);
+	const oversizedThinkingDelta = "thinking-漢".repeat(RESPONSE_CEILING_BYTES / 4);
+	await handlers.get("message_update")?.(
+		{
+			type: "message_update",
+			message: largeMessage,
+			assistantMessageEvent: { type: "text_delta", delta: oversizedTextDelta },
+		},
+		sessionContext,
+	);
+	await handlers.get("message_update")?.(
+		{
+			type: "message_update",
+			message: largeMessage,
+			assistantMessageEvent: { type: "thinking_delta", delta: oversizedThinkingDelta },
+		},
+		sessionContext,
+	);
 	await handlers.get("message_update")?.(
 		{ type: "message_update", message: largeMessage, assistantMessageEvent: { type: "text_delta", delta: "x" } },
 		sessionContext,
@@ -185,10 +203,35 @@ isolatedSdkHostTest("oversized correlated snapshots still reach a prompt termina
 					?.delta === "x",
 		),
 	).toBe(true);
+	const correlatedUpdates = frames.filter(
+		frame =>
+			frame.type === "event" &&
+			frame.kind === "message_update" &&
+			frame.commandId === correlation.commandId &&
+			frame.turnId === correlation.turnId,
+	);
+	const textDeltas = correlatedUpdates
+		.map(frame => (frame.payload as { event?: { assistantMessageEvent?: { type?: string; delta?: string } } }).event)
+		.filter(event => event?.assistantMessageEvent?.type === "text_delta")
+		.map(event => event?.assistantMessageEvent?.delta ?? "")
+		.filter(delta => delta !== "x" && delta !== "later");
+	const thinkingDeltas = correlatedUpdates
+		.map(frame => (frame.payload as { event?: { assistantMessageEvent?: { type?: string; delta?: string } } }).event)
+		.filter(event => event?.assistantMessageEvent?.type === "thinking_delta")
+		.map(event => event?.assistantMessageEvent?.delta ?? "");
+	expect(textDeltas.join("")).toBe(oversizedTextDelta);
+	expect(thinkingDeltas.join("")).toBe(oversizedThinkingDelta);
+	for (const update of correlatedUpdates) {
+		expect(Buffer.byteLength(JSON.stringify(update))).toBeLessThanOrEqual(RESPONSE_CEILING_BYTES);
+		expect(JSON.stringify(update)).not.toContain("[truncated]");
+	}
 	const messageEnd = frames.find(frame => frame.type === "event" && frame.kind === "message_end");
 	expect(messageEnd).toBeDefined();
 	expect(Buffer.byteLength(JSON.stringify(messageEnd))).toBeLessThanOrEqual(RESPONSE_CEILING_BYTES);
-	expect(JSON.stringify(messageEnd)).toContain("[truncated]");
+	expect(JSON.stringify(messageEnd)).not.toContain("[truncated]");
+	expect(
+		(messageEnd?.payload as { event?: { message?: { textTruncated?: boolean } } }).event?.message?.textTruncated,
+	).toBe(true);
 });
 
 isolatedSdkHostTest("oversized non-text message_end does not fabricate assistant text", async () => {

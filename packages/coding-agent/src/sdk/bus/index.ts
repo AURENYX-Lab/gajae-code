@@ -5343,7 +5343,15 @@ export function createNotificationsExtension(
 			submission.abandoned = true;
 			submission.bufferedFrames.length = 0;
 		};
-		const boundedCorrelatedFrame = (frame: Record<string, unknown>): Record<string, unknown> | undefined => {
+		const isCorrelatedDeltaFrame = (frame: Record<string, unknown>): boolean => {
+			if (frame.type !== "event" || frame.kind !== "message_update") return false;
+			const payload = frame.payload as {
+				event?: { assistantMessageEvent?: { type?: string } };
+			};
+			const type = payload.event?.assistantMessageEvent?.type;
+			return type === "text_delta" || type === "thinking_delta";
+		};
+		const boundedCorrelatedFrames = (frame: Record<string, unknown>): Record<string, unknown>[] | undefined => {
 			if (frame.type === "event" && frame.kind === "message_update") {
 				const payload = frame.payload as {
 					event?: {
@@ -5354,25 +5362,48 @@ export function createNotificationsExtension(
 				const update = payload.event?.assistantMessageEvent;
 				if (update?.type !== "text_delta" && update?.type !== "thinking_delta") return undefined;
 				// ACP consumes deltas, so retain the delta while discarding the replaceable
-				// accumulated message snapshot. A giant single delta is marked as truncated.
+				// accumulated message snapshot. Split giant deltas without changing content.
 				const delta = update.delta ?? "";
-				return {
+				const makeFrame = (chunk: string): Record<string, unknown> => ({
 					...frame,
 					payload: {
 						event_type: "message_update",
 						event: {
 							type: "message_update",
 							message: { role: payload.event?.message?.role ?? "assistant", content: [] },
-							assistantMessageEvent: {
-								type: update.type,
-								delta:
-									delta.length > RESPONSE_CEILING_BYTES / 8
-										? `${delta.slice(0, RESPONSE_CEILING_BYTES / 8)}[truncated]`
-										: delta,
-							},
+							assistantMessageEvent: { type: update.type, delta: chunk },
 						},
 					},
-				};
+				});
+				const frames: Record<string, unknown>[] = [];
+				let offset = 0;
+				while (offset < delta.length || (offset === 0 && delta.length === 0)) {
+					let low = 1;
+					let high = delta.length - offset + 1;
+					let bestEnd = 0;
+					while (low < high) {
+						const candidateLength = Math.floor((low + high) / 2);
+						let candidateEnd = offset + candidateLength;
+						if (
+							candidateEnd < delta.length &&
+							delta.charCodeAt(candidateEnd) >= 0xdc00 &&
+							delta.charCodeAt(candidateEnd) <= 0xdfff
+						)
+							candidateEnd += 1;
+						const candidate = JSON.stringify(makeFrame(delta.slice(offset, candidateEnd)));
+						if (Buffer.byteLength(candidate) <= RESPONSE_CEILING_BYTES) {
+							bestEnd = candidateEnd;
+							low = candidateLength + 1;
+						} else {
+							high = candidateLength;
+						}
+					}
+					if (bestEnd === 0) return undefined;
+					frames.push(makeFrame(delta.slice(offset, bestEnd)));
+					offset = bestEnd;
+					if (delta.length === 0) break;
+				}
+				return frames;
 			}
 			if (frame.type === "event" && frame.kind === "message_end") {
 				const payload = frame.payload as {
@@ -5380,41 +5411,44 @@ export function createNotificationsExtension(
 				};
 				const message = payload.event?.message;
 				const text = message?.content?.find(block => block.type === "text" && block.text)?.text;
-				return {
-					...frame,
-					payload: {
-						event_type: "message_end",
-						event: {
-							type: "message_end",
-							message: {
-								role: message?.role ?? "assistant",
-								content:
-									typeof text === "string"
-										? [
-												{
-													type: "text",
-													text:
-														text.length > RESPONSE_CEILING_BYTES / 8
-															? `${text.slice(0, RESPONSE_CEILING_BYTES / 8)}[truncated]`
-															: text,
-												},
-											]
-										: [],
+				const textTruncated = typeof text === "string" && text.length > RESPONSE_CEILING_BYTES / 8;
+				return [
+					{
+						...frame,
+						payload: {
+							event_type: "message_end",
+							event: {
+								type: "message_end",
+								message: {
+									role: message?.role ?? "assistant",
+									content:
+										typeof text === "string"
+											? [
+													{
+														type: "text",
+														text: textTruncated ? text.slice(0, RESPONSE_CEILING_BYTES / 8) : text,
+													},
+												]
+											: [],
+									...(textTruncated ? { textTruncated: true } : {}),
+								},
 							},
 						},
 					},
-				};
+				];
 			}
 			if (frame.type === "agent_end") {
-				return boundedCorrelatedAgentEndFrame(frame);
+				return [boundedCorrelatedAgentEndFrame(frame)];
 			}
 			if (frame.type === "agent_failed") {
 				const outcome = frame.outcome as Extract<SdkPromptTerminalOutcome, { kind: "failed" }> | undefined;
-				return {
-					...frame,
-					error: { code: outcome?.code ?? "prompt_failed", message: "Prompt failure details were truncated." },
-					...(outcome ? { outcome: { ...outcome, message: "Prompt failure details were truncated." } } : {}),
-				};
+				return [
+					{
+						...frame,
+						error: { code: outcome?.code ?? "prompt_failed", message: "Prompt failure details were truncated." },
+						...(outcome ? { outcome: { ...outcome, message: "Prompt failure details were truncated." } } : {}),
+					},
+				];
 			}
 			return undefined;
 		};
@@ -5463,40 +5497,43 @@ export function createNotificationsExtension(
 			};
 			const original = JSON.stringify(frame);
 			const originalBytes = Buffer.byteLength(original);
-			let json = original;
+			let framesToSend = [frame];
 			if (originalBytes > RESPONSE_CEILING_BYTES) {
-				const bounded = boundedCorrelatedFrame(frame);
+				const bounded = boundedCorrelatedFrames(frame);
 				if (!bounded) {
-					if (frame.type === "event" && frame.kind === "message_update") return;
+					if (frame.type === "event" && frame.kind === "message_update" && !isCorrelatedDeltaFrame(frame)) return;
 					fail("oversized_frame", originalBytes);
 					return;
 				}
-				json = JSON.stringify(bounded);
+				framesToSend = bounded;
+			}
+			for (const frameToSend of framesToSend) {
+				const json = JSON.stringify(frameToSend);
 				if (Buffer.byteLength(json) > RESPONSE_CEILING_BYTES) {
 					fail("oversized_frame", originalBytes);
 					return;
 				}
-			}
-			try {
-				activeRuntime.server.sendTo(submission.connectionId, json);
-			} catch (error) {
-				const detail = String(error);
-				if (detail.includes("cause=oversized_frame") && frame.type === "event" && frame.kind === "message_update")
-					return; // A transport ceiling can still reject the bounded delta; later updates continue the turn.
-				if (detail.includes("cause=oversized_frame") && json === original) {
-					const bounded = boundedCorrelatedFrame(frame);
-					if (bounded) {
-						try {
-							activeRuntime.server.sendTo(submission.connectionId, JSON.stringify(bounded));
-							return;
-						} catch (retryError) {
-							logger.warn(`sdk: bounded correlated delivery failed: ${String(retryError)}`);
+				try {
+					activeRuntime.server.sendTo(submission.connectionId, json);
+				} catch (error) {
+					const detail = String(error);
+					if (detail.includes("cause=oversized_frame") && json === original) {
+						const bounded = boundedCorrelatedFrames(frame);
+						if (bounded) {
+							try {
+								for (const retryFrame of bounded)
+									activeRuntime.server.sendTo(submission.connectionId, JSON.stringify(retryFrame));
+								return;
+							} catch (retryError) {
+								logger.warn(`sdk: bounded correlated delivery failed: ${String(retryError)}`);
+							}
 						}
 					}
+					logger.warn(`sdk: correlated delivery failed: ${detail}`);
+					const cause = /cause=([a-z_]+)/.exec(detail)?.[1] ?? "unknown";
+					fail(cause, originalBytes);
+					return;
 				}
-				logger.warn(`sdk: correlated delivery failed: ${detail}`);
-				const cause = /cause=([a-z_]+)/.exec(detail)?.[1] ?? "unknown";
-				fail(cause, originalBytes);
 			}
 		};
 		const emitPromptLifecycle = (
