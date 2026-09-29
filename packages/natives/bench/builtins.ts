@@ -14,10 +14,19 @@ function quoteShellString(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+// One Shell.run costs milliseconds of spawn/process-tracking overhead that
+// would drown the builtin itself, so each sample loops the builtin LOOP times
+// inside the same command and checks the exact repeated stdout.
+const LOOP = 200;
+
+function looped(command: string): string {
+	return `for __builtins_ab_i in $(seq ${LOOP}); do ${command}; done`;
+}
+
 async function runBuiltin(command: string, expectedStdout: string): Promise<void> {
 	let stdout = "";
 	let callbackError: Error | undefined;
-	const result = await shell.run({ command, timeoutMs: 5_000 }, (error, chunk) => {
+	const result = await shell.run({ command: looped(command), timeoutMs: 30_000 }, (error, chunk) => {
 		if (error) callbackError = error;
 		else stdout += chunk;
 	});
@@ -25,8 +34,8 @@ async function runBuiltin(command: string, expectedStdout: string): Promise<void
 	if (result.exitCode !== 0 || result.cancelled || result.timedOut) {
 		throw new Error(`Builtin command failed: ${JSON.stringify(result)}`);
 	}
-	if (stdout !== expectedStdout) {
-		throw new Error(`Unexpected stdout: expected ${JSON.stringify(expectedStdout)}, received ${JSON.stringify(stdout)}`);
+	if (stdout !== expectedStdout.repeat(LOOP)) {
+		throw new Error(`Unexpected stdout: expected ${LOOP}x ${JSON.stringify(expectedStdout)}, received ${JSON.stringify(stdout.slice(0, 200))}`);
 	}
 }
 
