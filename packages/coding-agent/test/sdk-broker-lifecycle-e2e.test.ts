@@ -8697,7 +8697,10 @@ test("model profile cutoff returns only proven rollback or retained uncertainty"
 		}
 		expect(response).toMatchObject({
 			ok: false,
-			error: { code: "spawn_failed", endpoint: "unavailable" },
+			error: {
+				code: "readiness_timeout",
+				message: expect.stringContaining("stage=readiness waiting_for=session_ready"),
+			},
 			startupFailure: {
 				phase: "startup",
 				reason: "pending",
