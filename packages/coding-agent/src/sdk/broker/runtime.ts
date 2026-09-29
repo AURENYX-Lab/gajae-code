@@ -340,8 +340,8 @@ export async function captureRuntimeImageIdentity(file: string): Promise<SdkInte
 
 /**
  * Check if the runtime image has been replaced since startup.
- * Returns `true` if the path is gone or its dev/ino differ from the startup identity,
- * or if its size changed (additional detection for filesystems that reuse inodes).
+ * Returns `true` if the path is gone, its dev/ino differ from the startup identity,
+ * or its size or modification time changed (an in-place rewrite keeps the inode).
  * Returns `false` (inconclusive) if the file exists and matches, or on any error.
  */
 export async function isSdkInternalRuntimeImageReplaced(
@@ -352,10 +352,13 @@ export async function isSdkInternalRuntimeImageReplaced(
 	try {
 		const stats = await fsp.stat(startupIdentity.path);
 		if (!stats.isFile()) return false; // Not a file, but not proven gone
-		// Check if dev or ino differ (primary indicator: replacement at same path)
-		// Also check if size differs (secondary indicator for inode-reusing filesystems)
+		// dev/ino catch a replacement at the same path; size and mtime catch an
+		// in-place rewrite that keeps the inode (mtime also covers same-size bytes).
 		return (
-			stats.dev !== startupIdentity.dev || stats.ino !== startupIdentity.ino || stats.size !== startupIdentity.size
+			stats.dev !== startupIdentity.dev ||
+			stats.ino !== startupIdentity.ino ||
+			stats.size !== startupIdentity.size ||
+			stats.mtimeMs !== startupIdentity.mtimeMs
 		);
 	} catch (error) {
 		// Only ENOENT/ENOTDIR prove absence

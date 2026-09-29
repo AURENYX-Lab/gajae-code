@@ -194,6 +194,31 @@ describe("Broker recovery with replaced runtime image", () => {
 		expect(isReplaced).toBe(true);
 	});
 
+	it("detects a same-size in-place rewrite of the runtime image", async () => {
+		const { captureRuntimeImageIdentity, isSdkInternalRuntimeImageReplaced } = await import(
+			"../src/sdk/broker/runtime"
+		);
+		const fsp = await import("node:fs/promises");
+		const runtimeImagePath = path.join(tempDir.path(), "runtime-in-place");
+		await Bun.write(runtimeImagePath, "original-bytes");
+		const startupIdentity = await captureRuntimeImageIdentity(runtimeImagePath);
+		expect(await isSdkInternalRuntimeImageReplaced(startupIdentity)).toBe(false);
+
+		// Overwrite through the same inode with different bytes of the same length,
+		// then move mtime forward so the rewrite is observable on coarse clocks.
+		const handle = await fsp.open(runtimeImagePath, "r+");
+		await handle.write("REPLACED-bytes", 0);
+		await handle.close();
+		const later = new Date(Date.now() + 5_000);
+		await fsp.utimes(runtimeImagePath, later, later);
+		if (!startupIdentity) throw new Error("runtime identity was not captured");
+		const stats = await fsp.stat(runtimeImagePath);
+		expect(stats.ino).toBe(startupIdentity.ino);
+		expect(stats.size).toBe(startupIdentity.size);
+
+		expect(await isSdkInternalRuntimeImageReplaced(startupIdentity)).toBe(true);
+	});
+
 	it("backoff schedule blocks recovery attempts until time passes", async () => {
 		const agentDir = path.join(tempDir.path(), "agent");
 
