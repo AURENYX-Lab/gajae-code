@@ -49,7 +49,9 @@ export interface ParsedOptions {
 
 /**
  * `defaultIterations` overrides DEFAULT_ITERATIONS for suites whose samples are
- * expensive; an explicit `--iterations` still wins.
+ * expensive; an explicit `--iterations` still wins. Keep it at 20 or more:
+ * each block's p95 is `quantile(samples, 0.95)`, which degenerates to the
+ * block maximum below 20 samples and would weaken the p95 gate.
  */
 const SUITES: Record<
 	string,
@@ -81,7 +83,7 @@ const SUITES: Record<
 	crash: { adapter: "packages/natives/bench/crash.ts", actualSuite: "crash", cases: ["C01", "C02"] },
 	// Each builtins sample loops the builtin 10,000 times (~0.3-0.55 s), so 200
 	// samples per case would blow the 10-minute adapter timeout and the job budget.
-	builtins: { adapter: "packages/natives/bench/builtins.ts", actualSuite: "builtins", cases: ["B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08"], defaultIterations: 5 },
+	builtins: { adapter: "packages/natives/bench/builtins.ts", actualSuite: "builtins", cases: ["B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08"], defaultIterations: 20 },
 	rss: { adapter: "", actualSuite: "rss", cases: [] },
 };
 

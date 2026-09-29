@@ -18,8 +18,8 @@ function quoteShellString(value: string): string {
 // baseline scan of the whole process session, on the pre-port base and on dev
 // alike. That floor and its variance would drown one builtin call, so each
 // sample loops the builtin LOOP times inside one command (the builtin work is
-// then ~200-450ms) and checks the exact repeated stdout.
-const LOOP = 10000;
+// then ~100-230ms) and checks the exact repeated stdout.
+const LOOP = 5000;
 
 function looped(command: string): string {
 	// Counter loop built only from builtins: `$(seq ...)` would spawn an external
@@ -103,7 +103,7 @@ const cases = [
 ];
 
 try {
-	await runAbSuite("builtins", cases, 5);
+	await runAbSuite("builtins", cases, 20);
 } finally {
 	try {
 		await shell.close();

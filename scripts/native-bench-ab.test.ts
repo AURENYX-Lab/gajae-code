@@ -60,7 +60,7 @@ describe("native bench A/B contract", () => {
 		expect(() => parseNativeBenchOptions(["--suite", "edit-hotspots"])).toThrow("--base");
 	});
 	test("uses a suite's default iterations unless --iterations is explicit", () => {
-		expect(parseNativeBenchOptions(["--suite", "builtins", "--base", "HEAD"]).iterations).toBe(5);
+		expect(parseNativeBenchOptions(["--suite", "builtins", "--base", "HEAD"]).iterations).toBe(20);
 		expect(parseNativeBenchOptions(["--suite", "builtins", "--base", "HEAD", "--iterations", "50"]).iterations).toBe(50);
 		expect(parseNativeBenchOptions(["--suite", "grep", "--base", "HEAD"]).iterations).toBe(200);
 		expect(() => parseNativeBenchOptions(["--suite", "builtins", "--base", "HEAD", "--iterations", "0"])).toThrow(
