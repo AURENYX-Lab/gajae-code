@@ -36,7 +36,7 @@ const servers: Array<{ stop(closeActiveConnections?: boolean): void }> = [];
 const BROKER_SESSION_CLOSE_TIMEOUT_MS = 15_000;
 const ACP_SESSION_CLOSE_TIMEOUT_MS = BROKER_SESSION_CLOSE_TIMEOUT_MS;
 const FIXTURE_BROKER_STARTUP_TIMEOUT_MS = 35_000;
-const SESSION_CREATE_RECONCILIATION_MS = lifecycleRequestTimeoutMs("session.create", {}) ?? 21_000;
+const SESSION_CREATE_RECONCILIATION_MS = lifecycleRequestTimeoutMs("session.create", {}) ?? 51_000;
 
 function input(proc: AcpProc): WritableStream<Uint8Array> {
 	return new WritableStream({

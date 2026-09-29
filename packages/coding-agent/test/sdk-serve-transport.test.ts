@@ -1470,7 +1470,7 @@ describe("SDK serve CLI and discovery", () => {
 		});
 		expect(calls[2]?.options?.idempotencyKey).toEqual(expect.any(String));
 		expect(calls[2]?.options?.idempotencyKey?.length).toBeLessThanOrEqual(128);
-		expect(calls[2]?.options?.timeoutMs).toBe(21_000);
+		expect(calls[2]?.options?.timeoutMs).toBe(51_000);
 		expect(calls.filter(call => call.operation === "session.resume")).toHaveLength(1);
 	});
 

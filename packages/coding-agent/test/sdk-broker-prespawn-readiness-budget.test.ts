@@ -7,8 +7,20 @@ import {
 	setLifecycleCommandResolverForTest,
 	setLifecycleTimingForTest,
 } from "../src/sdk/broker/lifecycle";
+import {
+	DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS,
+	DEFAULT_READINESS_TIMEOUT_MS,
+	lifecycleRequestTimeoutMs,
+	startupQueueWaitMs,
+} from "../src/sdk/broker/startup-budget";
 
 test("broker pre-spawn bookkeeping does not spend child semantic readiness", async () => {
+	const callerTimeout = lifecycleRequestTimeoutMs("session.create", { cwd: "/workspace" });
+	expect(callerTimeout).toBeGreaterThanOrEqual(
+		startupQueueWaitMs(DEFAULT_READINESS_TIMEOUT_MS) +
+			DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS +
+			DEFAULT_READINESS_TIMEOUT_MS,
+	);
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-prespawn-budget-"));
 	const agentDir = path.join(root, "agent");
 	const broker = new Broker({ agentDir });

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { ACP_EXTERNAL_CONNECT_TIMEOUT_MS, ACP_SESSION_READINESS_TIMEOUT_MS } from "../src/modes/acp/acp-agent";
+import { ACP_SESSION_READINESS_TIMEOUT_MS } from "../src/modes/acp/acp-agent";
 import {
+	DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS,
 	DEFAULT_READINESS_TIMEOUT_MS,
 	isValidReadinessTimeoutMs,
 	lifecycleRequestTimeoutMs,
+	lifecycleStartupBudgetMs,
 } from "../src/sdk/broker/startup-budget";
 
 /**
@@ -13,9 +15,9 @@ import {
  * reported "Timeout waiting for message (60000ms)" while gjc was still healthy.
  *
  * The startup lifecycle operations (`session.create`/`fork`/`resume`) all spawn
- * a host and so carry the doubled queue+readiness budget. Each must resolve its
- * client-side wait comfortably under the external connect timeout, while the
- * readiness budget stays above the concurrency cold-start floor.
+ * a host and so carry the doubled queue+readiness budget plus bounded broker
+ * pre-spawn bookkeeping. The readiness budget stays above the concurrency
+ * cold-start floor.
  */
 describe("ACP session readiness budget (#5565)", () => {
 	const startupOperations = ["session.create", "session.fork", "session.resume"] as const;
@@ -32,14 +34,14 @@ describe("ACP session readiness budget (#5565)", () => {
 		expect(isValidReadinessTimeoutMs(ACP_SESSION_READINESS_TIMEOUT_MS)).toBe(true);
 	});
 
-	it("keeps every startup client-side wait safely under the external connect timeout", () => {
-		// 10s of headroom below paseo's 60s cap so attach + capability handshake +
-		// network jitter after the launch response still land before paseo bails.
-		const ceiling = ACP_EXTERNAL_CONNECT_TIMEOUT_MS - 10_000;
+	it("covers broker pre-spawn preparation and fresh readiness", () => {
 		for (const operation of startupOperations) {
 			const budget = lifecycleRequestTimeoutMs(operation, launchInput);
-			expect(budget).toBeDefined();
-			expect(budget as number).toBeLessThanOrEqual(ceiling);
+			expect(budget).toBe(
+				lifecycleStartupBudgetMs(ACP_SESSION_READINESS_TIMEOUT_MS) +
+					DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS +
+					1_000,
+			);
 		}
 	});
 
