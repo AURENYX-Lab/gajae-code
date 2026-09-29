@@ -3,15 +3,234 @@
   "base": "01511ffd5f9ab55111ce7300a20449fd626f6112",
   "runs": [
     {
-      "suite": "edit-hotspots",
+      "suite": "appearance",
       "verdict": "PASS",
       "baseSha": "01511ffd5f9ab55111ce7300a20449fd626f6112",
-      "headSha": "187a0dd12238ca9536f0250ec68bfdd68ddc8b5c",
+      "headSha": "1605b508bf45dd012ce883e5ff1e02ebbdb06452",
       "host": {
         "platform": "darwin",
         "arch": "arm64",
         "bun": "1.4.0",
-        "loadAverage1m": 6.986328125,
+        "loadAverage1m": 6.33642578125,
+        "physicalCores": 18
+      },
+      "adapter": {
+        "path": "packages/natives/bench/appearance.ts",
+        "sha256": "fb91ff11b94ed6c3775ca06f0f32da366ed4633c60c860b874488e10a87ea7f9"
+      },
+      "rounds": [
+        {
+          "blocks": 15,
+          "verdict": "INCONCLUSIVE"
+        },
+        {
+          "blocks": 30,
+          "verdict": "PASS"
+        }
+      ],
+      "cases": [
+        {
+          "id": "A01",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9875424688561721,
+            "upper": 1.0130401298490106
+          },
+          "p95": {
+            "lower": 0.9817265178037164,
+            "upper": 1.046574324211881
+          }
+        }
+      ]
+    },
+    {
+      "suite": "builtins",
+      "verdict": "PASS",
+      "baseSha": "01511ffd5f9ab55111ce7300a20449fd626f6112",
+      "headSha": "d61c1fea5d7a93ce1dad3fc990dda47c544b810e",
+      "host": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "bun": "1.4.0",
+        "loadAverage1m": 6.83349609375,
+        "physicalCores": 18
+      },
+      "adapter": {
+        "path": "packages/natives/bench/builtins.ts",
+        "sha256": "4d0c24ec03460eab565f8fd431e96249401fc3509e33e6a3a3b22d8f18b8cfa8"
+      },
+      "rounds": [
+        {
+          "blocks": 15,
+          "verdict": "INCONCLUSIVE"
+        },
+        {
+          "blocks": 30,
+          "verdict": "INCONCLUSIVE"
+        },
+        {
+          "blocks": 60,
+          "verdict": "PASS"
+        }
+      ],
+      "cases": [
+        {
+          "id": "B01",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9868370024243504,
+            "upper": 1.0074952208830292
+          },
+          "p95": {
+            "lower": 0.9937221204032548,
+            "upper": 1.0165491552586272
+          }
+        },
+        {
+          "id": "B02",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9836021469982419,
+            "upper": 1.0108612819229221
+          },
+          "p95": {
+            "lower": 0.994195197954734,
+            "upper": 1.0072614284190198
+          }
+        },
+        {
+          "id": "B03",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9991799131320068,
+            "upper": 1.0048519485224292
+          },
+          "p95": {
+            "lower": 0.9903711518537849,
+            "upper": 1.008898424916182
+          }
+        },
+        {
+          "id": "B04",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9937411457464382,
+            "upper": 1.007296067997742
+          },
+          "p95": {
+            "lower": 0.9929123687410328,
+            "upper": 1.0110742053023964
+          }
+        },
+        {
+          "id": "B05",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9849616346617754,
+            "upper": 0.9925041966194326
+          },
+          "p95": {
+            "lower": 0.9752051710337515,
+            "upper": 0.9956192308840771
+          }
+        },
+        {
+          "id": "B06",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9972797638254346,
+            "upper": 1.00698331162429
+          },
+          "p95": {
+            "lower": 0.9936589958481249,
+            "upper": 1.0113285849993585
+          }
+        },
+        {
+          "id": "B07",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.995440612531004,
+            "upper": 1.0174935020047473
+          },
+          "p95": {
+            "lower": 0.9750732074509428,
+            "upper": 1.0092489826584228
+          }
+        },
+        {
+          "id": "B08",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9975455767834505,
+            "upper": 1.0064619719557504
+          },
+          "p95": {
+            "lower": 0.995590758460365,
+            "upper": 1.0234874471064739
+          }
+        }
+      ]
+    },
+    {
+      "suite": "crash",
+      "verdict": "PASS",
+      "baseSha": "01511ffd5f9ab55111ce7300a20449fd626f6112",
+      "headSha": "33bead9203045fe3ffd2dc0ad9f0d610e848ffce",
+      "host": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "bun": "1.4.0",
+        "loadAverage1m": 6.9697265625,
+        "physicalCores": 18
+      },
+      "adapter": {
+        "path": "packages/natives/bench/crash.ts",
+        "sha256": "e985b30bba3243b86770afd28d7d3b759f08df45d004660900cd38a9a1007cf1"
+      },
+      "rounds": [
+        {
+          "blocks": 15,
+          "verdict": "PASS"
+        }
+      ],
+      "cases": [
+        {
+          "id": "C01",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.8986522779809081,
+            "upper": 1.007516365219508
+          },
+          "p95": {
+            "lower": 0.8853742966037497,
+            "upper": 0.9856602912559327
+          }
+        },
+        {
+          "id": "C02",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.926103636569616,
+            "upper": 1.024193093309115
+          },
+          "p95": {
+            "lower": 0.9292445688210387,
+            "upper": 1.0021525736797985
+          }
+        }
+      ]
+    },
+    {
+      "suite": "edit-hotspots",
+      "verdict": "PASS",
+      "baseSha": "01511ffd5f9ab55111ce7300a20449fd626f6112",
+      "headSha": "9370a2bf6501ff5ed357d488a9124afc5673acf3",
+      "host": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "bun": "1.4.0",
+        "loadAverage1m": 4.94140625,
         "physicalCores": 18
       },
       "adapter": {
@@ -29,48 +248,117 @@
           "id": "H01",
           "verdict": "PASS",
           "p50": {
-            "lower": 0.8519375361480624,
-            "upper": 0.8657498134445459
+            "lower": 0.8561144519157932,
+            "upper": 0.8633960047003526
           },
           "p95": {
-            "lower": 0.8547466150870406,
-            "upper": 0.8734952114987142
+            "lower": 0.8515587203845356,
+            "upper": 0.8748697507860455
           }
         },
         {
           "id": "H02",
           "verdict": "PASS",
           "p50": {
-            "lower": 0.13778077333163724,
-            "upper": 0.1390158067320472
+            "lower": 0.1396260882094665,
+            "upper": 0.14099905193921047
           },
           "p95": {
-            "lower": 0.11694816362053959,
-            "upper": 0.11921717638070566
+            "lower": 0.1207708469173368,
+            "upper": 0.1234340456890199
           }
         },
         {
           "id": "H03",
           "verdict": "PASS",
           "p50": {
-            "lower": 0.9614102971642788,
-            "upper": 0.9742387853692202
+            "lower": 0.9567922339238975,
+            "upper": 0.974730326442463
           },
           "p95": {
-            "lower": 0.9630314232902033,
-            "upper": 1.000426125554851
+            "lower": 0.950627475209918,
+            "upper": 0.9872007165099301
           }
         },
         {
           "id": "H06",
           "verdict": "PASS",
           "p50": {
-            "lower": 0.9520300430090027,
-            "upper": 0.9735557215471223
+            "lower": 0.9595395458104935,
+            "upper": 0.976792523697663
           },
           "p95": {
-            "lower": 0.9017319465081722,
-            "upper": 1.0003244646333551
+            "lower": 0.8743992310157002,
+            "upper": 1.0064262763298821
+          }
+        }
+      ]
+    },
+    {
+      "suite": "iso",
+      "verdict": "PASS",
+      "baseSha": "01511ffd5f9ab55111ce7300a20449fd626f6112",
+      "headSha": "b7177658f0b55d94c6b05057fadd6d511d6ed3db",
+      "host": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "bun": "1.4.0",
+        "loadAverage1m": 6.2724609375,
+        "physicalCores": 18
+      },
+      "adapter": {
+        "path": "packages/natives/bench/iso.ts",
+        "sha256": "30a060e533f2397bdda7f14e51989d3ff3e7341bf77438e99719eaab241b124f"
+      },
+      "rounds": [
+        {
+          "blocks": 15,
+          "verdict": "INCONCLUSIVE"
+        },
+        {
+          "blocks": 30,
+          "verdict": "INCONCLUSIVE"
+        },
+        {
+          "blocks": 60,
+          "verdict": "PASS"
+        }
+      ],
+      "cases": [
+        {
+          "id": "I01",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.934131576654685,
+            "upper": 1.0114873107733728
+          },
+          "p95": {
+            "lower": 0.9461157467464536,
+            "upper": 1.0457158455338194
+          }
+        },
+        {
+          "id": "I02",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9959390862944162,
+            "upper": 1.0057835104601485
+          },
+          "p95": {
+            "lower": 0.9917961335676626,
+            "upper": 1.0341300089047194
+          }
+        },
+        {
+          "id": "I03",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9781265019961584,
+            "upper": 1.0282240025297216
+          },
+          "p95": {
+            "lower": 0.949700192999951,
+            "upper": 1.0767896963566146
           }
         }
       ]
@@ -343,6 +631,145 @@
       ]
     },
     {
+      "suite": "power",
+      "verdict": "PASS",
+      "baseSha": "01511ffd5f9ab55111ce7300a20449fd626f6112",
+      "headSha": "33bead9203045fe3ffd2dc0ad9f0d610e848ffce",
+      "host": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "bun": "1.4.0",
+        "loadAverage1m": 5.8447265625,
+        "physicalCores": 18
+      },
+      "adapter": {
+        "path": "packages/natives/bench/power.ts",
+        "sha256": "9b614d8221b049e35ca9f734bb9d0fd5dd9c355da67b63674be12a4faf9cfb83"
+      },
+      "rounds": [
+        {
+          "blocks": 15,
+          "verdict": "PASS"
+        }
+      ],
+      "cases": [
+        {
+          "id": "W01",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9761904761904762,
+            "upper": 1.0213333333333334
+          },
+          "p95": {
+            "lower": 0.9314303797468354,
+            "upper": 1.0602675880911248
+          }
+        }
+      ]
+    },
+    {
+      "suite": "prof",
+      "verdict": "PASS",
+      "baseSha": "01511ffd5f9ab55111ce7300a20449fd626f6112",
+      "headSha": "33bead9203045fe3ffd2dc0ad9f0d610e848ffce",
+      "host": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "bun": "1.4.0",
+        "loadAverage1m": 6.72509765625,
+        "physicalCores": 18
+      },
+      "adapter": {
+        "path": "packages/natives/bench/prof.ts",
+        "sha256": "568fd7254c067966023455859855803fbe026a1168c045d418465c590f5051fc"
+      },
+      "rounds": [
+        {
+          "blocks": 15,
+          "verdict": "INCONCLUSIVE"
+        },
+        {
+          "blocks": 30,
+          "verdict": "PASS"
+        }
+      ],
+      "cases": [
+        {
+          "id": "R01",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9988009592326139,
+            "upper": 1
+          },
+          "p95": {
+            "lower": 0.8572653236176597,
+            "upper": 0.9596928982725529
+          }
+        },
+        {
+          "id": "R02",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9843574221888894,
+            "upper": 0.9954697443641463
+          },
+          "p95": {
+            "lower": 0.9364161849710984,
+            "upper": 1.0472928281205707
+          }
+        }
+      ]
+    },
+    {
+      "suite": "pty",
+      "verdict": "PASS",
+      "baseSha": "01511ffd5f9ab55111ce7300a20449fd626f6112",
+      "headSha": "33bead9203045fe3ffd2dc0ad9f0d610e848ffce",
+      "host": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "bun": "1.4.0",
+        "loadAverage1m": 6.59619140625,
+        "physicalCores": 18
+      },
+      "adapter": {
+        "path": "packages/natives/bench/pty.ts",
+        "sha256": "8a49ccec48aab959df6b7e744f3e1448814e4382f558f424afe0e879fd944511"
+      },
+      "rounds": [
+        {
+          "blocks": 15,
+          "verdict": "PASS"
+        }
+      ],
+      "cases": [
+        {
+          "id": "P01",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.987877887543638,
+            "upper": 1.0173324018569916
+          },
+          "p95": {
+            "lower": 0.9808041453174242,
+            "upper": 1.0255671256366552
+          }
+        },
+        {
+          "id": "P02",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.9569397092298015,
+            "upper": 1.0108671166302372
+          },
+          "p95": {
+            "lower": 0.8647685867743423,
+            "upper": 1.008701144006617
+          }
+        }
+      ]
+    },
+    {
       "suite": "read-html",
       "verdict": "PASS",
       "baseSha": "01511ffd5f9ab55111ce7300a20449fd626f6112",
@@ -469,12 +896,12 @@
       "suite": "render-transcript",
       "verdict": "PASS",
       "baseSha": "01511ffd5f9ab55111ce7300a20449fd626f6112",
-      "headSha": "187a0dd12238ca9536f0250ec68bfdd68ddc8b5c",
+      "headSha": "1605b508bf45dd012ce883e5ff1e02ebbdb06452",
       "host": {
         "platform": "darwin",
         "arch": "arm64",
         "bun": "1.4.0",
-        "loadAverage1m": 6.6298828125,
+        "loadAverage1m": 5.61279296875,
         "physicalCores": 18
       },
       "adapter": {
@@ -488,10 +915,6 @@
         },
         {
           "blocks": 30,
-          "verdict": "INCONCLUSIVE"
-        },
-        {
-          "blocks": 60,
           "verdict": "PASS"
         }
       ],
@@ -500,36 +923,36 @@
           "id": "R01",
           "verdict": "PASS",
           "p50": {
-            "lower": 0.9982834925755883,
-            "upper": 1.010857887874837
+            "lower": 0.975216446996519,
+            "upper": 1.0050804230976356
           },
           "p95": {
-            "lower": 1.0134104936323822,
-            "upper": 1.0701195219123507
+            "lower": 0.9631608206485771,
+            "upper": 1.077498916967509
           }
         },
         {
           "id": "R02",
           "verdict": "PASS",
           "p50": {
-            "lower": 1.000802920938376,
-            "upper": 1.0067387623222344
+            "lower": 0.99295186012356,
+            "upper": 1.0044085211705385
           },
           "p95": {
-            "lower": 0.9966163214784565,
-            "upper": 1.0049148928543028
+            "lower": 0.9720956903627692,
+            "upper": 1.0107201769901664
           }
         },
         {
           "id": "R03",
           "verdict": "PASS",
           "p50": {
-            "lower": 0.9740093271186419,
-            "upper": 0.9819455153735861
+            "lower": 0.9572541011636656,
+            "upper": 0.9824588637069233
           },
           "p95": {
-            "lower": 0.9731113956466069,
-            "upper": 0.9851106649057719
+            "lower": 0.9422095217243576,
+            "upper": 1.0245987987905818
           }
         }
       ]
@@ -746,17 +1169,17 @@
       "suite": "tools:ast_grep",
       "verdict": "PASS",
       "baseSha": "01511ffd5f9ab55111ce7300a20449fd626f6112",
-      "headSha": "187a0dd12238ca9536f0250ec68bfdd68ddc8b5c",
+      "headSha": "9370a2bf6501ff5ed357d488a9124afc5673acf3",
       "host": {
         "platform": "darwin",
         "arch": "arm64",
         "bun": "1.4.0",
-        "loadAverage1m": 4.0986328125,
+        "loadAverage1m": 6.58251953125,
         "physicalCores": 18
       },
       "adapter": {
         "path": "packages/natives/bench/tools-ast-grep.ts",
-        "sha256": "ea3b400660dcebdf450eb70b048b93920d72ebece54ff828c40309a9ac3699c0"
+        "sha256": "757e8e8e488f8b5ae1fcedb73f229a9f46edda77b47ce30bdb55047171011885"
       },
       "rounds": [
         {
@@ -769,12 +1192,24 @@
           "id": "A01",
           "verdict": "PASS",
           "p50": {
-            "lower": 0.7442857480546031,
-            "upper": 0.7585791277320348
+            "lower": 0.775711003804507,
+            "upper": 0.7890644918710076
           },
           "p95": {
-            "lower": 0.6797307748463318,
-            "upper": 0.7650443007566176
+            "lower": 0.6694143703925322,
+            "upper": 0.7993414489346148
+          }
+        },
+        {
+          "id": "A02",
+          "verdict": "PASS",
+          "p50": {
+            "lower": 0.34896516176538267,
+            "upper": 0.354319383873063
+          },
+          "p95": {
+            "lower": 0.3399262348856188,
+            "upper": 0.3658536169847393
           }
         }
       ]
