@@ -629,7 +629,10 @@ export function hasValidLifecycleDeadlines(value: LifecycleDeadlines, now = Date
 type Input = Record<string, unknown>;
 // The admitted launch deadline must survive the response phase: executeLifecycle
 // receives the caller's original input after startup admission has expanded it.
-type LifecycleEffectIntentWithDeadline = LifecycleEffectIntent & { lifecycleCleanupDeadlineAt?: number };
+type LifecycleEffectIntentWithDeadline = LifecycleEffectIntent & {
+	lifecycleCleanupDeadlineAt?: number;
+	admissionCleanupDeadlineAt?: number;
+};
 export const isCanonicalSessionId = (value: string): boolean => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
 const defaultStateRoot = (cwd: string) => path.join(path.resolve(cwd), ".gjc", "state");
 const hasDefaultStateRoot = (cwd: string, root: string) => path.resolve(root) === defaultStateRoot(cwd);
@@ -6639,6 +6642,9 @@ async function executeLifecycleResponse(
 			childOwnershipEstablished: false,
 			lifecycleCleanupDeadlineAt:
 				outerCleanupDeadlineAt ?? (childDeadlines as LifecycleDeadlines).lifecycleCleanupDeadlineAt,
+			...(brokerAdmission
+				? { admissionCleanupDeadlineAt: (childDeadlines as LifecycleDeadlines).lifecycleCleanupDeadlineAt }
+				: {}),
 			...(plannedWorktreeIntent ? { worktree: plannedWorktreeIntent } : {}),
 		};
 
@@ -8140,6 +8146,7 @@ export async function executeLifecycle(
 	identity: string,
 	cleanup?: CleanupEvidence,
 ): Promise<LifecycleExecutionOutcome> {
+	const timing = lifecycleTiming(broker);
 	let proofBudget = lifecycleProofBudgetFromInput(broker, input);
 	if (!proofBudget)
 		proofBudget = lifecycleProofBudgetFromEffectIntent(broker, broker.ledger.get(identity)?.effectIntent);
@@ -8380,8 +8387,22 @@ export async function executeLifecycle(
 											...(startupFailure ? { startupFailure } : {}),
 										}
 			: response;
+	// The extended proof window may reconcile artifacts after the original
+	// admission deadline, but cannot retroactively prove a timely spawn failure.
+	const admissionCleanupDeadlineAt = (entry?.effectIntent as LifecycleEffectIntentWithDeadline | undefined)
+		?.admissionCleanupDeadlineAt;
+	const lateSpawnFailure =
+		!terminalResponse.ok &&
+		terminalResponse.error.code === "spawn_failed" &&
+		admissionCleanupDeadlineAt !== undefined &&
+		timing.now() >= admissionCleanupDeadlineAt;
 	return {
-		response: terminalResponse,
+		response: lateSpawnFailure
+			? {
+					...terminalResponse,
+					error: { code: "terminal_uncertain", message: terminalUncertainStartupMessage(response) },
+				}
+			: terminalResponse,
 		...(durableEffects ? { durableEffects } : {}),
 		...(startupFailure ? { startupFailure } : {}),
 	};
