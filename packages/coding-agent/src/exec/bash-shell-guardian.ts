@@ -1,7 +1,7 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as childProcess from "node:child_process";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import { type FSWatcher, watch } from "node:fs";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -67,7 +67,7 @@ export function extendOwnedDarwinAncestry<T extends { uniqueId: bigint; parentUn
 export function authenticateOwnershipRecord(
 	line: string,
 	ledgerToken: string,
-): { processRef?: NativeProcess; darwinUniqueId?: bigint } | undefined {
+): { processRef?: NativeProcess; darwinUniqueId?: bigint; pending?: true } | undefined {
 	const record = parseOwnershipRecord(line);
 	if (!record) return undefined;
 	const uniqueId = record.darwinUniqueId ?? "";
@@ -83,11 +83,17 @@ export function authenticateOwnershipRecord(
 	if (received.byteLength !== expected.byteLength || !timingSafeEqual(received, expected)) return undefined;
 	const { Process } = require("@gajae-code/natives") as NativeProcessBindings;
 	const owned = Process.fromPid(record.pid);
-	return {
-		...(owned?.incarnation === record.incarnation ? { processRef: owned } : {}),
-		...(record.darwinUniqueId ? { darwinUniqueId: BigInt(record.darwinUniqueId) } : {}),
-	};
+	const darwinUniqueId = record.darwinUniqueId ? { darwinUniqueId: BigInt(record.darwinUniqueId) } : {};
+	if (owned?.incarnation === record.incarnation) return { processRef: owned, ...darwinUniqueId };
+	// fromPid() conflates death with an inconclusive lookup. Only a confirmed
+	// absence or a different incarnation settles the record; an unknown result
+	// keeps it pending so the caller retries the line on the next scan.
+	if (!owned && Process.observe(record.pid).status === "unknown") return { pending: true, ...darwinUniqueId };
+	return darwinUniqueId;
 }
+
+/** Scans an inconclusive ledger record may stay pending before tracking fails closed. */
+const MAX_PENDING_LEDGER_ATTEMPTS = 50;
 
 function enableLinuxChildSubreaper(): boolean {
 	if (process.platform !== "linux") return true;
@@ -408,6 +414,8 @@ export async function runBashShellGuardian(): Promise<void> {
 	input.once("close", () => supervisor.stdin.end());
 	let cleaning: Promise<void> | undefined;
 	let ledgerBuffer = "";
+	let pendingLedgerLines: string[] = [];
+	const pendingAttempts = new Map<string, number>();
 	let ownershipScan = Promise.resolve(true);
 	const scanOwnership = (): Promise<boolean> => {
 		ownershipScan = ownershipScan.then(async previousOk => {
@@ -419,11 +427,23 @@ export async function runBashShellGuardian(): Promise<void> {
 				return false;
 			}
 			ledgerBuffer += content;
-			const lines = ledgerBuffer.split("\n");
-			ledgerBuffer = lines.pop() ?? "";
+			const fresh = ledgerBuffer.split("\n");
+			ledgerBuffer = fresh.pop() ?? "";
+			const lines = [...pendingLedgerLines, ...fresh];
+			pendingLedgerLines = [];
 			for (const line of lines) {
 				if (!line) continue;
 				const owned = authenticateOwnershipRecord(line, ledgerToken);
+				if (owned?.pending) {
+					// Inconclusive lookup: retry next scan, bounded so a pid stuck in an
+					// unknown state cannot grow the queue or starve cleanup forever.
+					const attempts = (pendingAttempts.get(line) ?? 0) + 1;
+					if (attempts > MAX_PENDING_LEDGER_ATTEMPTS) return false;
+					pendingAttempts.set(line, attempts);
+					pendingLedgerLines.push(line);
+				} else {
+					pendingAttempts.delete(line);
+				}
 				if (owned?.darwinUniqueId && darwinTracker) darwinTracker.seed(owned.darwinUniqueId);
 				if (owned?.processRef && darwinTracker && !darwinTracker.track(owned.processRef, owned.darwinUniqueId))
 					return false;
@@ -466,10 +486,10 @@ export async function runBashShellGuardian(): Promise<void> {
 	// Scan as soon as the supervisor appends a ledger record instead of waiting
 	// for the next tick. An incarnation-only record's descendants are only
 	// reachable while that child is alive, so the anchor must be taken promptly.
-	let ledgerWatcher: FSWatcher | undefined;
+	let ledgerWatcher: fsSync.FSWatcher | undefined;
 	if (darwinTracker) {
 		try {
-			ledgerWatcher = watch(ownershipFilePath, runPeriodicScan);
+			ledgerWatcher = fsSync.watch(ownershipFilePath, runPeriodicScan);
 			ledgerWatcher.on("error", () => {});
 		} catch {
 			ledgerWatcher = undefined;

@@ -111,6 +111,17 @@ describe("bash-shell-guardian", () => {
 			expect(authenticated?.darwinUniqueId).toBeUndefined();
 		});
 
+		it("settles a record whose process is confirmed gone instead of keeping it pending", () => {
+			// Spawn and reap a real child so its pid is confirmed absent, not unknown.
+			const child = Bun.spawnSync(["true"]);
+			const pid = child.pid;
+			const line = JSON.stringify({ pid, incarnation: "gone", signature: sign(pid, "gone", "") });
+			const authenticated = authenticateOwnershipRecord(line, token);
+			expect(authenticated).toBeDefined();
+			expect(authenticated?.pending).toBeUndefined();
+			expect(authenticated?.processRef).toBeUndefined();
+		});
+
 		it("binds the Darwin unique id into the signature", () => {
 			const signature = sign(1234, "uuid-abc", "");
 			const forged = JSON.stringify({ pid: 1234, incarnation: "uuid-abc", darwinUniqueId: "42", signature });
