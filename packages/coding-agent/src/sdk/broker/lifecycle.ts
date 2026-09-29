@@ -97,6 +97,7 @@ import {
 } from "./session-index";
 import {
 	cancellableSleep,
+	DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS,
 	DEFAULT_READINESS_TIMEOUT_MS,
 	deriveLifecycleOuterDeadlines,
 	isValidReadinessTimeoutMs,
@@ -517,6 +518,7 @@ type LifecycleCommandResolver = () => LifecycleCommand;
 const lifecycleCommandResolversForTest = new WeakMap<Broker, LifecycleCommandResolver>();
 const lifecycleCleanupHooksForTest = new WeakMap<Broker, () => void>();
 const startupAdmittedInputs = new WeakSet<Input>();
+const startupBrokerDerivedAdmissions = new WeakMap<Input, number>();
 const startupLaunchInputs = new WeakMap<Input, SessionLaunch>();
 type EnsureLaunchWorktreeForTest = (
 	plan: GjcLaunchWorktreePlan,
@@ -6441,15 +6443,20 @@ async function executeLifecycleResponse(
 				);
 			}
 			const admitted = await broker.runStartup(queueWaitMs, timing, async admittedAt => {
-				const admittedInput = launch.worktreePlan
-					? { ...input, admittedAt, requestedReadinessTimeoutMs }
-					: { ...input, ...deriveLifecycleDeadlines(admittedAt, requestedReadinessTimeoutMs) };
+				const callerSuppliedDeadlines = suppliedDeadlineFields.some(value => value !== undefined);
+				let admittedInput: Input;
+				if (launch.worktreePlan) admittedInput = { ...input, admittedAt, requestedReadinessTimeoutMs };
+				else if (callerSuppliedDeadlines) admittedInput = { ...input };
+				else admittedInput = { ...input, ...deriveLifecycleDeadlines(admittedAt, requestedReadinessTimeoutMs) };
 				startupAdmittedInputs.add(admittedInput);
+				if (!launch.worktreePlan && !callerSuppliedDeadlines)
+					startupBrokerDerivedAdmissions.set(admittedInput, admittedAt);
 				startupLaunchInputs.set(admittedInput, launch);
 				try {
 					return await executeLifecycleResponse(broker, operation, admittedInput, identity, cleanup);
 				} finally {
 					startupLaunchInputs.delete(admittedInput);
+					startupBrokerDerivedAdmissions.delete(admittedInput);
 					startupAdmittedInputs.delete(admittedInput);
 				}
 			});
@@ -6477,6 +6484,9 @@ async function executeLifecycleResponse(
 		let readinessDeadline: number;
 		let terminationStartDeadline: number;
 		let outerCleanupDeadlineAt: number | undefined;
+		const brokerAdmittedAt = startupBrokerDerivedAdmissions.get(input);
+		const preSpawnDeadlineAt =
+			brokerAdmittedAt === undefined ? undefined : brokerAdmittedAt + DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS;
 		if (launch.worktreePlan) {
 			const prepTimeouts = readPreparationTimeouts(input);
 			if (!prepTimeouts.ok) return fail("invalid_input", PREPARATION_TIMEOUT_INVALID_MESSAGE);
@@ -6507,6 +6517,10 @@ async function executeLifecycleResponse(
 			lifecycleDeadline = deadlines.lifecycleCleanupDeadlineAt;
 			readinessDeadline = deadlines.semanticReadyDeadlineAt;
 			terminationStartDeadline = deadlines.terminationStartDeadlineAt;
+			if (preSpawnDeadlineAt !== undefined) {
+				outerCleanupDeadlineAt = preSpawnDeadlineAt + deadlines.requestedReadinessTimeoutMs;
+				lifecycleDeadline = outerCleanupDeadlineAt;
+			}
 		}
 
 		if (!hasProcessIncarnationAuthority())
@@ -6631,7 +6645,22 @@ async function executeLifecycleResponse(
 			}
 			return mapPreparationFailure(error);
 		}
-		if (!launch.worktreePlan && timing.now() >= readinessDeadline)
+		if (preSpawnDeadlineAt !== undefined && brokerAdmittedAt !== undefined) {
+			const prepFinishedAt = timing.now();
+			if (prepFinishedAt >= preSpawnDeadlineAt)
+				return fail(
+					"readiness_timeout",
+					`Broker pre-spawn preparation exceeded its ${DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS} ms allowance after ${Math.max(0, prepFinishedAt - brokerAdmittedAt)} ms.`,
+				);
+			// Only broker-derived tuples restart here; exact caller deadlines remain unchanged.
+			childDeadlines = deriveLifecycleDeadlines(
+				prepFinishedAt,
+				(childDeadlines as LifecycleDeadlines).requestedReadinessTimeoutMs,
+			);
+			readinessDeadline = childDeadlines.semanticReadyDeadlineAt;
+			terminationStartDeadline = childDeadlines.terminationStartDeadlineAt;
+			lifecycleDeadline = childDeadlines.lifecycleCleanupDeadlineAt;
+		} else if (!launch.worktreePlan && timing.now() >= readinessDeadline)
 			return fail(
 				"readiness_timeout",
 				"Lifecycle preparation exhausted the semantic readiness deadline before spawning.",

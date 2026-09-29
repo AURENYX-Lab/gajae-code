@@ -11,6 +11,9 @@ export const MAX_PREPARATION_TIMEOUT_MS = 120_000;
 /** Bounded workspace install window; independent of child semantic readiness. */
 export const DEFAULT_DEPENDENCY_PREPARATION_TIMEOUT_MS = 30_000;
 
+/** Broker bookkeeping before a non-worktree child exists. */
+export const DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS = 30_000;
+
 export function isValidReadinessTimeoutMs(value: unknown): value is number {
 	return (
 		typeof value === "number" &&
