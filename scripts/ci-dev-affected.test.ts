@@ -36,7 +36,8 @@ test("the production SDK host suites run sequentially and stop after a failure",
 		active -= 1;
 		return suite.file === sdkProductionHostIsolatedSuites[0].file ? 0 : 17;
 	});
-	expect(started).toEqual(sdkProductionHostIsolatedSuites.map(suite => suite.file));
+	expect(sdkProductionHostIsolatedSuites.length).toBeGreaterThan(2);
+	expect(started).toEqual(sdkProductionHostIsolatedSuites.slice(0, 2).map(suite => suite.file));
 	expect(maxActive).toBe(1);
 	expect(exitCode).toBe(17);
 });
