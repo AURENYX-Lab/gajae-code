@@ -399,7 +399,7 @@ The gateway multiplexes transports by model family:
 
 | Family | Models | Transport | Prompt limit |
 | --- | --- | --- | --- |
-| Claude | `claude-sonnet-4-6` (default), `claude-sonnet-5`, `claude-sonnet-5-5`, `claude-opus-4-6`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-fable-5` | `anthropic-messages` | 1M |
+| Claude | `claude-sonnet-4-6` (default), `claude-sonnet-5`, `claude-opus-4-6`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-fable-5` | `anthropic-messages` | 1M |
 | GPT | `gpt-5-2025-08-07`, `gpt-5.2-2025-12-11`, `gpt-5.4`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra` | `openai-completions` | 922K |
 | GPT (Responses-only) | `gpt-5.3-codex` | `openai-responses` | 272K |
 
