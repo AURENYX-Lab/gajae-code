@@ -518,7 +518,7 @@ type LifecycleCommandResolver = () => LifecycleCommand;
 const lifecycleCommandResolversForTest = new WeakMap<Broker, LifecycleCommandResolver>();
 const lifecycleCleanupHooksForTest = new WeakMap<Broker, () => void>();
 const startupAdmittedInputs = new WeakSet<Input>();
-const startupBrokerDerivedAdmissions = new WeakMap<Input, number>();
+const startupBrokerDerivedAdmissions = new WeakMap<Input, { admittedAt: number; preSpawnDeadlineAt: number }>();
 const startupLaunchInputs = new WeakMap<Input, SessionLaunch>();
 type EnsureLaunchWorktreeForTest = (
 	plan: GjcLaunchWorktreePlan,
@@ -6416,6 +6416,7 @@ async function executeLifecycleResponse(
 		const timing = lifecycleTiming(broker);
 		const admissionGranted = startupAdmittedInputs.has(input);
 		if (!admissionGranted) {
+			const startupReceivedAt = timing.now();
 			const suppliedDeadlineFields = [
 				input.receivedAt,
 				input.requestedReadinessTimeoutMs,
@@ -6450,7 +6451,13 @@ async function executeLifecycleResponse(
 				else admittedInput = { ...input, ...deriveLifecycleDeadlines(admittedAt, requestedReadinessTimeoutMs) };
 				startupAdmittedInputs.add(admittedInput);
 				if (!launch.worktreePlan && !callerSuppliedDeadlines)
-					startupBrokerDerivedAdmissions.set(admittedInput, admittedAt);
+					startupBrokerDerivedAdmissions.set(admittedInput, {
+						admittedAt,
+						preSpawnDeadlineAt: Math.min(
+							admittedAt + DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS,
+							startupReceivedAt + queueWaitMs,
+						),
+					});
 				startupLaunchInputs.set(admittedInput, launch);
 				try {
 					return await executeLifecycleResponse(broker, operation, admittedInput, identity, cleanup);
@@ -6484,9 +6491,8 @@ async function executeLifecycleResponse(
 		let readinessDeadline: number;
 		let terminationStartDeadline: number;
 		let outerCleanupDeadlineAt: number | undefined;
-		const brokerAdmittedAt = startupBrokerDerivedAdmissions.get(input);
-		const preSpawnDeadlineAt =
-			brokerAdmittedAt === undefined ? undefined : brokerAdmittedAt + DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS;
+		const brokerAdmission = startupBrokerDerivedAdmissions.get(input);
+		const preSpawnDeadlineAt = brokerAdmission?.preSpawnDeadlineAt;
 		if (launch.worktreePlan) {
 			const prepTimeouts = readPreparationTimeouts(input);
 			if (!prepTimeouts.ok) return fail("invalid_input", PREPARATION_TIMEOUT_INVALID_MESSAGE);
@@ -6645,12 +6651,12 @@ async function executeLifecycleResponse(
 			}
 			return mapPreparationFailure(error);
 		}
-		if (preSpawnDeadlineAt !== undefined && brokerAdmittedAt !== undefined) {
+		if (preSpawnDeadlineAt !== undefined && brokerAdmission !== undefined) {
 			const prepFinishedAt = timing.now();
 			if (prepFinishedAt >= preSpawnDeadlineAt)
 				return fail(
 					"readiness_timeout",
-					`Broker pre-spawn preparation exceeded its ${DEFAULT_BROKER_PRESPAWN_PREPARATION_TIMEOUT_MS} ms allowance after ${Math.max(0, prepFinishedAt - brokerAdmittedAt)} ms.`,
+					`Broker pre-spawn preparation exceeded its ${Math.max(0, preSpawnDeadlineAt - brokerAdmission.admittedAt)} ms allowance after ${Math.max(0, prepFinishedAt - brokerAdmission.admittedAt)} ms.`,
 				);
 			// Only broker-derived tuples restart here; exact caller deadlines remain unchanged.
 			childDeadlines = deriveLifecycleDeadlines(
