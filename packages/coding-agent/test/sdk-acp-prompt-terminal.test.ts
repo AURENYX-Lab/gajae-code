@@ -739,6 +739,44 @@ test("ACP prompt rejects prompt_failed terminal outcomes with their code", async
 	}
 });
 
+test("ACP accepts a successor after a failed turn while the SDK is winding down", async () => {
+	const fixture = await createFixture();
+	try {
+		const first = prompt(fixture, "provider failure");
+		await bounded(fixture.promptDelivered, "failed prompt delivery");
+		fixture.sendFailed("prompt_failed", undefined, "server_is_overloaded");
+		await expect(bounded(first, "failed prompt settlement")).rejects.toMatchObject({ code: "prompt_failed" });
+		fixture.sendTerminal({ type: "activity", sessionId: fixture.sessionId, state: "busy" });
+		const successor = prompt(fixture, "please continue");
+		setTimeout(() => fixture.sendIdle(), 10);
+		await waitFor(() => fixture.promptDeliveryCount() === 2, "successor prompt delivery");
+		fixture.sendStopped("end_turn");
+		expect(await bounded(successor, "successor settlement")).toEqual({ stopReason: "end_turn" });
+	} finally {
+		fixture.dispose();
+	}
+});
+
+test("ACP accepts an immediate successor after cancellation while the SDK is winding down", async () => {
+	const fixture = await createFixture({ cancelSettlementGraceMs: 100 });
+	try {
+		const first = prompt(fixture, "cancel this");
+		await bounded(fixture.promptDelivered, "cancelled prompt delivery");
+		fixture.sendTerminal({ type: "agent_start", sessionId: fixture.sessionId });
+		await fixture.agent.cancel({ sessionId: fixture.sessionId } as never);
+		fixture.sendStopped("cancelled");
+		expect(await bounded(first, "cancelled prompt settlement")).toEqual({ stopReason: "cancelled" });
+		fixture.sendTerminal({ type: "activity", sessionId: fixture.sessionId, state: "busy" });
+		const successor = prompt(fixture, "continue after cancel");
+		setTimeout(() => fixture.sendIdle(), 10);
+		await waitFor(() => fixture.promptDeliveryCount() === 2, "successor prompt delivery");
+		fixture.sendStopped("end_turn");
+		expect(await bounded(successor, "successor settlement")).toEqual({ stopReason: "end_turn" });
+	} finally {
+		fixture.dispose();
+	}
+});
+
 test("ACP surfaces a correlated delivery failure without waiting for the watchdog", async () => {
 	const fixture = await createFixture();
 	try {
