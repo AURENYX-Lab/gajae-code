@@ -610,7 +610,7 @@ async function classifyFileLockRemovalTransition(
 	if (!observation) return "active";
 	const info = parseLockInfoBytes(observation.bytes);
 	if (info) {
-		const stale = await staleLockSnapshot(transitionPath, 0, ownerHostId, previousOwnerHostIds);
+		const stale = await staleLockSnapshot(transitionPath, 0, ownerHostId, previousOwnerHostIds, undefined, true);
 		return stale.stale ? "abandoned" : "active";
 	}
 
@@ -704,7 +704,7 @@ async function adoptAbandonedFileLockRemovalTransition(
 	previousOwnerHostIds: readonly string[] = [],
 ): Promise<boolean> {
 	const transitionPath = fileLockRemovalTransitionPath(lockPath);
-	const stale = await staleLockSnapshot(transitionPath, 0, ownerHostId, previousOwnerHostIds);
+	const stale = await staleLockSnapshot(transitionPath, 0, ownerHostId, previousOwnerHostIds, undefined, true);
 	if (!stale.stale || !stale.identity) return false;
 	if (!(await isNativeExactRemovalUsable())) return false;
 
@@ -747,6 +747,18 @@ async function adoptAbandonedFileLockRemovalTransition(
 		throw error;
 	}
 	if (removal.ok === true) return removal.code === undefined && Object.keys(removal).every(key => key === "ok");
+	if (
+		removal.ok === false &&
+		removal.code === "cleanup_pending" &&
+		removal.payloadDurable === true &&
+		removal.detachedPath !== undefined &&
+		path.resolve(removal.detachedPath) === path.resolve(transitionPath) &&
+		removal.retainedSuccessorPath === undefined &&
+		removal.retainedPlaceholderPath === undefined &&
+		removal.retainedUnknownPath === undefined &&
+		Object.keys(removal).every(key => ["ok", "code", "payloadDurable", "detachedPath"].includes(key))
+	)
+		return await removeDetachedLockQuarantineOnDisk(transitionPath, snapshot.rootDev, snapshot.rootIno);
 	return (
 		removal.ok === false &&
 		removal.code === "not_found" &&
@@ -1544,6 +1556,14 @@ async function staleLockSnapshot(
 	ownerHostId?: string,
 	previousOwnerHostIds: readonly string[] = [],
 	startTimeCache?: Map<string, string | null>,
+	// `.removing` transitions are internal cleanup state this codebase's own removal
+	// machinery produced, never a live holder's public identity: a hostless transition
+	// record predates host-id stamping and is reclaimable by local liveness proof alone,
+	// regardless of the acquirer's own host id. Active `<file>.lock` holders keep the
+	// stricter fail-closed rule (see `lockRecordIsForeignHost`) because that record can
+	// belong to a genuinely foreign process; only the two transition-specific callers
+	// below set this.
+	hostlessTransitionIsLocal = false,
 ): Promise<LockStaleSnapshot> {
 	// Capture the root and info inode BEFORE asking whether the owner is stale. A later
 	// snapshot alone would let a copied successor inherit the stale verdict's authority.
@@ -1577,7 +1597,8 @@ async function staleLockSnapshot(
 	// A host-qualified lock may only be reclaimed after proving that its owner is
 	// local. Foreign and malformed host-qualified records fail closed: PID values
 	// and clocks are not meaningful across hosts.
-	if (lockRecordIsForeignHost(info, ownerHostId, previousOwnerHostIds)) return { stale: false };
+	const foreignCheckHostId = hostlessTransitionIsLocal && info.owner_host_id === undefined ? undefined : ownerHostId;
+	if (lockRecordIsForeignHost(info, foreignCheckHostId, previousOwnerHostIds)) return { stale: false };
 	if (ownerIncarnationChanged(info, startTimeCache)) {
 		if (!judgedIdentity) return { stale: false };
 		let currentIdentity: GenericFileLockDirIdentity | null;

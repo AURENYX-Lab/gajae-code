@@ -825,6 +825,40 @@ describe("file lock abandoned removal recovery", () => {
 		await expect(fs.lstat(lock)).rejects.toMatchObject({ code: "ENOENT" });
 	});
 
+	test("hostless dead transition removed in a single acquire, info not left truncated", async () => {
+		const { file, lock } = await makeFixture();
+		const transition = `${lock}.removing`;
+		const infoPath = path.join(transition, "info");
+		await fs.mkdir(transition);
+		await Bun.write(infoPath, removalInfo(await deadPid()));
+
+		let release: (() => Promise<void>) | undefined;
+		try {
+			release = await acquireFileLock(file, { ...quickAcquire, ownerHostId: "host-a" });
+		} catch (error) {
+			if (await fs.exists(infoPath)) expect(await Bun.file(infoPath).size).not.toBe(0);
+			throw error;
+		}
+		try {
+			await expect(fs.lstat(transition)).rejects.toMatchObject({ code: "ENOENT" });
+		} finally {
+			await release();
+		}
+	});
+
+	test("preserves a hostless live transition for a host-qualified acquirer", async () => {
+		const { file, lock } = await makeFixture();
+		const transition = `${lock}.removing`;
+		await fs.mkdir(transition);
+		await Bun.write(path.join(transition, "info"), removalInfo(process.pid));
+		const retained = treeSnapshot(transition);
+
+		await expect(acquireFileLock(file, { ...quickAcquire, ownerHostId: "host-a" })).rejects.toMatchObject({
+			code: "acquire_timeout",
+		});
+		expect(treeSnapshot(transition)).toEqual(retained);
+	});
+
 	test("preserves a removal transition held by a live owner", async () => {
 		const { file, lock } = await makeFixture();
 		const transition = `${lock}.removing`;
