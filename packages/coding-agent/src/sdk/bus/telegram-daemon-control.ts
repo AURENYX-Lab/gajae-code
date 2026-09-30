@@ -53,6 +53,16 @@ const nodeFs: TelegramDaemonFs = {
 const DEFAULT_GRACEFUL_TIMEOUT_MS = 8_000;
 const DEFAULT_KILL_TIMEOUT_MS = 3_000;
 const DEFAULT_WAIT_STEP_MS = 25;
+// Windows process handles cannot deliver SIGTERM cooperatively. The request
+// file is therefore the sole notification channel, so a captured owner gets
+// enough time to finish its long poll, network slack, and shutdown joins before
+// an explicit force request may escalate. Short explicit timeouts are clamped
+// to this floor only for hard-termination authorities; POSIX keeps 8 seconds.
+const HARD_TERMINATION_LONG_POLL_MS = 25_000;
+const HARD_TERMINATION_NETWORK_SLACK_MS = 5_000;
+const HARD_TERMINATION_SHUTDOWN_JOINS_MS = 10_000;
+const HARD_TERMINATION_GRACE_MS =
+	HARD_TERMINATION_LONG_POLL_MS + HARD_TERMINATION_NETWORK_SLACK_MS + HARD_TERMINATION_SHUTDOWN_JOINS_MS;
 
 export interface TelegramDaemonControlRequest {
 	version: 1;
@@ -656,7 +666,9 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		// death through the normal path — waitForPidDeath returns immediately for a
 		// dead pid, so stop succeeds and reload proceeds to spawn the replacement.
 
-		let dead = await this.waitForPidDeath(oldPid, gracefulTimeoutMs);
+		const cooperativeGraceMs =
+			signalResult === "hard_termination" ? Math.max(gracefulTimeoutMs, HARD_TERMINATION_GRACE_MS) : gracefulTimeoutMs;
+		let dead = await this.waitForPidDeath(oldPid, cooperativeGraceMs);
 		if (!dead) {
 			// Old pid still alive after the cooperative SIGTERM. Inspect current ownership.
 			const currentSnapshot = await readOwnerFreshnessSnapshot({ settings: this.settings, fs: this.fsImpl });

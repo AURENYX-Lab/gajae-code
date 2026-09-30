@@ -615,6 +615,119 @@ describe("TelegramDaemonController.reload", () => {
 		expect(await readTelegramControlRequest(s)).toBeUndefined();
 	});
 
+	test("hard Windows authority gives a captured owner extended cooperative grace", async () => {
+		const agentDir = tempAgentDir();
+		const s = settings(agentDir);
+		const state = freshState();
+		writeState(agentDir, state);
+		writeOwnershipLock(agentDir, state);
+		const alive = new Set([999]);
+		let now = Date.now();
+		let killed = false;
+		const result = await new TelegramDaemonController(s, {
+			now: () => now,
+			pidAlive: pid => alive.has(pid),
+			pidIncarnation: () => "linux:100",
+			processReference: () => ({
+				incarnation: "linux:100",
+				termination: "hard",
+				signalRoot: signal => {
+					if (signal === "SIGKILL") killed = true;
+				},
+			}),
+			sleep: async ms => {
+				now += ms;
+				if (await readTelegramControlRequest(s) && now >= Date.now() + 20_000) alive.delete(999);
+			},
+		}).stop({ gracefulTimeoutMs: 1, force: true });
+		expect(result.ok).toBe(true);
+		expect(killed).toBe(false);
+	});
+
+	test("hard Windows non-force stop succeeds when the owner dies after twenty seconds", async () => {
+		const agentDir = tempAgentDir();
+		const s = settings(agentDir);
+		const state = freshState();
+		writeState(agentDir, state);
+		writeOwnershipLock(agentDir, state);
+		const alive = new Set([999]);
+		let now = Date.now();
+		const requestStartedAt = now;
+		const result = await new TelegramDaemonController(s, {
+			now: () => now,
+			pidAlive: pid => alive.has(pid),
+			pidIncarnation: () => "linux:100",
+			processReference: () => ({
+				incarnation: "linux:100",
+				termination: "hard",
+				signalRoot: () => undefined,
+			}),
+			sleep: async ms => {
+				now += ms;
+				if ((await readTelegramControlRequest(s)) && now - requestStartedAt >= 20_000) alive.delete(999);
+			},
+		}).stop({ gracefulTimeoutMs: 1 });
+		expect(result.ok).toBe(true);
+	});
+
+	test("hard Windows force waits the extended grace before killing a never-exiting owner", async () => {
+		const agentDir = tempAgentDir();
+		const s = settings(agentDir);
+		const state = freshState();
+		writeState(agentDir, state);
+		writeOwnershipLock(agentDir, state);
+		const alive = new Set([999]);
+		let now = Date.now();
+		let firstKillAt: number | undefined;
+		const result = await new TelegramDaemonController(s, {
+			now: () => now,
+			pidAlive: pid => alive.has(pid),
+			pidIncarnation: () => "linux:100",
+			processReference: () => ({
+				incarnation: "linux:100",
+				termination: "hard",
+				signalRoot: signal => {
+					if (signal === "SIGKILL") {
+						firstKillAt = now;
+						alive.delete(999);
+					}
+				},
+			}),
+			sleep: async ms => {
+				now += ms;
+			},
+		}).stop({ gracefulTimeoutMs: 1, force: true });
+		expect(result.ok).toBe(true);
+		expect(firstKillAt).toBeDefined();
+		expect(firstKillAt! - (state.startedAt as number)).toBeGreaterThanOrEqual(40_000);
+	});
+
+	test("POSIX cooperative termination keeps the eight-second default", async () => {
+		const agentDir = tempAgentDir();
+		const s = settings(agentDir);
+		const state = freshState();
+		writeState(agentDir, state);
+		writeOwnershipLock(agentDir, state);
+		const alive = new Set([999]);
+		let now = Date.now();
+		const result = await new TelegramDaemonController(s, {
+			now: () => now,
+			pidAlive: pid => alive.has(pid),
+			pidIncarnation: () => "linux:100",
+			processReference: () => ({
+				incarnation: "linux:100",
+				termination: "cooperative",
+				signalRoot: () => undefined,
+			}),
+			sleep: async ms => {
+				now += ms;
+			},
+		}).stop();
+		expect(result.ok).toBe(false);
+		expect(result.message).toContain("graceful timeout");
+		expect(await readTelegramControlRequest(s)).toBeUndefined();
+	});
+
 	test("hard Windows authority clears an ignored cooperative request without force", async () => {
 		const agentDir = tempAgentDir();
 		const s = settings(agentDir);
