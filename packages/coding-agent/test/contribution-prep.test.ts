@@ -8,7 +8,7 @@ import {
 	prepareContributionPrep,
 	redactContributionPrepText,
 } from "../src/session/contribution-prep";
-import { lookupBuiltinSlashCommand } from "../src/slash-commands/builtin-registry";
+import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../src/slash-commands/builtin-registry";
 
 const SYNTHETIC_AWS_ACCESS_KEY_ID = `AKIA${"0".repeat(16)}`;
 const SYNTHETIC_AWS_TEMPORARY_KEY_ID = `ASIA${"1".repeat(16)}`;
@@ -622,9 +622,41 @@ describe("contribution prep", () => {
 		expect(prompt).toContain("Do not create GitHub issues");
 	});
 
-	it("does not spawn a worker from the interactive slash command", async () => {
-		const command = lookupBuiltinSlashCommand("contribute-pr");
-		expect(command?.description).toContain("separate terminal");
+	it("passes spawnWorker false at the interactive slash-command seam", async () => {
+		const calls: Array<{ customInstructions?: string; spawnWorker?: boolean }> = [];
+		const prepareContributionPrep = async (options: { customInstructions?: string; spawnWorker?: boolean }) => {
+			calls.push(options);
+			return {
+				manifestPath: "/tmp/prep/manifest.json",
+				workerPromptPath: "/tmp/prep/worker-prompt.md",
+				artifactDir: "/tmp/prep",
+				changedFiles: [],
+				spawned: false,
+			};
+		};
+		const output: string[] = [];
+		const runtime = {
+			ctx: {
+				session: { prepareContributionPrep },
+				handleContributionPrepCommand: async (customInstructions?: string) => {
+					await prepareContributionPrep({ customInstructions, spawnWorker: false });
+					output.push("Open a separate terminal to run the worker.");
+				},
+				sessionManager: { getCwd: () => process.cwd() },
+				settings: {},
+				showStatus: (text: string) => output.push(text),
+				refreshSlashCommandState: async () => {},
+				updateEditorBorderColor: () => {},
+				ui: { requestRender: () => {} },
+				statusLine: { invalidate: () => {} },
+				notifyConfigChanged: async () => {},
+			},
+			handleBackgroundCommand: () => {},
+		} as never;
+
+		expect(await executeBuiltinSlashCommand("/contribute-pr focus on repro", runtime)).toBe(true);
+		expect(calls).toEqual([{ customInstructions: "focus on repro", spawnWorker: false }]);
+		expect(output[0]).toContain("separate terminal");
 	});
 
 	it("can prepare a worker spawn without mutating source-session identity", async () => {
