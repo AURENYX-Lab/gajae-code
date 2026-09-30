@@ -5092,6 +5092,8 @@ export function createNotificationsExtension(
 			acknowledged: boolean;
 			connectionId: string;
 			abandoned: boolean;
+			terminalRetry?: Promise<void>;
+			backlogDropLogged?: boolean;
 			failed: boolean;
 			terminal: boolean;
 			retainCorrelation: boolean;
@@ -5510,16 +5512,46 @@ export function createNotificationsExtension(
 			if (submission.abandoned) return;
 			const activeRuntime = runtime;
 			if (!activeRuntime) return;
-			const fail = (cause: string, frameBytes: number) => {
+			const fail = (cause: string, frameBytes: number, failedJson = JSON.stringify(frame)) => {
 				// A non-terminal frame only reports progress from a still-running
 				// prompt. Abandon its delivery on failure instead of publishing a
 				// synthetic terminal that could race the real run and make ACP
 				// settle the prompt while provider/tool execution continues.
 				if (frame.type !== "agent_end" && frame.type !== "agent_failed") {
+					if (cause === "writer_backlog_full") {
+						if (!submission.backlogDropLogged) {
+							submission.backlogDropLogged = true;
+							logger.warn(
+								`sdk: correlated non-terminal delivery dropped: cause=${cause} frameBytes=${frameBytes}`,
+							);
+						}
+						return;
+					}
 					logger.warn(`sdk: correlated non-terminal delivery abandoned: cause=${cause} frameBytes=${frameBytes}`);
 					abandonPrompt(submission);
 					return;
 				}
+				if (cause === "writer_backlog_full") {
+					submission.terminalRetry = (async () => {
+						const deadline = Date.now() + 3_000;
+						while (Date.now() < deadline) {
+							await Bun.sleep(50);
+							try {
+								activeRuntime.server.sendTo(submission.connectionId, failedJson);
+								return;
+							} catch (retryError) {
+								if (!String(retryError).includes("cause=writer_backlog_full")) break;
+							}
+						}
+						terminalDeliveryFailure(cause, frameBytes);
+					})().finally(() => {
+						submission.terminalRetry = undefined;
+					});
+					return;
+				}
+				terminalDeliveryFailure(cause, frameBytes);
+			};
+			const terminalDeliveryFailure = (cause: string, frameBytes: number) => {
 				const safeCause = isSafePromptFailureCode(cause) ? cause : "unknown";
 				const correlation = { commandId: String(frame.commandId), turnId: String(frame.turnId) };
 				const outcome = failedPromptOutcome({
@@ -5585,7 +5617,7 @@ export function createNotificationsExtension(
 					}
 					logger.warn(`sdk: correlated delivery failed: ${detail}`);
 					const cause = /cause=([a-z_]+)/.exec(detail)?.[1] ?? "unknown";
-					fail(cause, originalBytes);
+					fail(cause, originalBytes, json);
 					return;
 				}
 			}
@@ -5614,6 +5646,7 @@ export function createNotificationsExtension(
 			}
 			deliverCorrelatedFrame(submission, frame);
 			if (submission.terminal) {
+				if (submission.terminalRetry) return;
 				submission.phase = "delivered";
 				finalizePrompt(key, correlation);
 			}
@@ -5919,6 +5952,16 @@ export function createNotificationsExtension(
 				if (submission.abandoned) break;
 			}
 			if (submission.terminal) {
+				if (submission.terminalRetry) {
+					void submission.terminalRetry.then(() => {
+						if (!submission.abandoned && submission.terminal) {
+							submission.phase = "delivered";
+							const [commandId, turnId] = key.split(":", 2);
+							if (commandId && turnId) finalizePrompt(key, { commandId, turnId });
+						}
+					});
+					return;
+				}
 				submission.phase = "delivered";
 				const [commandId, turnId] = key.split(":", 2);
 				if (commandId && turnId) finalizePrompt(key, { commandId, turnId });
