@@ -698,6 +698,64 @@ async function adoptOrphanedFileLockRemovalTransition(lockPath: string, orphanAg
 	return false;
 }
 
+async function adoptAbandonedFileLockRemovalTransition(
+	lockPath: string,
+	_orphanAgeMs: number,
+	ownerHostId?: string,
+	previousOwnerHostIds: readonly string[] = [],
+): Promise<boolean> {
+	const transitionPath = fileLockRemovalTransitionPath(lockPath);
+	if (ownerHostId === undefined) return false;
+	const stale = await staleLockSnapshot(transitionPath, 0, ownerHostId, previousOwnerHostIds);
+	if (!stale.stale || !stale.identity) return false;
+	if (!(await isNativeExactRemovalUsable())) return false;
+
+	let captured: NativeDirectoryTreeResult;
+	try {
+		captured = nativeFileLockBindings().snapshotDirectoryTree(transitionPath);
+	} catch (error) {
+		if (isTransientReleaseError(error)) return false;
+		throw error;
+	}
+	if (!captured.ok || !captured.snapshot) return false;
+	const snapshot = captured.snapshot;
+	const root = snapshot.entries.find(entry => entry.relativePath === "");
+	const infoEntry = snapshot.entries.find(entry => entry.relativePath === "info");
+	if (
+		root?.kind !== "directory" ||
+		infoEntry?.kind !== "file" ||
+		snapshot.entries.some(
+			entry =>
+				entry.relativePath !== "" &&
+				entry.relativePath !== "info" &&
+				entry.kind !== "directory" &&
+				(entry.kind !== "file" || entry.size !== "0"),
+		)
+	)
+		return false;
+	const currentIdentity = await captureFileLockDirIdentity(transitionPath);
+	if (!currentIdentity || !sameStableFileLockIdentity(currentIdentity, stale.identity)) return false;
+	if (
+		!nativeFileLockInfoMatchesStableIdentity(snapshot.rootDev, snapshot.rootIno, infoEntry, stale.identity) ||
+		!nativeFileLockInfoMatchesContentEvidence(infoEntry, stale.identity)
+	)
+		return false;
+
+	let removal: NativeExactUnlinkResult;
+	try {
+		removal = nativeFileLockBindings().exactRemoveDirectoryTree(transitionPath, snapshot);
+	} catch (error) {
+		if (isTransientReleaseError(error)) return false;
+		throw error;
+	}
+	if (removal.ok === true) return removal.code === undefined && Object.keys(removal).every(key => key === "ok");
+	return (
+		removal.ok === false &&
+		removal.code === "not_found" &&
+		Object.keys(removal).every(key => key === "ok" || key === "code")
+	);
+}
+
 function sameFileLockTreeAfterPublication(
 	staged: NativeDirectoryTreeSnapshot,
 	published: NativeDirectoryTreeSnapshot,
@@ -1752,6 +1810,25 @@ async function tryAcquireLock(
 			}
 			if (transitionState === "orphan_transition")
 				return { kind: "orphan_transition", path: fileLockRemovalTransitionPath(destinationPath) };
+			if (transitionState === "abandoned") {
+				if (
+					await adoptAbandonedFileLockRemovalTransition(
+						destinationPath,
+						orphanTransitionAgeMs,
+						ownerHostId,
+						previousOwnerHostIds,
+					)
+				) {
+					transitionState = await classifyFileLockRemovalTransition(
+						destinationPath,
+						orphanTransitionAgeMs,
+						ownerHostId,
+						previousOwnerHostIds,
+					);
+				} else {
+					return null;
+				}
+			}
 			if (transitionState !== null) return null;
 			const staged = snapshotDirectoryTree(canonicalPendingPath);
 			if (!staged.ok || !staged.snapshot) {
