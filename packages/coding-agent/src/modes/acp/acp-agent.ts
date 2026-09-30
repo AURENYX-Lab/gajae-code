@@ -162,6 +162,7 @@ export const ACP_SESSION_READINESS_TIMEOUT_MS = 22_000;
 const ACP_FIRST_PROMPT_MAX_RETRIES = 2;
 /** Backoff before each first-prompt retry, scaled by attempt (250ms, then 500ms). */
 const ACP_FIRST_PROMPT_RETRY_BASE_DELAY_MS = 250;
+const ACP_BUSY_SETTLE_WAIT_MS = 5_000;
 
 type JsonObject = Record<string, unknown>;
 interface PromptWaiter {
@@ -266,6 +267,7 @@ type SessionRecord = {
 	backgroundBusy: boolean;
 	backgroundAnonymousCount: number;
 	backgroundCorrelations: PromptCorrelation[];
+	idleWaiters: Set<() => void>;
 	/** Start/update args retained because tool_execution_end does not carry them. */
 	toolArgs: Map<string, unknown>;
 	/** Message projection state for correlationless session-scoped assistant events. */
@@ -2482,13 +2484,23 @@ export class AcpAgent implements Agent {
 		const promptAdapter = record.adapter;
 		const acknowledgementTask = (async (): Promise<PromptResponse> => {
 			if (waiter.settled || record.activePrompt !== waiter) return await response;
-			const acknowledgement = skillInvocation
-				? await promptAdapter.control("skill.invoke", { ...skillInvocation, clientRef })
-				: await promptAdapter.prompt({
-						text: payload.text,
-						clientRef,
-						...(payload.images.length ? { images: payload.images } : {}),
-					});
+			const submit = async (): Promise<unknown> =>
+				skillInvocation
+					? await promptAdapter.control("skill.invoke", { ...skillInvocation, clientRef })
+					: await promptAdapter.prompt({
+							text: payload.text,
+							clientRef,
+							...(payload.images.length ? { images: payload.images } : {}),
+						});
+			let acknowledgement: unknown;
+			try {
+				acknowledgement = await submit();
+			} catch (error) {
+				if (!(error instanceof AcpSdkAdapterError) || error.code !== "busy") throw error;
+				await this.#waitForSessionIdle(record);
+				if (record.busy || record.activePrompt !== waiter || waiter.settled) throw error;
+				acknowledgement = await submit();
+			}
 			// A recovered waiter already owns its exact identity; a late ack cannot rebind it.
 			if (waiter.settled && waiter.acknowledged) return await response;
 
@@ -3316,6 +3328,7 @@ export class AcpAgent implements Agent {
 				backgroundBusy: retainedAbortOwner !== undefined,
 				backgroundAnonymousCount: 0,
 				backgroundCorrelations: retainedAbortOwner?.correlation ? [retainedAbortOwner.correlation] : [],
+				idleWaiters: new Set(),
 				toolArgs: new Map(),
 				uncertainAbortOwner: retainedAbortOwner,
 			};
@@ -4143,6 +4156,8 @@ export class AcpAgent implements Agent {
 				record.backgroundBusy = false;
 				record.backgroundAnonymousCount = 0;
 				record.backgroundCorrelations.length = 0;
+				for (const resolve of record.idleWaiters) resolve();
+				record.idleWaiters.clear();
 			}
 			return;
 		}
@@ -4174,6 +4189,18 @@ export class AcpAgent implements Agent {
 				} else record.backgroundAnonymousCount++;
 			}
 		}
+	}
+
+	/** Wait for the SDK's winding-down turn to publish idle before retrying a fresh prompt. */
+	#waitForSessionIdle(record: SessionRecord): Promise<void> {
+		if (!record.busy) return Promise.resolve();
+		const deferred = Promise.withResolvers<void>();
+		record.idleWaiters.add(deferred.resolve);
+		const cancel = this.#promptWatchdogClock.schedule(deferred.resolve, ACP_BUSY_SETTLE_WAIT_MS);
+		return deferred.promise.finally(() => {
+			record.idleWaiters.delete(deferred.resolve);
+			cancel();
+		});
 	}
 
 	#frameProcessingFailure(error: unknown): AcpSdkAdapterError {
