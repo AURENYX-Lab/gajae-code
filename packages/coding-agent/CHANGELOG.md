@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-09-29
+
+### Fixed
+
+- `./install.sh --dev` and `gjc doctor` no longer treat this checkout's own `gjc` and `가재씨` links as foreign after a macOS reboot. The ownership receipt still binds the link by inode, but no longer compares the recorded `st_dev`, which APFS changes across boots. A receipt left behind after its link was removed by hand is recognized as this checkout's and replaced, while a receipt that names another checkout is refused before either link is touched.
+
+- Loading `search` or `eval` for the first time no longer changes its advertised tool description, so the provider-visible `tools` block and the prompt-cache prefix stay stable. Before the implementation loads, the description is now rendered from the session (hashline or line-number display for `search`, the allowed Python/JavaScript backends for `eval`), instead of taking the stub-session text from the generated catalog.
+
+- Keep the provider-visible `task` description stable before and after the tool loads by rendering it from session settings without listing configured agent names; unknown-agent errors continue to list all visible agents. IRC guidance is now independent of whether the IRC tool becomes available mid-session.
+
+- Windows binary update via exactReplaceRetained now succeeds with owner-only ACL enforcement. The retained update path required READ_CONTROL on both the staged source and current destination handles to query ACL ownership, but the handles were opened without READ_CONTROL, causing every real Windows update to fail with acl_unavailable. (#6096)
+
+- Reduced macOS idle CPU from the bash shell guardian: the Darwin ancestry poll now reads kernel process identities first and validates only new descendants with `Process.fromPid`, instead of querying every process on each scan. A descendant whose validation fails transiently is retried on the next poll rather than dropped from cleanup.
+
+- User-cancelled turns (ACP session/cancel, SDK turn.abort) settle as `cancelled` again instead of a failed terminal (regression from 0.18.0).
+
+- ACP cancels received before SDK prompt admission now stay attached to the waiter: the prompt is not dispatched, or a real terminal abort is retried after admission, rather than letting the turn continue.
+
+- ACP MCP launch failures now retain the broker lifecycle cause and a bounded, credential-free diagnostic, while SDK transport failures keep their original retry code.
+
+- `gjc doctor --fix --repair service.restart-owned` on the SDK broker now reports a broker refusal, such as `restart_busy` while any session is live, as `blocked` with reason `prepare_refused:<code>` and no side effect. It was previously reported as `uncertain` / `repair_execution_unverified` with `sideEffectStarted: true`. A refused commit now also cancels its prepared reservation instead of leaving new work refused until the lease expires.
+
+- Treat cooperative SDK prompt pauses as successful terminal stops instead of unreported failures.
+
+- A displayed extension message sent from `session_start` (such as a handoff summary) now appears once at startup instead of twice, and startup notices shown before the first paint are no longer wiped. Transcript rebuilds requested before the initial transcript paint are skipped; the first paint renders the full session.
+
+### Documentation
+
+- Updated: Clarified that human reviewers only need to approve the current head on GitHub; body verdict lines are required only for agent reviewers and owner self-approval.
+
+### Bug fixes
+
+- Fixed: Human approval now works when a PR has no verdict line in its body. GJC checks GitHub reviews for human approval on the current head instead.
+- Fixed: A valid PR contract with no approval yet now shows a "Waiting for approval" notice instead of an error.
+
 ## [0.18.0] - 2026-09-27
 
 ### Added

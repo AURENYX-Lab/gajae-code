@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-09-29
+
+### Changed
+
+- Bump the bundled Claude Code fingerprint floor from 2.1.281 to 2.1.284.
+- Anthropic OAuth requests now sign `claude-cli/<version>` and the billing `cc_version` with the latest published Claude Code release instead of a build-time constant. The version is resolved in the background from Anthropic's `latest` release channel and the npm dist-tag (higher wins), refreshed at most every 6 hours, cached in `~/.gjc/cache/claude-code-version.json`, and never blocks a request or drops below the bundled floor. Set `GJC_CLAUDE_CODE_VERSION=X.Y.Z` to pin it. A stale fingerprint is answered with HTTP 400 `claude_code_version_too_old` on newer models, so this no longer waits for a gjc release to recover.
+
+### Fixed
+
+- OpenGateway models discovered from `/v1/models` now take their capabilities from the bundled catalog entry for the same upstream model, and `-ultrafast` deployments resolve to their upstream model, so `opengateway/deepseek/deepseek-v4.1-flash-ultrafast` and the GLM/Kimi ultrafast models are registered with reasoning support and accept thinking levels (#6070).
+
+- Bound Codex turns that stall after an empty reasoning item and streamed tool-call start to the shared stream idle timeout.
+
+- Apply the shared stream idle timeout to Codex WebSocket responses when no WebSocket-specific timeout is configured, so a stalled preferred transport surfaces an error within the expected idle window.
+
 ## [0.18.0] - 2026-09-27
 
 ### Added
