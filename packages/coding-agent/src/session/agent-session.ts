@@ -6319,7 +6319,10 @@ export class AgentSession {
 				},
 			};
 		}
-		const transformedMessages = await this.#transformContext([...this.messages], options.signal);
+		const transformedMessages = await this.#transformContext(
+			this.#withoutEphemeralCustomMessages(this.messages),
+			options.signal,
+		);
 		const convertedMessages = await this.#convertToLlm(transformedMessages);
 		const providerMessages = this.model
 			? normalizeMessagesForProvider(convertedMessages, this.model)
@@ -12390,9 +12393,16 @@ export class AgentSession {
 		let continuationSdkRunToken: string | undefined;
 		try {
 			const volatileProjectContextMessage = await this.#buildVolatileProjectContextMessage();
-			this.agent.appendMessage(volatileProjectContextMessage);
+			if (!this.#isLatestRetainedEphemeralCopy(volatileProjectContextMessage)) {
+				this.agent.appendMessage(volatileProjectContextMessage);
+			}
 			const untrustedMcpServerInstructionsMessage = this.#buildUntrustedMcpServerInstructionsMessage();
-			if (untrustedMcpServerInstructionsMessage) this.agent.appendMessage(untrustedMcpServerInstructionsMessage);
+			if (
+				untrustedMcpServerInstructionsMessage &&
+				!this.#isLatestRetainedEphemeralCopy(untrustedMcpServerInstructionsMessage)
+			) {
+				this.agent.appendMessage(untrustedMcpServerInstructionsMessage);
+			}
 			const hindsightState = this.getHindsightSessionState();
 			await hindsightState?.maybeRecallOnAgentStart();
 			hindsightRecall = hindsightState?.getRecallSnippetForInjection();
@@ -12430,7 +12440,6 @@ export class AgentSession {
 			});
 			if (continuationSdkRunToken === undefined) await this.#waitForPostPromptRecovery();
 		} finally {
-			this.#removeEphemeralCustomMessages();
 			await this.#settleEndedInFlight(
 				inFlightPrompt,
 				continuationSdkRunToken === undefined ? "full" : "publication",
@@ -13294,6 +13303,21 @@ export class AgentSession {
 		);
 	}
 
+	/**
+	 * Sent ephemeral copies stay in live state so the provider prefix is stable. A new
+	 * copy is only worth appending when its provider-visible content changed; an
+	 * identical one would just repeat tokens that still count against the window.
+	 */
+	#isLatestRetainedEphemeralCopy(message: CustomMessage): boolean {
+		const messages = this.agent.state.messages;
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const candidate = messages[index];
+			if (candidate?.role !== "custom" || candidate.customType !== message.customType) continue;
+			return JSON.stringify(candidate.content) === JSON.stringify(message.content);
+		}
+		return false;
+	}
+
 	#removeEphemeralCustomMessages(): void {
 		const messages = this.agent.state.messages;
 		const withoutEphemeralMessages = this.#withoutEphemeralCustomMessages(messages);
@@ -13989,8 +14013,6 @@ export class AgentSession {
 				throw new Error(formatNoCredentialOnboardingError(this.model.provider));
 			}
 
-			this.#removeEphemeralCustomMessages();
-
 			// Check if we need to compact before sending (catches aborted responses)
 			const lastAssistant = this.#findLastAssistantMessage();
 			if (lastAssistant && !options?.skipCompactionCheck) {
@@ -14165,9 +14187,16 @@ export class AgentSession {
 					messages.push(goalModeMessage);
 				}
 				const volatileProjectContextMessage = await this.#buildVolatileProjectContextMessage();
-				messages.push(volatileProjectContextMessage);
+				if (!this.#isLatestRetainedEphemeralCopy(volatileProjectContextMessage)) {
+					messages.push(volatileProjectContextMessage);
+				}
 				const untrustedMcpServerInstructionsMessage = this.#buildUntrustedMcpServerInstructionsMessage();
-				if (untrustedMcpServerInstructionsMessage) messages.push(untrustedMcpServerInstructionsMessage);
+				if (
+					untrustedMcpServerInstructionsMessage &&
+					!this.#isLatestRetainedEphemeralCopy(untrustedMcpServerInstructionsMessage)
+				) {
+					messages.push(untrustedMcpServerInstructionsMessage);
+				}
 
 				// Roster: one Phase A claim, revalidated and reused on every attempt;
 				// a superseded claim releases and the prompt proceeds without it.
@@ -14329,7 +14358,6 @@ export class AgentSession {
 				return;
 			throw error;
 		} finally {
-			this.#removeEphemeralCustomMessages();
 			if (rosterClaim) {
 				this.agent.replaceMessages(
 					this.agent.state.messages.filter(
@@ -16146,6 +16174,9 @@ export class AgentSession {
 		this.#cachedWorkspaceTree = undefined;
 		this.#cachedWorkspaceTreeAt = 0;
 		this.#pendingWorkspaceTreeRescope = true;
+		// Sent copies name the abandoned root; the rescope already rebuilds the stable
+		// prompt, so there is no cache prefix left to preserve by keeping them.
+		this.#removeEphemeralCustomMessages();
 	}
 
 	/** Skill loading warnings captured by SDK */
@@ -20283,7 +20314,7 @@ export class AgentSession {
 			}
 
 			const handoffText = await generateHandoff(
-				this.agent.state.messages,
+				this.#withoutEphemeralCustomMessages(this.agent.state.messages),
 				model,
 				apiKey,
 				{
@@ -20517,7 +20548,7 @@ export class AgentSession {
 				sessionId: this.sessionId,
 				cwd: this.sessionManager.getCwd(),
 				sessionFile: this.sessionFile,
-				messages: this.agent.state.messages,
+				messages: this.#withoutEphemeralCustomMessages(this.agent.state.messages),
 				customInstructions: options.customInstructions,
 			},
 			options,
@@ -26040,7 +26071,8 @@ export class AgentSession {
 
 	/** Build a background snapshot with in-flight assistant and optional context. */
 	#buildEphemeralSnapshot(promptText: string, prependMessages?: AgentMessage[]): AgentMessage[] {
-		const messages = [...this.messages];
+		// Side requests run in a fresh provider session with no prefix to preserve.
+		const messages = this.#withoutEphemeralCustomMessages(this.messages);
 		const streaming = this.agent.state.streamMessage;
 		if (streaming && streaming.role === "assistant") {
 			const preservedBlocks: AssistantMessage["content"] = [];
@@ -27670,7 +27702,7 @@ export class AgentSession {
 	 */
 	formatSessionAsText(): string {
 		return formatSessionDumpText({
-			messages: this.messages,
+			messages: this.#withoutEphemeralCustomMessages(this.messages),
 			systemPrompt: this.agent.state.systemPrompt,
 			model: this.agent.state.model,
 			thinkingLevel: this.#thinkingLevel,
