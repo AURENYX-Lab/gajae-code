@@ -44,6 +44,7 @@ import {
 	verifyMigrationTargetAdapterForTest,
 	verifyMigrationTargetForTest,
 } from "../src/cli/update-cli";
+import { runUpdateRecoveryCommand } from "../src/commands/update";
 import { Settings } from "../src/config/settings";
 import { distTagForChannel, isUpdateChannel } from "../src/config/update-channel";
 import { initTheme } from "../src/modes/theme/theme";
@@ -999,6 +1000,33 @@ describe("update-cli command verification failures", () => {
 });
 
 describe("update-cli managed notification recovery", () => {
+	it("reports injected stop failures without throwing and gives manual recovery guidance", async () => {
+		const stderr: string[] = [];
+		const write = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+			stderr.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+			return true;
+		});
+		const priorExitCode = process.exitCode;
+		process.exitCode = 0;
+		try {
+			await runUpdateRecoveryCommand(async () =>
+				runManagedNotifyRecovery({
+					settings: async () => configuredSettings(),
+					stopDaemon: async () => {
+						throw new Error("stop failed");
+					},
+				}),
+			);
+			expect(process.exitCode).toBe(1);
+			expect(stderr.join("")).toContain("Post-update recovery failed");
+			expect(stderr.join("")).toContain("gjc daemon stop telegram --force");
+			expect(stderr.join("")).toContain("gjc daemon reload telegram");
+		} finally {
+			write.mockRestore();
+			process.exitCode = priorExitCode ?? 0;
+		}
+	});
+
 	const release = {
 		tag: "v999.0.0",
 		version: "999.0.0",

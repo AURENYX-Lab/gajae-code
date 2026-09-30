@@ -641,17 +641,6 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		const signalResult = attestedLegacyOwner
 			? await this.#signalAttestedLegacyOwner(attestedLegacyOwner, fp, chatId, "SIGTERM")
 			: await this.signalCapturedOwner(modernCapturedOwner!, fp, chatId, "SIGTERM");
-		if (signalResult === "hard_termination") {
-			await this.clearOwnRequest(requestId);
-			return this.result(
-				action,
-				false,
-				"telegram daemon has hard process authority; refusing cooperative SIGTERM",
-				before,
-				await this.status(),
-				warnings,
-			);
-		}
 		if (signalResult === "ownership_changed") {
 			await this.clearOwnRequest(requestId);
 			return this.result(
