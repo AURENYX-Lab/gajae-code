@@ -1,3 +1,7 @@
 ### Changed
 
-- The built-in `codex-pro` preset now uses GPT-6.1 Sol wherever it previously used GPT-6 Sol: `default` (`gpt-6.1-sol:medium`), `planner` (`:high`), `critic` (`:max`) and `architect` (`:xhigh`). Reasoning efforts are unchanged and `executor` stays on `gpt-5.6-terra:medium`, so this is a like-for-like model swap with no tier change. The all-6.1 variant with GPT-6 Astra as architect remains available as `codex-sol61`. The `fable-opus-codex` combo intentionally keeps its GPT-6 Sol architect. Installs that load a signed preset registry revision defining `codex-pro` keep that registry binding (built-in, then registry, then user `models.yml`) until a registry revision carries this change (#6163).
+- Built-in model profiles that used `openai-codex/gpt-6-sol` now use `openai-codex/gpt-6.1-sol` at the same reasoning effort, with no tier changes: `codex-medium`, `codex-pro`, `astra-lite`, `astra-default`, `astra-heavy`, `opus-codex`, `codex-opencodego`, and `fable-opus-codex`. The `gpt-6-sol` catalog entry is unchanged for explicit selection. Installs that load a signed preset registry revision defining these profiles keep that registry binding (built-in, then registry, then user `models.yml`) until a registry revision carries this change (#6163).
+
+### Removed
+
+- Removed the `codex-sol61` built-in profile added in 0.18.2; GPT-6.1 Sol is now the Sol model in `codex-pro` and the other built-in profiles. Select `codex-pro`, or define a custom profile in `models.yml` for the previous `codex-sol61` mapping (#6163).

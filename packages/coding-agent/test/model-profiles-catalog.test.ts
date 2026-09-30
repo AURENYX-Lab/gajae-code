@@ -22,7 +22,7 @@ type Role = "default" | "executor" | "planner" | "critic" | "architect";
 
 const roles: Role[] = ["default", "executor", "planner", "critic", "architect"];
 const astraProfileNames = ["astra-lite", "astra-default", "astra-heavy", "astra-fable", "astra-fable-opus"] as const;
-const additiveProfileNames = new Set<string>([...astraProfileNames, "codex-sol61"]);
+const additiveProfileNames = new Set<string>(astraProfileNames);
 
 const expectedProfiles: Array<{
 	name: string;
@@ -60,17 +60,6 @@ const expectedProfiles: Array<{
 			planner: "openai-codex/gpt-6.1-sol:high",
 			critic: "openai-codex/gpt-6.1-sol:max",
 			architect: "openai-codex/gpt-6.1-sol:xhigh",
-		},
-	},
-	{
-		name: "codex-sol61",
-		requiredProviders: ["openai-codex"],
-		mapping: {
-			default: "openai-codex/gpt-6.1-sol:medium",
-			executor: "openai-codex/gpt-6.1-sol:medium",
-			planner: "openai-codex/gpt-6.1-sol:high",
-			critic: "openai-codex/gpt-6.1-sol:xhigh",
-			architect: "openai-codex/gpt-6-astra:xhigh",
 		},
 	},
 	{
@@ -827,8 +816,8 @@ const fixedNonCodexComboMappings: Record<string, Partial<Record<Role, string>>> 
 };
 
 describe("built-in model profile catalog", () => {
-	test("contains exact 64-profile matrix cell-for-cell without replacing prior presets", () => {
-		expect(expectedProfiles).toHaveLength(64);
+	test("contains exact 63-profile matrix cell-for-cell without replacing prior presets", () => {
+		expect(expectedProfiles).toHaveLength(63);
 		expect(BUILTIN_MODEL_PROFILES.map(profile => profile.name)).toEqual(
 			expectedProfiles.map(profile => profile.name),
 		);
@@ -1011,12 +1000,9 @@ describe("built-in model profile catalog", () => {
 		for (const role of ["default", "architect"] as const) {
 			expect(codexOpencodego[role]).toBe(medium[role]);
 		}
-		expect(fableOpusCodex.executor).toBe(pro.executor);
-		// codex-pro moved its Sol roles from gpt-6-sol to gpt-6.1-sol (#6163). fable-opus-codex is
-		// deliberately NOT migrated by that change: it still projects codex-pro's architect tier and
-		// effort, but stays on the GPT-6 Sol generation until the combo presets are moved on purpose.
-		expect(fableOpusCodex.architect).toBe(pro.architect.replace("gpt-6.1-sol", "gpt-6-sol"));
-		expect(fableOpusCodex.architect).toBe("openai-codex/gpt-6-sol:xhigh");
+		for (const role of ["executor", "architect"] as const) {
+			expect(fableOpusCodex[role]).toBe(pro[role]);
+		}
 		for (const role of ["default", "executor", "planner"] as const) {
 			expect(astraFable[role]).toBe(astraDefault[role]);
 		}
@@ -1117,7 +1103,6 @@ describe("built-in model profile catalog", () => {
 			"astra-lite": "ASTRA-Lite",
 			"astra-default": "ASTRA-Default",
 			"astra-heavy": "ASTRA-Heavy",
-			"codex-sol61": "Codex Sol 6.1",
 		})) {
 			expect(getModelProfilePresentation(name)).toEqual({ displayName, providerGroup: "CODEX" });
 		}
@@ -1154,7 +1139,6 @@ describe("built-in model profile catalog", () => {
 			"codex-eco",
 			"codex-medium",
 			"codex-pro",
-			"codex-sol61",
 			"lunamaxxing",
 		]);
 		expect(
