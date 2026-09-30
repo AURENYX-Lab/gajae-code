@@ -5546,6 +5546,14 @@ export function createNotificationsExtension(
 						terminalDeliveryFailure(cause, frameBytes);
 					})().finally(() => {
 						submission.terminalRetry = undefined;
+						if (submission.abandoned && submission.terminal) {
+							const key = promptSubmissionKey({
+								commandId: String(frame.commandId),
+								turnId: String(frame.turnId),
+							});
+							if (promptSubmissions.get(key) === submission)
+								finalizePrompt(key, { commandId: String(frame.commandId), turnId: String(frame.turnId) });
+						}
 					});
 					return;
 				}

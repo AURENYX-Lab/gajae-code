@@ -658,6 +658,84 @@ isolatedSdkHostTest(
 	5000,
 );
 
+isolatedSdkHostTest(
+	"terminal retry failure releases abandoned prompt capacity",
+	async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-backlog-capacity-"));
+		dirs.push(cwd);
+		const sessionId = `sdk-backlog-capacity-${Date.now()}`;
+		const sessionContext = context(cwd, sessionId);
+		const handlers = start(sessionContext, () => new Promise<never>(() => {}) as never);
+		const { socket, frames } = await connect(cwd, sessionId);
+		const original = NotificationServer.prototype.sendTo;
+		const terminalAttempts = new Map<string, number>();
+		const send = spyOn(NotificationServer.prototype, "sendTo").mockImplementation(function (
+			this: NotificationServer,
+			id,
+			json,
+		) {
+			const frame = JSON.parse(json) as { type?: string };
+			if (frame.type === "agent_end") {
+				const attempt = (terminalAttempts.get(json) ?? 0) + 1;
+				terminalAttempts.set(json, attempt);
+				if (attempt === 1)
+					throw new Error("sdk directed delivery rejected: cause=writer_backlog_full frameBytes=200");
+				throw new Error("sdk directed delivery rejected: cause=connection_closed frameBytes=200");
+			}
+			return original.call(this, id, json);
+		});
+		try {
+			for (let index = 0; index < 128; index++) {
+				const id = `backlog-capacity-${index}`;
+				socket.send(
+					JSON.stringify({ type: "control_request", id, operation: "turn.prompt", input: { text: "stream" } }),
+				);
+				await waitFor(
+					() => frames.some(frame => frame.type === "control_response" && frame.id === id),
+					`prompt ${id}`,
+				);
+				const acknowledgement = frames.find(frame => frame.type === "control_response" && frame.id === id) as {
+					result: { commandId: string; turnId: string };
+				};
+				const correlation = acknowledgement.result;
+				await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+				await handlers.get("agent_end")?.(
+					{ type: "agent_end", stopReason: "completed", messages: [] },
+					sessionContext,
+				);
+				await waitFor(
+					() => correlatedTerminal(frames, correlation)?.type === "agent_failed",
+					`delivery failure ${id}`,
+					1000,
+				);
+			}
+
+			const finalId = "backlog-capacity-final";
+			socket.send(
+				JSON.stringify({
+					type: "control_request",
+					id: finalId,
+					operation: "turn.prompt",
+					input: { text: "admission after retry failures" },
+				}),
+			);
+			await waitFor(
+				() => frames.some(frame => frame.type === "control_response" && frame.id === finalId),
+				"final prompt",
+			);
+			const response = frames.find(frame => frame.type === "control_response" && frame.id === finalId) as {
+				type: string;
+				ok: boolean;
+				error?: { code?: string };
+			};
+			expect(response.ok).toBe(true);
+		} finally {
+			send.mockRestore();
+		}
+	},
+	30_000,
+);
+
 isolatedSdkHostTest("fatal progress delivery failure still abandons the prompt", async () => {
 	const { handlers, sessionContext, frames, correlation } = await activePrompt("fatal-progress");
 	const original = NotificationServer.prototype.sendTo;
