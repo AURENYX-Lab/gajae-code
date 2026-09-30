@@ -82,6 +82,11 @@ function fakeRegistry(options?: { missingProviders?: string[]; profiles?: ModelP
 				minLevel: ThinkingLevel.Low,
 				maxLevel: ThinkingLevel.Max,
 			}),
+			model("openai-codex", "gpt-6.1-sol", {
+				mode: "effort",
+				minLevel: ThinkingLevel.Low,
+				maxLevel: ThinkingLevel.Max,
+			}),
 			model("openai-codex", "gpt-5.6-terra", {
 				mode: "effort",
 				minLevel: ThinkingLevel.Low,
@@ -1751,6 +1756,16 @@ describe("model profile activation", () => {
 				planner: "openai-codex/gpt-6-sol:high",
 				critic: "openai-codex/gpt-6-sol:max",
 				architect: "openai-codex/gpt-6-sol:xhigh",
+			},
+		],
+		[
+			"codex-sol61",
+			{
+				default: "openai-codex/gpt-6.1-sol:medium",
+				executor: "openai-codex/gpt-6.1-sol:medium",
+				planner: "openai-codex/gpt-6.1-sol:high",
+				critic: "openai-codex/gpt-6.1-sol:xhigh",
+				architect: "openai-codex/gpt-6-astra:xhigh",
 			},
 		],
 		[
