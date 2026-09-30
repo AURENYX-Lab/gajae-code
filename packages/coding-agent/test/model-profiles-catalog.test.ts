@@ -33,11 +33,11 @@ const expectedProfiles: Array<{
 		name: "codex-eco",
 		requiredProviders: ["openai-codex"],
 		mapping: {
-			default: "openai-codex/gpt-5.6-terra:low",
+			default: "openai-codex/gpt-6-luna:low",
 			executor: "openai-codex/gpt-6-luna:low",
 			planner: "openai-codex/gpt-6-luna:high",
-			critic: "openai-codex/gpt-5.6-terra:xhigh",
-			architect: "openai-codex/gpt-5.6-terra:high",
+			critic: "openai-codex/gpt-6-luna:xhigh",
+			architect: "openai-codex/gpt-6-luna:high",
 		},
 	},
 	{
@@ -45,8 +45,8 @@ const expectedProfiles: Array<{
 		requiredProviders: ["openai-codex"],
 		mapping: {
 			default: "openai-codex/gpt-6.1-sol:low",
-			executor: "openai-codex/gpt-5.6-terra:low",
-			planner: "openai-codex/gpt-5.6-terra:high",
+			executor: "openai-codex/gpt-6.1-sol:low",
+			planner: "openai-codex/gpt-6.1-sol:high",
 			critic: "openai-codex/gpt-6.1-sol:xhigh",
 			architect: "openai-codex/gpt-6.1-sol:high",
 		},
@@ -56,7 +56,7 @@ const expectedProfiles: Array<{
 		requiredProviders: ["openai-codex"],
 		mapping: {
 			default: "openai-codex/gpt-6.1-sol:medium",
-			executor: "openai-codex/gpt-5.6-terra:medium",
+			executor: "openai-codex/gpt-6.1-sol:medium",
 			planner: "openai-codex/gpt-6.1-sol:high",
 			critic: "openai-codex/gpt-6.1-sol:max",
 			architect: "openai-codex/gpt-6.1-sol:xhigh",
@@ -81,7 +81,7 @@ const expectedProfiles: Array<{
 			executor: "openai-codex/gpt-6-luna:xhigh",
 			planner: "openai-codex/gpt-6-astra:xhigh",
 			critic: "openai-codex/gpt-6.1-sol:high",
-			architect: "openai-codex/gpt-5.6-terra:xhigh",
+			architect: "openai-codex/gpt-6.1-sol:xhigh",
 		},
 	},
 	{
@@ -92,7 +92,7 @@ const expectedProfiles: Array<{
 			executor: "openai-codex/gpt-6-luna:max",
 			planner: "openai-codex/gpt-6-astra:xhigh",
 			critic: "openai-codex/gpt-6.1-sol:xhigh",
-			architect: "openai-codex/gpt-5.6-terra:xhigh",
+			architect: "openai-codex/gpt-6.1-sol:xhigh",
 		},
 	},
 	{
@@ -672,7 +672,7 @@ const expectedProfiles: Array<{
 		requiredProviders: ["anthropic", "openai-codex"],
 		mapping: {
 			default: "anthropic/claude-opus-5-5:medium",
-			executor: "openai-codex/gpt-5.6-terra:low",
+			executor: "openai-codex/gpt-6.1-sol:low",
 			planner: "anthropic/claude-sonnet-5-5",
 			critic: "openai-codex/gpt-6.1-sol:xhigh",
 			architect: "openai-codex/gpt-6.1-sol:high",
@@ -694,7 +694,7 @@ const expectedProfiles: Array<{
 		requiredProviders: ["anthropic", "openai-codex"],
 		mapping: {
 			default: "anthropic/claude-fable-5-1:high",
-			executor: "openai-codex/gpt-5.6-terra:medium",
+			executor: "openai-codex/gpt-6.1-sol:medium",
 			planner: "anthropic/claude-opus-5-5:medium",
 			critic: "anthropic/claude-opus-5-5:high",
 			architect: "openai-codex/gpt-6.1-sol:xhigh",
@@ -778,15 +778,10 @@ function builtinMapping(name: string): Record<Role, string> {
 	return profile.modelMapping as Record<Role, string>;
 }
 
-function substituteCodexFamily(selector: string, source: "sol" | "terra", target: "terra" | "luna"): string {
-	const modelIds = {
-		sol: "gpt-6.1-sol",
-		terra: "gpt-5.6-terra",
-		luna: "gpt-6-luna",
-	} as const;
-	const match = /^openai-codex\/(gpt-6\.1-sol|gpt-5\.6-terra|gpt-6-luna):(.+)$/.exec(selector);
-	if (!match) throw new Error(`Expected Codex family selector, got: ${selector}`);
-	return match[1] === modelIds[source] ? `openai-codex/${modelIds[target]}:${match[2]}` : selector;
+function lowerSolToLuna(selector: string): string {
+	const match = /^openai-codex\/(gpt-6\.1-sol|gpt-6-luna):(.+)$/.exec(selector);
+	if (!match) throw new Error(`Expected Codex Sol or Luna selector, got: ${selector}`);
+	return `openai-codex/gpt-6-luna:${match[2]}`;
 }
 
 const fixedNonCodexComboMappings: Record<string, Partial<Record<Role, string>>> = {
@@ -970,15 +965,13 @@ describe("built-in model profile catalog", () => {
 		}
 	});
 
-	test("codex Eco is Medium with Terra lowered to Luna and Sol lowered to Terra", () => {
+	test("codex Eco is Medium with Sol lowered to Luna at the same effort", () => {
 		const eco = builtinMapping("codex-eco");
 		const medium = builtinMapping("codex-medium");
-		const loweredMedium = Object.fromEntries(
-			roles.map(role => [
-				role,
-				substituteCodexFamily(substituteCodexFamily(medium[role], "terra", "luna"), "sol", "terra"),
-			]),
-		) as Record<Role, string>;
+		const loweredMedium = Object.fromEntries(roles.map(role => [role, lowerSolToLuna(medium[role])])) as Record<
+			Role,
+			string
+		>;
 
 		expect(eco).toEqual(loweredMedium);
 		expect(Object.values(eco).some(selector => /gpt-6(\.1)?-sol/.test(selector))).toBe(false);

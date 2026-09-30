@@ -1731,19 +1731,19 @@ describe("model profile activation", () => {
 		[
 			"codex-eco",
 			{
-				default: "openai-codex/gpt-5.6-terra:low",
+				default: "openai-codex/gpt-6-luna:low",
 				executor: "openai-codex/gpt-6-luna:low",
 				planner: "openai-codex/gpt-6-luna:high",
-				critic: "openai-codex/gpt-5.6-terra:xhigh",
-				architect: "openai-codex/gpt-5.6-terra:high",
+				critic: "openai-codex/gpt-6-luna:xhigh",
+				architect: "openai-codex/gpt-6-luna:high",
 			},
 		],
 		[
 			"codex-medium",
 			{
 				default: "openai-codex/gpt-6.1-sol:low",
-				executor: "openai-codex/gpt-5.6-terra:low",
-				planner: "openai-codex/gpt-5.6-terra:high",
+				executor: "openai-codex/gpt-6.1-sol:low",
+				planner: "openai-codex/gpt-6.1-sol:high",
 				critic: "openai-codex/gpt-6.1-sol:xhigh",
 				architect: "openai-codex/gpt-6.1-sol:high",
 			},
@@ -1752,7 +1752,7 @@ describe("model profile activation", () => {
 			"codex-pro",
 			{
 				default: "openai-codex/gpt-6.1-sol:medium",
-				executor: "openai-codex/gpt-5.6-terra:medium",
+				executor: "openai-codex/gpt-6.1-sol:medium",
 				planner: "openai-codex/gpt-6.1-sol:high",
 				critic: "openai-codex/gpt-6.1-sol:max",
 				architect: "openai-codex/gpt-6.1-sol:xhigh",
@@ -1762,7 +1762,7 @@ describe("model profile activation", () => {
 			"opus-codex",
 			{
 				default: "anthropic/claude-opus-5-5:medium",
-				executor: "openai-codex/gpt-5.6-terra:low",
+				executor: "openai-codex/gpt-6.1-sol:low",
 				planner: "anthropic/claude-sonnet-5-5",
 				critic: "openai-codex/gpt-6.1-sol:xhigh",
 				architect: "openai-codex/gpt-6.1-sol:high",
@@ -1792,7 +1792,7 @@ describe("model profile activation", () => {
 			"fable-opus-codex",
 			{
 				default: "anthropic/claude-fable-5-1:high",
-				executor: "openai-codex/gpt-5.6-terra:medium",
+				executor: "openai-codex/gpt-6.1-sol:medium",
 				planner: "anthropic/claude-opus-5-5:medium",
 				critic: "anthropic/claude-opus-5-5:high",
 				architect: "openai-codex/gpt-6.1-sol:xhigh",
@@ -3199,7 +3199,7 @@ describe("model-profile-activation: OpenAI-compatible proxy routing", () => {
 		expect(prepared.defaultModel?.provider).toBe("opencodex");
 		expect(prepared.defaultModel?.wireModelId).toBe("anthropic/claude-opus-5-5");
 		expect(prepared.agentModelOverrides).toEqual({
-			executor: "opencodex/opencodex/gpt-5.6-terra:low",
+			executor: "opencodex/opencodex/gpt-6.1-sol:low",
 			architect: "opencodex/opencodex/gpt-6.1-sol:high",
 			planner: "opencodex/opencodex/anthropic/claude-sonnet-5-5",
 			critic: "opencodex/opencodex/gpt-6.1-sol:xhigh",
