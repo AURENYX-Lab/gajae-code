@@ -5532,6 +5532,8 @@ export function createNotificationsExtension(
 					return;
 				}
 				if (cause === "writer_backlog_full") {
+					const correlation = { commandId: String(frame.commandId), turnId: String(frame.turnId) };
+					const key = promptSubmissionKey(correlation);
 					submission.terminalRetry = (async () => {
 						const deadline = Date.now() + 3_000;
 						while (Date.now() < deadline) {
@@ -5546,13 +5548,9 @@ export function createNotificationsExtension(
 						terminalDeliveryFailure(cause, frameBytes);
 					})().finally(() => {
 						submission.terminalRetry = undefined;
-						if (submission.abandoned && submission.terminal) {
-							const key = promptSubmissionKey({
-								commandId: String(frame.commandId),
-								turnId: String(frame.turnId),
-							});
-							if (promptSubmissions.get(key) === submission)
-								finalizePrompt(key, { commandId: String(frame.commandId), turnId: String(frame.turnId) });
+						if (submission.terminal && promptSubmissions.get(key) === submission) {
+							if (!submission.abandoned) submission.phase = "delivered";
+							finalizePrompt(key, correlation);
 						}
 					});
 					return;
@@ -5961,13 +5959,6 @@ export function createNotificationsExtension(
 			}
 			if (submission.terminal) {
 				if (submission.terminalRetry) {
-					void submission.terminalRetry.then(() => {
-						if (!submission.abandoned && submission.terminal) {
-							submission.phase = "delivered";
-							const [commandId, turnId] = key.split(":", 2);
-							if (commandId && turnId) finalizePrompt(key, { commandId, turnId });
-						}
-					});
 					return;
 				}
 				submission.phase = "delivered";

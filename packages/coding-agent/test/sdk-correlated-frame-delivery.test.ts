@@ -621,6 +621,99 @@ isolatedSdkHostTest("one backlog rejection of agent_end is retried", async () =>
 });
 
 isolatedSdkHostTest(
+	"successful terminal retry via live emit releases prompt capacity",
+	async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-backlog-success-capacity-"));
+		dirs.push(cwd);
+		const sessionId = `sdk-backlog-success-capacity-${Date.now()}`;
+		const sessionContext = context(cwd, sessionId);
+		const handlers = start(sessionContext, () => new Promise<never>(() => {}) as never);
+		const { socket, frames } = await connect(cwd, sessionId);
+		const original = NotificationServer.prototype.sendTo;
+		const terminalAttempts = new Map<string, number>();
+		const send = spyOn(NotificationServer.prototype, "sendTo").mockImplementation(function (
+			this: NotificationServer,
+			id,
+			json,
+		) {
+			const frame = JSON.parse(json) as { type?: string };
+			if (frame.type === "agent_end") {
+				const attempt = (terminalAttempts.get(json) ?? 0) + 1;
+				terminalAttempts.set(json, attempt);
+				if (attempt === 1)
+					throw new Error("sdk directed delivery rejected: cause=writer_backlog_full frameBytes=200");
+			}
+			return original.call(this, id, json);
+		});
+		try {
+			for (let index = 0; index < 128; index++) {
+				const id = `backlog-success-capacity-${index}`;
+				socket.send(
+					JSON.stringify({ type: "control_request", id, operation: "turn.prompt", input: { text: "stream" } }),
+				);
+				await waitFor(
+					() => frames.some(frame => frame.type === "control_response" && frame.id === id),
+					`prompt ${id}`,
+				);
+				const acknowledgement = frames.find(frame => frame.type === "control_response" && frame.id === id) as {
+					result: { commandId: string; turnId: string };
+				};
+				const correlation = acknowledgement.result;
+				await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+				await handlers.get("message_update")?.(
+					{
+						type: "message_update",
+						message: { role: "assistant", content: [] },
+						assistantMessageEvent: { type: "text_delta", delta: "live" },
+					},
+					sessionContext,
+				);
+				await waitFor(
+					() =>
+						frames.some(
+							frame =>
+								frame.type === "event" &&
+								frame.commandId === correlation.commandId &&
+								frame.turnId === correlation.turnId,
+						),
+					`live progress ${id}`,
+				);
+				await handlers.get("agent_end")?.(
+					{ type: "agent_end", stopReason: "completed", messages: [] },
+					sessionContext,
+				);
+				await waitFor(
+					() => correlatedTerminal(frames, correlation)?.type === "agent_end",
+					`retried terminal ${id}`,
+					1000,
+				);
+			}
+
+			const finalId = "backlog-success-capacity-final";
+			socket.send(
+				JSON.stringify({
+					type: "control_request",
+					id: finalId,
+					operation: "turn.prompt",
+					input: { text: "admission after successful retries" },
+				}),
+			);
+			await waitFor(
+				() => frames.some(frame => frame.type === "control_response" && frame.id === finalId),
+				"final prompt",
+			);
+			const response = frames.find(frame => frame.type === "control_response" && frame.id === finalId) as {
+				ok: boolean;
+			};
+			expect(response.ok).toBe(true);
+		} finally {
+			send.mockRestore();
+		}
+	},
+	30_000,
+);
+
+isolatedSdkHostTest(
 	"persistent terminal backlog reaches delivery_failed within a bound",
 	async () => {
 		const { handlers, sessionContext, frames, correlation } = await activePrompt("backlog-terminal-persistent");
