@@ -8,6 +8,11 @@ export const sdkProductionHostIsolatedSuites = [
 	},
 	{ file: "test/sdk-prompt-terminal-diagnostics.test.ts", pattern: "SDK host" },
 	{ file: "test/sdk-correlated-frame-delivery.test.ts", pattern: "oversized correlated snapshots still reach a prompt terminal" },
+	{ file: "test/sdk-correlated-frame-delivery.test.ts", pattern: "backlog rejection of progress keeps the terminal deliverable" },
+	{ file: "test/sdk-correlated-frame-delivery.test.ts", pattern: "one backlog rejection of agent_end is retried" },
+	{ file: "test/sdk-correlated-frame-delivery.test.ts", pattern: "persistent terminal backlog reaches delivery_failed within a bound" },
+	{ file: "test/sdk-correlated-frame-delivery.test.ts", pattern: "terminal retry failure releases abandoned prompt capacity" },
+	{ file: "test/sdk-correlated-frame-delivery.test.ts", pattern: "fatal progress delivery failure still abandons the prompt" },
 ] as const;
 
 type IsolatedSuite = (typeof sdkProductionHostIsolatedSuites)[number];
