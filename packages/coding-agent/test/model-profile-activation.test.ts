@@ -1731,51 +1731,41 @@ describe("model profile activation", () => {
 		[
 			"codex-eco",
 			{
-				default: "openai-codex/gpt-5.6-terra:low",
+				default: "openai-codex/gpt-6-luna:low",
 				executor: "openai-codex/gpt-6-luna:low",
 				planner: "openai-codex/gpt-6-luna:high",
-				critic: "openai-codex/gpt-5.6-terra:xhigh",
-				architect: "openai-codex/gpt-5.6-terra:high",
+				critic: "openai-codex/gpt-6-luna:xhigh",
+				architect: "openai-codex/gpt-6-luna:high",
 			},
 		],
 		[
 			"codex-medium",
 			{
-				default: "openai-codex/gpt-6-sol:low",
-				executor: "openai-codex/gpt-5.6-terra:low",
-				planner: "openai-codex/gpt-5.6-terra:high",
-				critic: "openai-codex/gpt-6-sol:xhigh",
-				architect: "openai-codex/gpt-6-sol:high",
+				default: "openai-codex/gpt-6.1-sol:low",
+				executor: "openai-codex/gpt-6.1-sol:low",
+				planner: "openai-codex/gpt-6.1-sol:high",
+				critic: "openai-codex/gpt-6.1-sol:xhigh",
+				architect: "openai-codex/gpt-6.1-sol:high",
 			},
 		],
 		[
 			"codex-pro",
 			{
-				default: "openai-codex/gpt-6-sol:medium",
-				executor: "openai-codex/gpt-5.6-terra:medium",
-				planner: "openai-codex/gpt-6-sol:high",
-				critic: "openai-codex/gpt-6-sol:max",
-				architect: "openai-codex/gpt-6-sol:xhigh",
-			},
-		],
-		[
-			"codex-sol61",
-			{
 				default: "openai-codex/gpt-6.1-sol:medium",
 				executor: "openai-codex/gpt-6.1-sol:medium",
 				planner: "openai-codex/gpt-6.1-sol:high",
-				critic: "openai-codex/gpt-6.1-sol:xhigh",
-				architect: "openai-codex/gpt-6-astra:xhigh",
+				critic: "openai-codex/gpt-6.1-sol:max",
+				architect: "openai-codex/gpt-6.1-sol:xhigh",
 			},
 		],
 		[
 			"opus-codex",
 			{
 				default: "anthropic/claude-opus-5-5:medium",
-				executor: "openai-codex/gpt-5.6-terra:low",
+				executor: "openai-codex/gpt-6.1-sol:low",
 				planner: "anthropic/claude-sonnet-5-5",
-				critic: "openai-codex/gpt-6-sol:xhigh",
-				architect: "openai-codex/gpt-6-sol:high",
+				critic: "openai-codex/gpt-6.1-sol:xhigh",
+				architect: "openai-codex/gpt-6.1-sol:high",
 			},
 		],
 		[
@@ -1791,21 +1781,21 @@ describe("model profile activation", () => {
 		[
 			"codex-opencodego",
 			{
-				default: "openai-codex/gpt-6-sol:low",
+				default: "openai-codex/gpt-6.1-sol:low",
 				executor: "opencode-go/deepseek-v4-pro",
 				planner: "opencode-go/kimi-k3",
 				critic: "opencode-go/mimo-v2.5-pro",
-				architect: "openai-codex/gpt-6-sol:high",
+				architect: "openai-codex/gpt-6.1-sol:high",
 			},
 		],
 		[
 			"fable-opus-codex",
 			{
 				default: "anthropic/claude-fable-5-1:high",
-				executor: "openai-codex/gpt-5.6-terra:medium",
+				executor: "openai-codex/gpt-6.1-sol:medium",
 				planner: "anthropic/claude-opus-5-5:medium",
 				critic: "anthropic/claude-opus-5-5:high",
-				architect: "openai-codex/gpt-6-sol:xhigh",
+				architect: "openai-codex/gpt-6.1-sol:xhigh",
 			},
 		],
 		[
@@ -3209,10 +3199,10 @@ describe("model-profile-activation: OpenAI-compatible proxy routing", () => {
 		expect(prepared.defaultModel?.provider).toBe("opencodex");
 		expect(prepared.defaultModel?.wireModelId).toBe("anthropic/claude-opus-5-5");
 		expect(prepared.agentModelOverrides).toEqual({
-			executor: "opencodex/opencodex/gpt-5.6-terra:low",
-			architect: "opencodex/opencodex/gpt-6-sol:high",
+			executor: "opencodex/opencodex/gpt-6.1-sol:low",
+			architect: "opencodex/opencodex/gpt-6.1-sol:high",
 			planner: "opencodex/opencodex/anthropic/claude-sonnet-5-5",
-			critic: "opencodex/opencodex/gpt-6-sol:xhigh",
+			critic: "opencodex/opencodex/gpt-6.1-sol:xhigh",
 		});
 	});
 
