@@ -26,11 +26,11 @@ import type {
 	ToolResultMessage,
 } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { transportFailureFacts } from "../utils/fallback-transport";
+import { PROVIDER_PROTOCOL_MISMATCH_ERROR_CODE, transportFailureFacts } from "../utils/fallback-transport";
 import { withHttpStatus } from "../utils/http-inspector";
 import { captureUnicodeEscapeEvidence } from "../utils/json-parse";
 import { decodeEventStream } from "./aws-eventstream";
-import { isKiroApiKey, streamKiroApiKey, toKiroModelId } from "./kiro-api-key";
+import { isKiroApiKey, sanitizeKiroError, streamKiroApiKey, toKiroModelId } from "./kiro-api-key";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider options
@@ -240,14 +240,29 @@ export const streamKiroCodeWhisperer: StreamFunction<"kiro-codewhisperer-stream"
 			});
 
 			if (!response.ok) {
-				const errBody = await response.text().catch(() => "");
+				const errBody = await readBodyPrefix(response);
 				throw withHttpStatus(
-					new Error(`Kiro CodeWhisperer HTTP ${response.status}: ${errBody.slice(0, 1000)}`),
+					new Error(sanitizeKiroError(`Kiro CodeWhisperer HTTP ${response.status}: ${errBody}`, bearerToken)),
 					response.status,
 				);
 			}
 
-			if (!response.body) throw new Error("Kiro CodeWhisperer response has no body");
+			// Verify content-type is eventstream; if not, read and report the actual error
+			const contentType = response.headers.get("content-type") ?? "";
+			const mediaType = contentType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+			if (!response.body || mediaType !== "application/vnd.amazon.eventstream") {
+				const errBody = await readBodyPrefix(response);
+				// Deliberately no HTTP status metadata and no "HTTP <code>" wording: a 2xx
+				// protocol mismatch is deterministic, and a status would materialize
+				// transport-failure facts that session fallback retries.
+				// Sanitize each untrusted part on its own so the fixed prefix does not eat
+				// into the body's 1000-character diagnostic budget.
+				const safeContentType = contentType ? sanitizeKiroError(contentType, bearerToken) : "";
+				const safeBody = errBody ? sanitizeKiroError(errBody, bearerToken) : "";
+				throw new KiroNonEventStreamError(
+					`Kiro CodeWhisperer returned a non-eventstream ${response.status} response (${safeContentType}): ${safeBody}`,
+				);
+			}
 
 			// Decode eventstream
 			for await (const message of decodeEventStream(response.body)) {
@@ -348,8 +363,10 @@ export const streamKiroCodeWhisperer: StreamFunction<"kiro-codewhisperer-stream"
 				delete (block as Block).partialJson;
 			}
 			output.stopReason = options.signal?.aborted ? "aborted" : "error";
-			output.errorStatus = extractHttpStatusFromError(error);
+			// The non-eventstream diagnostic embeds untrusted body text; never parse a status out of it.
+			output.errorStatus = error instanceof KiroNonEventStreamError ? undefined : extractHttpStatusFromError(error);
 			output.transportFailure = transportFailureFacts(error);
+			if (error instanceof KiroNonEventStreamError) output.errorCode = PROVIDER_PROTOCOL_MISMATCH_ERROR_CODE;
 			const baseMessage = error instanceof Error ? error.message : JSON.stringify(error);
 			output.errorMessage = baseMessage;
 			output.duration = Date.now() - startTime;
@@ -602,6 +619,42 @@ function handleToolUseEvent(
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** A 2xx response that is not an AWS event stream: a deterministic protocol error, never a transport failure. */
+class KiroNonEventStreamError extends Error {
+	override name = "KiroNonEventStreamError";
+}
+
+/** Byte cap for diagnostic error bodies; the rest of the stream is cancelled unread. */
+const ERROR_BODY_PREFIX_BYTES = 4096;
+
+/** Read at most {@link ERROR_BODY_PREFIX_BYTES} of a response body for diagnostics, then cancel the remainder. */
+async function readBodyPrefix(response: Response): Promise<string> {
+	if (!response.body) return "";
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		while (total < ERROR_BODY_PREFIX_BYTES) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			const take = value.subarray(0, ERROR_BODY_PREFIX_BYTES - total);
+			chunks.push(take);
+			total += take.length;
+		}
+	} catch {
+		// Diagnostic read only; report whatever prefix arrived.
+	} finally {
+		reader.cancel().catch(() => {});
+	}
+	const bytes = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.length;
+	}
+	return new TextDecoder().decode(bytes);
+}
 
 function resolveBearerToken(apiKey: string | undefined): string | undefined {
 	if (!apiKey) {
