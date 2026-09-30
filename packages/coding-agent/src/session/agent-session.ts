@@ -24382,12 +24382,16 @@ export class AgentSession {
 		// gain managed-chain retry/advance authority from its new facts. Before
 		// the code survived transport, this failure reached the session as an
 		// ordinary committed error and surfaced immediately, so mirror that
-		// behavior with the existing exhaustion decision.
+		// behavior with the existing exhaustion decision. However, when called from
+		// the agent_end path (managedOutcome=false), we must return false to allow
+		// proper session termination handling.
 		if (managedFallback && isStatuslessTypedOverloadFacts(transportFailure)) {
-			return this.#managedFallbackExhaustionDecision(
-				message,
-				message.errorMessage || "Model fallback attempt failed",
-			);
+			return managedOutcome
+				? this.#managedFallbackExhaustionDecision(
+						message,
+						message.errorMessage || "Model fallback attempt failed",
+					)
+				: false;
 		}
 		if (!trigger) {
 			return managedOutcome

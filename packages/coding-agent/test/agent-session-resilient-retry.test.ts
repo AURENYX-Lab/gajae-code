@@ -3218,4 +3218,60 @@ describe.serial("AgentSession resilient retry", () => {
 		expect(requestedModels).toEqual([`${primary.provider}/${primary.id}`]);
 		expect(lastAssistant(session)).toMatchObject({ stopReason: "error", errorMessage: RESPONSES_OVERLOAD_ERROR });
 	});
+	it("does not hang when managed fallback chain encounters transport 503 then typed Responses overload (#6180)", async () => {
+		// Issue #6180: when the first call in a managed fallback chain fails with a
+		// retryable transport 503, and the retry (call 2) fails with typed Responses
+		// overload facts, the session should terminate cleanly with one auto_retry_end
+		// event instead of hanging. The gating on managedOutcome ensures that the
+		// statusless overload check returns false on the agent_end path, allowing
+		// proper session settlement.
+		const primary = getBundledModel("openai", "gpt-5.4-mini");
+		const fallback = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primary || !fallback) throw new Error("Expected bundled test models to exist");
+		const requestedModels: string[] = [];
+		session = buildStatusErrorSession({
+			model: primary,
+			requestedModels,
+			failureByCall: call => {
+				if (call === 1) {
+					return {
+						errorStatus: 503,
+						transportFailure: { kind: "transport" as const, status: 503 },
+					};
+				} else if (call === 2) {
+					return {
+						errorMessage: RESPONSES_OVERLOAD_ERROR,
+						transportFailure: RESPONSES_OVERLOAD_FACTS,
+					};
+				}
+				return {};
+			},
+		});
+		session.setConfiguredModelChain(
+			"default",
+			[`${primary.provider}/${primary.id}`, `${fallback.provider}/${fallback.id}`],
+			"test",
+		);
+		const { retryStartEvents, retryEndEvents } = track(session);
+
+		// Race the prompt against a timeout to verify it doesn't hang
+		const timeoutPromise = new Promise<never>((_, reject) =>
+			setTimeout(() => reject(new Error("Prompt timed out (possible hang)")), 5000),
+		);
+		await Promise.race([
+			(async () => {
+				await session.prompt("#6180 regression test");
+				await session.waitForIdle();
+			})(),
+			timeoutPromise,
+		]);
+
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({
+			success: false,
+			finalError: RESPONSES_OVERLOAD_ERROR,
+		});
+		expect(lastAssistant(session)).toMatchObject({ stopReason: "error", errorMessage: RESPONSES_OVERLOAD_ERROR });
+	});
 });
