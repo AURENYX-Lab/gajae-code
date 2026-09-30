@@ -122,6 +122,7 @@ async function createFixture(
 		observeTerminalReservation?: boolean;
 		controlledRetryBackoff?: boolean;
 		busyOnSecondPrompt?: boolean;
+		busyAfterCancel?: boolean;
 		priorTranscriptUserTurn?: boolean;
 		promptAcknowledgementError?: {
 			code: string;
@@ -406,6 +407,21 @@ async function createFixture(
 							ok: false,
 							error: options.promptAcknowledgementError,
 						}),
+					);
+					return;
+				}
+				if (frame.operation === "turn.prompt" && options.busyAfterCancel && promptDeliveries === 1) {
+					setTimeout(
+						() =>
+							socket.send(
+								JSON.stringify({
+									type: "control_response",
+									id: frame.id,
+									ok: false,
+									error: { code: "busy", message: "turn.prompt is unavailable while the agent is busy" },
+								}),
+							),
+						20,
 					);
 					return;
 				}
@@ -788,6 +804,28 @@ test("ACP accepts an immediate successor after cancellation while the SDK is win
 		await waitFor(() => fixture.promptDeliveryCount() === 3, "successor prompt delivery");
 		fixture.sendStopped("end_turn");
 		expect(await bounded(successor, "successor settlement")).toEqual({ stopReason: "end_turn" });
+	} finally {
+		fixture.dispose();
+	}
+});
+
+test("ACP does not retry a busy acknowledgement after cancellation", async () => {
+	const fixture = await createFixture({
+		busyAfterCancel: true,
+		abortAcknowledgement: {
+			ok: true,
+			selection: "turn",
+			turn: "stopped",
+			disposition: "preflight_cancelled",
+		},
+	});
+	try {
+		const pending = prompt(fixture, "cancel before busy acknowledgement");
+		await bounded(fixture.promptDelivered, "prompt delivery");
+		await bounded(fixture.agent.cancel({ sessionId: fixture.sessionId }), "prompt cancellation");
+		expect(await bounded(pending, "cancelled prompt settlement")).toEqual({ stopReason: "cancelled" });
+		await Bun.sleep(50);
+		expect(fixture.promptDeliveryCount()).toBe(1);
 	} finally {
 		fixture.dispose();
 	}

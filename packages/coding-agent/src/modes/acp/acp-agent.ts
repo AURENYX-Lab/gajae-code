@@ -2498,8 +2498,23 @@ export class AcpAgent implements Agent {
 			} catch (error) {
 				if (!(error instanceof SdkClientError || error instanceof AcpSdkAdapterError) || error.code !== "busy")
 					throw error;
+				if (
+					record.activePrompt !== waiter ||
+					waiter.settled ||
+					record.cancelRequested ||
+					waiter.cancelAcknowledged ||
+					waiter.cancelBeforeAdmission
+				)
+					throw error;
 				await this.#waitForSessionIdle(record);
-				if (record.activePrompt !== waiter || waiter.settled) throw error;
+				if (
+					record.activePrompt !== waiter ||
+					waiter.settled ||
+					record.cancelRequested ||
+					waiter.cancelAcknowledged ||
+					waiter.cancelBeforeAdmission
+				)
+					throw error;
 				acknowledgement = await submit();
 			}
 			// A recovered waiter already owns its exact identity; a late ack cannot rebind it.
