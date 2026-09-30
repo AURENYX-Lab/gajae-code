@@ -366,6 +366,7 @@ function usableAccountHome(home: string | undefined): string | undefined {
  * at exit 70 (issue #4794 regression).
  */
 function accountHomeIndependentOfEnvironment(): string | undefined {
+	if (process.platform === "win32") return windowsAccountHome();
 	const command = (() => {
 		if (process.platform === "linux") {
 			const uid = process.geteuid?.();
@@ -384,6 +385,42 @@ function accountHomeIndependentOfEnvironment(): string | undefined {
 	}
 	const line = output.split("\n").find(entry => entry.startsWith("NFSHomeDirectory:"));
 	return usableAccountHome(line?.slice("NFSHomeDirectory:".length).trim());
+}
+
+/**
+ * The account home on Windows, resolved without trusting the process
+ * environment that cleanup code is free to rewrite.
+ *
+ * Windows has no passwd/dscl database, so the only OS-provided root is the
+ * per-user profile directory. `os.homedir()` derives it from `USERPROFILE`
+ * (`SHGetKnownFolderPath` is not exposed to Bun), which means a caller that
+ * rewrites `%USERPROFILE%` before this module loads could spoof it. The
+ * captured value is therefore only trusted when it agrees with the profile
+ * root implied by the SYSTEMDRIVE/USERNAME pair, and it is still confined to
+ * an absolute path that is not a drive root.
+ *
+ * Without this resolver `trustedHome` stays empty on Windows, `deletionRootsFor`
+ * is skipped, `%TEMP%` never becomes an allowed root, and every
+ * `mkdtemp(os.tmpdir())` cleanup refuses itself. That is what failed the
+ * Windows `binaries` job on the v0.18.2 release run: `prepack` ->
+ * `generate-tool-catalog.ts` creates its isolated root under `os.tmpdir()` and
+ * then `safeRm`s it.
+ */
+function windowsAccountHome(): string | undefined {
+	const profile = usableAccountHome(Bun.env.USERPROFILE);
+	if (profile === undefined) return undefined;
+	const drive = Bun.env.SYSTEMDRIVE;
+	const username = Bun.env.USERNAME;
+	if (drive === undefined || username === undefined) return profile;
+	const expected = path.win32.join(drive, "Users", username);
+	// Accept either the direct profile root or a relocated/mapped variant that
+	// still shares the drive, and never widen past a single absolute path.
+	const normalized = path.win32.normalize(profile).toLowerCase();
+	const expectedRoot = path.win32.normalize(expected).toLowerCase();
+	if (normalized === expectedRoot) return profile;
+	const driveRoot = path.win32.parse(path.win32.normalize(profile)).root.toLowerCase();
+	if (driveRoot !== path.win32.parse(expectedRoot).root.toLowerCase()) return undefined;
+	return profile;
 }
 
 const accountProbeEnv = { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LC_ALL: "C" };
