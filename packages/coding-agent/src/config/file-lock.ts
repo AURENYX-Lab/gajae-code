@@ -700,12 +700,10 @@ async function adoptOrphanedFileLockRemovalTransition(lockPath: string, orphanAg
 
 async function adoptAbandonedFileLockRemovalTransition(
 	lockPath: string,
-	_orphanAgeMs: number,
 	ownerHostId?: string,
 	previousOwnerHostIds: readonly string[] = [],
 ): Promise<boolean> {
 	const transitionPath = fileLockRemovalTransitionPath(lockPath);
-	if (ownerHostId === undefined) return false;
 	const stale = await staleLockSnapshot(transitionPath, 0, ownerHostId, previousOwnerHostIds);
 	if (!stale.stale || !stale.identity) return false;
 	if (!(await isNativeExactRemovalUsable())) return false;
@@ -1811,14 +1809,7 @@ async function tryAcquireLock(
 			if (transitionState === "orphan_transition")
 				return { kind: "orphan_transition", path: fileLockRemovalTransitionPath(destinationPath) };
 			if (transitionState === "abandoned") {
-				if (
-					await adoptAbandonedFileLockRemovalTransition(
-						destinationPath,
-						orphanTransitionAgeMs,
-						ownerHostId,
-						previousOwnerHostIds,
-					)
-				) {
+				if (await adoptAbandonedFileLockRemovalTransition(destinationPath, ownerHostId, previousOwnerHostIds)) {
 					transitionState = await classifyFileLockRemovalTransition(
 						destinationPath,
 						orphanTransitionAgeMs,

@@ -77,12 +77,12 @@ async function deadPid(): Promise<number> {
 	return child.pid;
 }
 
-function removalInfo(pid: number, ownerHostId: string): string {
+function removalInfo(pid: number, ownerHostId?: string): string {
 	return JSON.stringify({
 		pid,
 		timestamp: Date.now(),
-		owner_host_id: ownerHostId,
 		owner_token: crypto.randomUUID(),
+		...(ownerHostId === undefined ? {} : { owner_host_id: ownerHostId }),
 	});
 }
 
@@ -864,6 +864,31 @@ describe("file lock abandoned removal recovery", () => {
 		});
 		expect(treeSnapshot(transition)).toEqual(retained);
 		expect(await Bun.file(path.join(transition, "payload")).text()).toBe("must survive");
+	});
+
+	test("adopts a host-less abandoned transition and acquires", async () => {
+		const { file, lock } = await makeFixture();
+		const transition = `${lock}.removing`;
+		await fs.mkdir(transition);
+		await Bun.write(path.join(transition, "info"), removalInfo(await deadPid()));
+
+		const release = await acquireFileLock(file, quickAcquire);
+		try {
+			await expect(fs.lstat(transition)).rejects.toMatchObject({ code: "ENOENT" });
+		} finally {
+			await release();
+		}
+	});
+
+	test("preserves a host-qualified abandoned transition for a host-less acquirer", async () => {
+		const { file, lock } = await makeFixture();
+		const transition = `${lock}.removing`;
+		await fs.mkdir(transition);
+		await Bun.write(path.join(transition, "info"), removalInfo(await deadPid(), "host-a"));
+		const retained = treeSnapshot(transition);
+
+		await expect(acquireFileLock(file, quickAcquire)).rejects.toMatchObject({ code: "acquire_timeout" });
+		expect(treeSnapshot(transition)).toEqual(retained);
 	});
 });
 
