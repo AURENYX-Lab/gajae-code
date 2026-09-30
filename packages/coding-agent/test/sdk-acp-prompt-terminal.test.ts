@@ -790,20 +790,68 @@ test("ACP accepts a successor after a failed turn while the SDK is winding down"
 });
 
 test("ACP accepts an immediate successor after cancellation while the SDK is winding down", async () => {
-	const fixture = await createFixture({ cancelSettlementGraceMs: 100, busyOnSecondPrompt: true });
+	const fixture = await createFixture({ cancelSettlementGraceMs: 60_000, busyOnSecondPrompt: true });
 	try {
 		const first = prompt(fixture, "cancel this");
 		await bounded(fixture.promptDelivered, "cancelled prompt delivery");
 		fixture.sendTerminal({ type: "agent_start", sessionId: fixture.sessionId });
 		await fixture.agent.cancel({ sessionId: fixture.sessionId } as never);
+		const successor = prompt(fixture, "continue after cancel");
+		void successor.catch(() => undefined);
 		fixture.sendStopped("cancelled");
 		expect(await bounded(first, "cancelled prompt settlement")).toEqual({ stopReason: "cancelled" });
-		const successor = prompt(fixture, "continue after cancel");
 		await waitFor(() => fixture.promptDeliveryCount() === 2, "busy successor prompt delivery");
 		fixture.sendIdle();
 		await waitFor(() => fixture.promptDeliveryCount() === 3, "successor prompt delivery");
 		fixture.sendStopped("end_turn");
 		expect(await bounded(successor, "successor settlement")).toEqual({ stopReason: "end_turn" });
+	} finally {
+		fixture.dispose();
+	}
+});
+
+test("ACP immediately rejects a successor while a non-cancelled prompt is active", async () => {
+	const fixture = await createFixture();
+	try {
+		const first = prompt(fixture, "keep running");
+		await bounded(fixture.promptDelivered, "running prompt delivery");
+		await expect(bounded(prompt(fixture, "do not queue"), "active prompt conflict")).rejects.toMatchObject({
+			code: "conflict",
+			message: "ACP session already has an active prompt.",
+		});
+		expect(fixture.promptDeliveryCount()).toBe(1);
+		fixture.sendStopped("end_turn");
+		expect(await bounded(first, "running prompt settlement")).toEqual({ stopReason: "end_turn" });
+	} finally {
+		fixture.dispose();
+	}
+});
+
+test.skip("ACP bounds successor admission when the cancelled prompt never settles", () => {
+	// The prompt-terminal fixture injects the watchdog clock only for retry-backoff control;
+	// it does not expose a safe virtual-clock advancement hook for this admission timer.
+});
+
+test("ACP admits only one successor waiting on the same cancelled prompt", async () => {
+	const fixture = await createFixture({ cancelSettlementGraceMs: 60_000 });
+	try {
+		const first = prompt(fixture, "cancel this owner");
+		await bounded(fixture.promptDelivered, "cancelled owner delivery");
+		await fixture.agent.cancel({ sessionId: fixture.sessionId });
+		const successor = prompt(fixture, "first successor");
+		void successor.catch(() => undefined);
+		const competing = prompt(fixture, "second successor");
+		const conflict = expect(competing).rejects.toMatchObject({
+			code: "conflict",
+			message: "ACP session already has an active prompt.",
+		});
+		fixture.sendStopped("cancelled");
+		expect(await bounded(first, "cancelled owner settlement")).toEqual({ stopReason: "cancelled" });
+		await waitFor(() => fixture.promptDeliveryCount() === 2, "sole successor delivery");
+		await conflict;
+		expect(fixture.promptDeliveryCount()).toBe(2);
+		fixture.sendStopped("end_turn");
+		expect(await bounded(successor, "sole successor settlement")).toEqual({ stopReason: "end_turn" });
 	} finally {
 		fixture.dispose();
 	}

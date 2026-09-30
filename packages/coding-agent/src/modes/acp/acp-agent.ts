@@ -231,6 +231,8 @@ interface PromptWaiter {
 	cancelAttemptResolve?: (acknowledged: boolean) => void;
 	resolve: (response: PromptResponse) => void;
 	reject: (error: Error) => void;
+	/** Resolves when the prompt response settles, regardless of success or failure. */
+	settlement: Promise<void>;
 }
 
 type PromptCorrelation = { commandId?: string; turnId?: string };
@@ -297,6 +299,8 @@ type SessionRecord = {
 	promptObservedAssistantOutput?: boolean;
 	/** Owner token held across the first-turn retry backoff; a non-owner prompt is rejected as a conflict (review P1). */
 	pendingFirstPromptRetry?: FirstPromptRetryReservation;
+	/** Sole successor admitted while a cancelled prompt settles and publication tails drain. */
+	pendingPromptAdmission?: object;
 };
 
 /**
@@ -2279,6 +2283,53 @@ export class AcpAgent implements Agent {
 	): Promise<PromptResponse> {
 		const record = this.#sessions.get(params.sessionId);
 		if (!record) throw new AcpSdkAdapterError("not_found", `Unknown session, not found: ${params.sessionId}`);
+		let admissionReservation: object | undefined;
+		if (record.pendingPromptAdmission)
+			throw new AcpSdkAdapterError("conflict", "ACP session already has an active prompt.");
+		const activePrompt = record.activePrompt;
+		if (activePrompt) {
+			const cancellationPending =
+				record.cancelRequested ||
+				activePrompt.cancelAttempt !== undefined ||
+				activePrompt.cancelAcknowledged === true;
+			if (!cancellationPending || record.pendingPromptAdmission)
+				throw new AcpSdkAdapterError("conflict", "ACP session already has an active prompt.");
+			admissionReservation = {};
+			record.pendingPromptAdmission = admissionReservation;
+			const settled = await this.#waitForPromptSettlement(activePrompt);
+			if (!settled) {
+				if (record.pendingPromptAdmission === admissionReservation) record.pendingPromptAdmission = undefined;
+				throw new AcpSdkAdapterError("conflict", "ACP session already has an active prompt.");
+			}
+			await this.#drainPromptPublicationTails(params.sessionId);
+		}
+		try {
+			return await this.#submitPromptCore(params, echoUserMessage, retryReservation, admissionReservation);
+		} finally {
+			if (record.pendingPromptAdmission === admissionReservation) record.pendingPromptAdmission = undefined;
+		}
+	}
+
+	async #waitForPromptSettlement(waiter: PromptWaiter): Promise<boolean> {
+		let cancelTimer: (() => void) | undefined;
+		const timeout = new Promise<boolean>(resolve => {
+			cancelTimer = this.#promptWatchdogClock.schedule(() => resolve(false), ACP_BUSY_SETTLE_WAIT_MS);
+		});
+		try {
+			return await Promise.race([waiter.settlement.then(() => true), timeout]);
+		} finally {
+			cancelTimer?.();
+		}
+	}
+
+	async #submitPromptCore(
+		params: PromptRequest,
+		echoUserMessage: boolean,
+		retryReservation?: FirstPromptRetryReservation,
+		admissionReservation?: object,
+	): Promise<PromptResponse> {
+		const record = this.#sessions.get(params.sessionId);
+		if (!record) throw new AcpSdkAdapterError("not_found", `Unknown session, not found: ${params.sessionId}`);
 		// A first-turn retry holds the session across its backoff gap. Any prompt that is not the
 		// retry owner is rejected here, before any state mutation or dispatch, so it cannot steal
 		// the first turn while the authorized retry is still pending (review P1, issue #5574).
@@ -2364,6 +2415,10 @@ export class AcpAgent implements Agent {
 		record.promptObservedToolExecution = false;
 		record.promptObservedAssistantOutput = false;
 		const { promise: response, resolve, reject } = Promise.withResolvers<PromptResponse>();
+		const settlement = response.then(
+			() => undefined,
+			() => undefined,
+		);
 		const waiter: PromptWaiter = {
 			invocationKind: skillInvocation ? "skill" : "prompt",
 			clientRef,
@@ -2384,10 +2439,12 @@ export class AcpAgent implements Agent {
 			activity: new PromptActivity(),
 			observedTurnActivity: false,
 			observedToolExecution: false,
+			settlement,
 			resolve,
 			reject,
 		};
 		record.activePrompt = waiter;
+		if (record.pendingPromptAdmission === admissionReservation) record.pendingPromptAdmission = undefined;
 		// The watchdog may reject this waiter while the SDK acknowledgement request is still
 		// pending. Retain the original promise for the caller, but mark that delayed rejection
 		// as observed until prompt() can resume and await it.
@@ -2402,10 +2459,6 @@ export class AcpAgent implements Agent {
 		// The watchdog settles `response`, not this await, so a preflight that never returns
 		// would pin session/prompt open with the caller's promise already rejected. Racing the
 		// settlement lets the re-checks below hand that rejection back to the caller.
-		const settlement = response.then(
-			() => undefined,
-			() => undefined,
-		);
 		try {
 			await Promise.race([record.adapter.ensureProviders(), settlement]);
 		} catch (error) {
@@ -2787,6 +2840,7 @@ export class AcpAgent implements Agent {
 				(waiter.cancelAcknowledged || (waiter.cancelBeforeAdmission && !waiter.acknowledged && !waiter.dispatched))
 			) {
 				record.cancelRequested = false;
+				waiter.resolve({ stopReason: "cancelled" });
 				// The client's turn is settled by the return; the advisory idle publication
 				// must not gate it and must still be attempted so the running phase is
 				// released (gjcRunning:false) instead of spinning behind a settled cancel.
