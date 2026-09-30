@@ -59,7 +59,11 @@ import { loadCapability, reset as resetCapabilities } from "../capability";
 import { type Rule, ruleCapability, setActiveRules } from "../capability/rule";
 import type { SourceMeta } from "../capability/types";
 import { AUTOROUTING_INACTIVE_WARNING } from "../config/autorouting-contract";
-import { ModelProfileCredentialError, resolveMissingSessionModelRecovery } from "../config/model-profile-activation";
+import {
+	isSessionCredentialPinBlocking,
+	ModelProfileCredentialError,
+	resolveMissingSessionModelRecovery,
+} from "../config/model-profile-activation";
 import { resolveModelProfileName } from "../config/model-profile-contract";
 import { resolveProfileBindings } from "../config/model-profiles";
 import { kNoAuth, ModelRegistry } from "../config/model-registry";
@@ -1970,11 +1974,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				options.preferredCredentialSelector.selector,
 			);
 		}
+		// A runtime key or this registry's literal models.yml apiKey outranks an
+		// unavailable pin; without one the provider stays blocked (never retargeted).
+		const isCredentialPinBlocking = (provider: string): boolean =>
+			isSessionCredentialPinBlocking(modelRegistry, provider, credentialSessionId);
 		const modelApiKeyAvailability = new Map<string, boolean>();
 		const getModelAvailabilityKey = (candidate: Model): string =>
 			`${candidate.provider}\u0000${candidate.baseUrl ?? ""}`;
 		const hasModelApiKey = async (candidate: Model): Promise<boolean> => {
-			if (authStorage.hasSessionCredentialUnavailable(candidate.provider, credentialSessionId)) return false;
+			if (isCredentialPinBlocking(candidate.provider)) return false;
 			const availabilityKey = getModelAvailabilityKey(candidate);
 			const cached = modelApiKeyAvailability.get(availabilityKey);
 			if (cached !== undefined) {
@@ -2000,6 +2008,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const key = await modelRegistry
 				.getApiKey(candidate, credentialSessionId, { credentialSelector })
 				.catch(error => {
+					if (isCredentialPinBlocking(candidate.provider)) return undefined;
 					if (credentialSelector) {
 						logger.debug("Credential selector did not match model availability candidate", {
 							provider: candidate.provider,
@@ -2241,8 +2250,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					{
 						managedFallback: defaultModelEntries.length > 1,
 						canonicalSessionId: providerSessionId,
-						isCredentialUnavailable: provider =>
-							authStorage.hasSessionCredentialUnavailable(provider, credentialSessionId),
+						isCredentialUnavailable: isCredentialPinBlocking,
 						...(persistedProfileOwnsDefault ? { aliasIntent: "preset-equivalent" as const } : {}),
 					},
 				);
@@ -2297,7 +2305,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			!hasExplicitModel &&
 			!model &&
 			defaultRoleSpec.model &&
-			!authStorage.hasSessionCredentialUnavailable(defaultRoleSpec.model.provider, credentialSessionId) &&
+			!isCredentialPinBlocking(defaultRoleSpec.model.provider) &&
 			(!preferredCredentialProvider || defaultRoleSpec.model.provider === preferredCredentialProvider)
 		) {
 			const settingsDefaultModel = defaultRoleSpec.model;
@@ -4236,8 +4244,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				{
 					managedFallback: defaultModelEntries.length > 1,
 					canonicalSessionId: providerSessionId,
-					isCredentialUnavailable: provider =>
-						authStorage.hasSessionCredentialUnavailable(provider, credentialSessionId),
+					isCredentialUnavailable: isCredentialPinBlocking,
 					...(persistedProfileOwnsDefault ? { aliasIntent: "preset-equivalent" as const } : {}),
 				},
 			);

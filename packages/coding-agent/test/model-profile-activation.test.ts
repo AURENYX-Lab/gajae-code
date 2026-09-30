@@ -479,6 +479,212 @@ describe("model profile activation", () => {
 		expect(getApiKeyForProvider).not.toHaveBeenCalled();
 	});
 
+	test("durable default recovery reports an unavailable session pin without probing another account", async () => {
+		const profile: ModelProfileDefinition = {
+			name: "unavailable-pin-recovery",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default" },
+			source: "user",
+		};
+		const getApiKeyForProvider = vi.fn(async () => "another-account-key");
+		const registry = {
+			...fakeRegistry({ profiles: [profile] }),
+			getApiKeyForProvider,
+			authStorage: {
+				hasRuntimeApiKey: () => false,
+				hasLiteralConfigApiKey: () => false,
+				hasSessionCredentialUnavailable: (provider: string, scope: string) =>
+					provider === "provider-a" && scope === "resume-session",
+			},
+		} as unknown as ModelRegistry;
+		await expect(
+			resolveModelProfileDefaultChain({
+				modelRegistry: registry,
+				settings: Settings.isolated(),
+				profileName: profile.name,
+				credentialSessionId: "resume-session",
+			}),
+		).rejects.toMatchObject({ name: "ModelProfileCredentialError", providers: ["provider-a"] });
+		expect(getApiKeyForProvider).not.toHaveBeenCalled();
+	});
+
+	test("durable default recovery respects runtime API key when OAuth pin is unavailable", async () => {
+		const profile: ModelProfileDefinition = {
+			name: "unavailable-pin-with-runtime-key",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default" },
+			source: "user",
+		};
+		const getApiKeyForProvider = vi.fn(async () => "runtime-key-value");
+		const registry = {
+			...fakeRegistry({ profiles: [profile] }),
+			getApiKeyForProvider,
+			authStorage: {
+				hasRuntimeApiKey: () => true,
+				hasLiteralConfigApiKey: () => false,
+				hasSessionCredentialUnavailable: (provider: string, scope: string) =>
+					provider === "provider-a" && scope === "resume-session",
+			},
+		} as unknown as ModelRegistry;
+		const result = await resolveModelProfileDefaultChain({
+			modelRegistry: registry,
+			settings: Settings.isolated(),
+			profileName: profile.name,
+			credentialSessionId: "resume-session",
+		});
+		expect(result.model).toBeDefined();
+		expect(getApiKeyForProvider).toHaveBeenCalled();
+	});
+
+	test("profile activation reports a pin invalidated during credential probing", async () => {
+		const profile: ModelProfileDefinition = {
+			name: "pin-invalidated-during-probe",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default" },
+			source: "user",
+		};
+		let unavailable = false;
+		const failure = new Error("Selected credential for provider-a (id:13) is unavailable");
+		const registry = {
+			...fakeRegistry({ profiles: [profile] }),
+			getApiKeyForProvider: async () => {
+				unavailable = true;
+				throw failure;
+			},
+			authStorage: {
+				hasRuntimeApiKey: () => false,
+				hasLiteralConfigApiKey: () => false,
+				hasSessionCredentialUnavailable: (provider: string, scope: string) =>
+					provider === "provider-a" && scope === "session-1" && unavailable,
+			},
+		} as unknown as ModelRegistry;
+		await expect(
+			prepareModelProfileActivation({
+				session: fakeSession(),
+				modelRegistry: registry,
+				settings: Settings.isolated(),
+				profileName: profile.name,
+			}),
+		).rejects.toMatchObject({ name: "ModelProfileCredentialError", providers: ["provider-a"] });
+	});
+
+	test("profile activation preserves unrelated credential lookup failures", async () => {
+		const profile: ModelProfileDefinition = {
+			name: "unrelated-auth-failure",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default" },
+			source: "user",
+		};
+		const failure = new Error("OAuth broker failed");
+		const registry = {
+			...fakeRegistry({ profiles: [profile] }),
+			getApiKeyForProvider: async () => {
+				throw failure;
+			},
+			authStorage: {
+				hasRuntimeApiKey: () => false,
+				hasLiteralConfigApiKey: () => false,
+				hasSessionCredentialUnavailable: () => false,
+			},
+		} as unknown as ModelRegistry;
+		await expect(
+			prepareModelProfileActivation({
+				session: fakeSession(),
+				modelRegistry: registry,
+				settings: Settings.isolated(),
+				profileName: profile.name,
+			}),
+		).rejects.toBe(failure);
+	});
+
+	test("profile activation respects runtime API key precedence over unavailable OAuth pin", async () => {
+		const profile: ModelProfileDefinition = {
+			name: "runtime-key-unavailable-pin",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default" },
+			source: "user",
+		};
+		const registry = {
+			...fakeRegistry({ profiles: [profile] }),
+			getApiKeyForProvider: async () => "runtime-key-value",
+			authStorage: {
+				hasRuntimeApiKey: (provider: string) => provider === "provider-a",
+				hasLiteralConfigApiKey: () => false,
+				hasSessionCredentialUnavailable: (provider: string, scope: string) =>
+					provider === "provider-a" && scope === "session-1",
+			},
+		} as unknown as ModelRegistry;
+		const prepared = await prepareModelProfileActivation({
+			session: fakeSession(),
+			modelRegistry: registry,
+			settings: Settings.isolated(),
+			profileName: profile.name,
+		});
+		expect(prepared.profileName).toBe(profile.name);
+	});
+
+	test("profile activation respects config API key precedence over unavailable OAuth pin", async () => {
+		const profile: ModelProfileDefinition = {
+			name: "config-key-unavailable-pin",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default" },
+			source: "user",
+		};
+		const owner = {};
+		const registry = {
+			...fakeRegistry({ profiles: [profile] }),
+			getAuthStorageOwner: () => owner,
+			getApiKeyForProvider: async () => "config-key-value",
+			authStorage: {
+				hasRuntimeApiKey: () => false,
+				// The models.yml key is registered for this registry's owner only.
+				hasLiteralConfigApiKey: (provider: string, keyOwner?: object) =>
+					provider === "provider-a" && keyOwner === owner,
+				hasSessionCredentialUnavailable: (provider: string, scope: string) =>
+					provider === "provider-a" && scope === "session-1",
+			},
+		} as unknown as ModelRegistry;
+		const prepared = await prepareModelProfileActivation({
+			session: fakeSession(),
+			modelRegistry: registry,
+			settings: Settings.isolated(),
+			profileName: profile.name,
+		});
+		expect(prepared.profileName).toBe(profile.name);
+	});
+
+	test("profile activation fails when OAuth pin unavailable and no explicit credential exists", async () => {
+		const profile: ModelProfileDefinition = {
+			name: "unavailable-pin-no-explicit-key",
+			requiredProviders: ["provider-a"],
+			modelMapping: { default: "provider-a/default" },
+			source: "user",
+		};
+		let unavailable = false;
+		const failure = new Error("Selected credential for provider-a is unavailable");
+		const registry = {
+			...fakeRegistry({ profiles: [profile] }),
+			getApiKeyForProvider: async () => {
+				unavailable = true;
+				throw failure;
+			},
+			authStorage: {
+				hasRuntimeApiKey: () => false,
+				hasLiteralConfigApiKey: () => false,
+				hasSessionCredentialUnavailable: (provider: string, scope: string) =>
+					provider === "provider-a" && scope === "session-1" && unavailable,
+			},
+		} as unknown as ModelRegistry;
+		await expect(
+			prepareModelProfileActivation({
+				session: fakeSession(),
+				modelRegistry: registry,
+				settings: Settings.isolated(),
+				profileName: profile.name,
+			}),
+		).rejects.toMatchObject({ name: "ModelProfileCredentialError", providers: ["provider-a"] });
+	});
+
 	test("durable default recovery accepts a credentialless OpenCodex proxy", async () => {
 		const profile: ModelProfileDefinition = {
 			name: "credentialless-opencodex-recovery",

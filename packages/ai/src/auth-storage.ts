@@ -2182,6 +2182,16 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Whether a provider's config override is a literal `apiKey`, not an `apiKeyEnv`
+	 * indirection. Startup pin policy treats only a literal key as explicit, because
+	 * an env-sourced override yields to a stored api_key account (see {@link getApiKey}).
+	 */
+	hasLiteralConfigApiKey(provider: string, owner?: object): boolean {
+		const registration = this.#configOverrideRegistration(provider, owner);
+		return Boolean(registration?.apiKey) && !registration?.envSourced;
+	}
+
+	/**
 	 * Whether credential selection for a provider is pinned to one stored row by
 	 * a runtime selector (`--credential`).
 	 *
