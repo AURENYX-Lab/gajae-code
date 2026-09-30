@@ -622,6 +622,11 @@ describe("contribution prep", () => {
 		expect(prompt).toContain("Do not create GitHub issues");
 	});
 
+	it("does not spawn a worker from the interactive slash command", async () => {
+		const command = lookupBuiltinSlashCommand("contribute-pr");
+		expect(command?.description).toContain("separate terminal");
+	});
+
 	it("can prepare a worker spawn without mutating source-session identity", async () => {
 		const tempDir = TempDir.createSync("@gjc-contribution-prep-spawn-");
 		try {
