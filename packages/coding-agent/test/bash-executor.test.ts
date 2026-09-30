@@ -195,6 +195,82 @@ describe("executeBash", () => {
 		expect(result.cancelled).toBe(false);
 	});
 
+	it("does not deadlock when a compound pipeline stage writes over a pipe buffer", async () => {
+		if (process.platform === "win32") return;
+
+		const result = await executeBash(
+			"{ head -c 70000 /dev/zero | tr '\\0' A; echo; } | grep ZZZ || true",
+			{ cwd: tempDir, timeout: 4000 },
+		);
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+	}, 10_000);
+
+	it("does not deadlock when a for-loop pipeline stage writes over a pipe buffer", async () => {
+		if (process.platform === "win32") return;
+
+		const result = await executeBash(
+			"for i in $(seq 1 20000); do echo line$i; done | grep ZZZ || true",
+			{ cwd: tempDir, timeout: 4000 },
+		);
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+	}, 10_000);
+
+	it("does not deadlock when a compound pipeline stage writes over 64 KiB", async () => {
+		if (process.platform === "win32") return;
+
+		const result = await executeBash(
+			"i=0; while [ $i -lt 20000 ]; do echo line$i; i=$((i + 1)); done | grep ZZZ || true",
+			{ cwd: tempDir, timeout: 4000 },
+		);
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+	}, 10_000);
+
+	it("preserves byte counts through a compound pipeline stage", async () => {
+		if (process.platform === "win32") return;
+
+		const result = await executeBash(
+			"{ head -c 200000 /dev/zero | tr '\\0' A; echo; } | wc -c",
+			{ cwd: tempDir, timeout: 4000 },
+		);
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("200001");
+	}, 10_000);
+
+	it("preserves PIPESTATUS and pipefail across a compound pipeline", async () => {
+		if (process.platform === "win32") return;
+
+		const result = await executeBash(
+			`set -o pipefail; { false; } | true; status=$? statuses=("\${PIPESTATUS[@]}"); printf '%s %s %s\\n' "$status" "\${statuses[0]}" "\${statuses[1]}"`,
+			{ cwd: tempDir, timeout: 4000 },
+		);
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("1 1 0");
+	}, 10_000);
+
+	it("preserves parent compound and lastpipe mutations across a compound pipeline", async () => {
+		if (process.platform === "win32") return;
+
+		const result = await executeBash(
+			"{ value=before; }; { value=changed; printf payload; } | cat >/dev/null; printf 'parent:%s\\n' \"$value\"; shopt -s lastpipe; printf 'line\\n' | { read value; }; printf 'lastpipe:%s\\n' \"$value\"",
+			{ cwd: tempDir, timeout: 4000 },
+		);
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("parent:before\nlastpipe:line");
+	}, 10_000);
+
+	it("preserves simple pipeline behavior alongside compound pipelines", async () => {
+		const result = await executeBash("printf 'simple pipeline\\n' | cat", { cwd: tempDir, timeout: 4000 });
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("simple pipeline");
+	}, 10_000);
+
 	it("starts the command timeout after isolated shell readiness", async () => {
 		if (process.platform === "win32") return;
 		setShellFactoryForTests(() => ({

@@ -870,17 +870,34 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 					}
 				}
 
-				Ok(compound
-					.execute(&mut pipeline_context.shell, &params)
-					.await?
-					.into())
+				match pipeline_context.shell {
+					commands::ShellForCommand::OwnedShell { target, .. } => {
+						let compound = compound.clone();
+						let mut shell = *target;
+						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
+							compound.execute(&mut shell, &params).await
+						})))
+					},
+					commands::ShellForCommand::ParentShell(shell) => {
+						Ok(compound.execute(shell, &params).await?.into())
+					},
+				}
 			},
 			Self::Function(func) => {
 				params.disable_command_output_marking();
-				Ok(func
-					.execute(&mut pipeline_context.shell, &params)
-					.await?
-					.into())
+
+				match pipeline_context.shell {
+					commands::ShellForCommand::OwnedShell { target, .. } => {
+						let func = func.clone();
+						let mut shell = *target;
+						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
+							func.execute(&mut shell, &params).await
+						})))
+					},
+					commands::ShellForCommand::ParentShell(shell) => {
+						Ok(func.execute(shell, &params).await?.into())
+					},
+				}
 			},
 			Self::ExtendedTest(e, redirects) => {
 				// Set up any additional redirects.
