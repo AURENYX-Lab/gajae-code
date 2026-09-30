@@ -451,7 +451,7 @@ isolatedSdkHostTest(
 							frame.turnId === acknowledgement.result.turnId,
 					),
 				"delivery failure terminal",
-				2000,
+				5000,
 			);
 			const failure = frames.find(
 				frame => frame.type === "agent_failed" && frame.commandId === acknowledgement.result.commandId,
@@ -522,3 +522,343 @@ isolatedSdkHostTest(
 	},
 	10_000,
 );
+
+async function activePrompt(label: string): Promise<{
+	handlers: Map<string, (event: unknown, context: unknown) => unknown>;
+	sessionContext: Record<string, unknown>;
+	frames: Record<string, unknown>[];
+	correlation: { commandId: string; turnId: string };
+}> {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `gjc-sdk-${label}-`));
+	dirs.push(cwd);
+	const sessionContext = context(cwd, `sdk-${label}-${Date.now()}`);
+	const handlers = start(sessionContext, () => new Promise<never>(() => {}) as never);
+	const { socket, frames } = await connect(
+		cwd,
+		(sessionContext.sessionManager as { getSessionId: () => string }).getSessionId(),
+	);
+	socket.send(
+		JSON.stringify({ type: "control_request", id: label, operation: "turn.prompt", input: { text: "stream" } }),
+	);
+	await waitFor(
+		() => frames.some(frame => frame.type === "control_response" && frame.id === label),
+		"prompt acknowledgement",
+	);
+	const acknowledgement = frames.find(frame => frame.type === "control_response" && frame.id === label) as {
+		result: { commandId: string; turnId: string };
+	};
+	await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+	return { handlers, sessionContext, frames, correlation: acknowledgement.result };
+}
+
+function correlatedTerminal(frames: Record<string, unknown>[], correlation: { commandId: string; turnId: string }) {
+	return frames.find(
+		frame =>
+			(frame.type === "agent_end" || frame.type === "agent_failed") &&
+			frame.commandId === correlation.commandId &&
+			frame.turnId === correlation.turnId,
+	);
+}
+
+isolatedSdkHostTest("backlog rejection of progress keeps the terminal deliverable", async () => {
+	const { handlers, sessionContext, frames, correlation } = await activePrompt("backlog-progress");
+	const original = NotificationServer.prototype.sendTo;
+	let rejected = false;
+	const send = spyOn(NotificationServer.prototype, "sendTo").mockImplementation(function (
+		this: NotificationServer,
+		id,
+		json,
+	) {
+		const frame = JSON.parse(json) as { type?: string; kind?: string };
+		if (!rejected && frame.type === "event" && frame.kind === "message_update") {
+			rejected = true;
+			throw new Error("sdk directed delivery rejected: cause=writer_backlog_full frameBytes=200");
+		}
+		return original.call(this, id, json);
+	});
+	try {
+		const message = { role: "assistant", content: [{ type: "text", text: "complete" }] };
+		await handlers.get("message_update")?.(
+			{ type: "message_update", message, assistantMessageEvent: { type: "text_delta", delta: "complete" } },
+			sessionContext,
+		);
+		await handlers.get("message_end")?.({ type: "message_end", message }, sessionContext);
+		await handlers.get("agent_end")?.({ type: "agent_end", stopReason: "completed", messages: [] }, sessionContext);
+		await waitFor(
+			() => correlatedTerminal(frames, correlation)?.type === "agent_end",
+			"agent_end after backlog",
+			2000,
+		);
+		expect(rejected).toBe(true);
+	} finally {
+		send.mockRestore();
+	}
+});
+
+isolatedSdkHostTest("one backlog rejection of agent_end is retried", async () => {
+	const { handlers, sessionContext, frames, correlation } = await activePrompt("backlog-terminal-once");
+	const original = NotificationServer.prototype.sendTo;
+	let attempts = 0;
+	const send = spyOn(NotificationServer.prototype, "sendTo").mockImplementation(function (
+		this: NotificationServer,
+		id,
+		json,
+	) {
+		if ((JSON.parse(json) as { type?: string }).type === "agent_end" && ++attempts === 1)
+			throw new Error("sdk directed delivery rejected: cause=writer_backlog_full frameBytes=200");
+		return original.call(this, id, json);
+	});
+	try {
+		await handlers.get("agent_end")?.({ type: "agent_end", stopReason: "completed", messages: [] }, sessionContext);
+		await waitFor(() => correlatedTerminal(frames, correlation)?.type === "agent_end", "retried agent_end", 2000);
+		expect(attempts).toBe(2);
+		expect(frames.some(frame => frame.type === "agent_failed" && frame.commandId === correlation.commandId)).toBe(
+			false,
+		);
+	} finally {
+		send.mockRestore();
+	}
+});
+
+isolatedSdkHostTest(
+	"successful terminal retry via live emit releases prompt capacity",
+	async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-backlog-success-capacity-"));
+		dirs.push(cwd);
+		const sessionId = `sdk-backlog-success-capacity-${Date.now()}`;
+		const sessionContext = context(cwd, sessionId);
+		const handlers = start(sessionContext, () => new Promise<never>(() => {}) as never);
+		const { socket, frames } = await connect(cwd, sessionId);
+		const original = NotificationServer.prototype.sendTo;
+		const terminalAttempts = new Map<string, number>();
+		const send = spyOn(NotificationServer.prototype, "sendTo").mockImplementation(function (
+			this: NotificationServer,
+			id,
+			json,
+		) {
+			const frame = JSON.parse(json) as { type?: string };
+			if (frame.type === "agent_end") {
+				const attempt = (terminalAttempts.get(json) ?? 0) + 1;
+				terminalAttempts.set(json, attempt);
+				if (attempt === 1)
+					throw new Error("sdk directed delivery rejected: cause=writer_backlog_full frameBytes=200");
+			}
+			return original.call(this, id, json);
+		});
+		try {
+			for (let index = 0; index < 128; index++) {
+				const id = `backlog-success-capacity-${index}`;
+				socket.send(
+					JSON.stringify({ type: "control_request", id, operation: "turn.prompt", input: { text: "stream" } }),
+				);
+				await waitFor(
+					() => frames.some(frame => frame.type === "control_response" && frame.id === id),
+					`prompt ${id}`,
+				);
+				const acknowledgement = frames.find(frame => frame.type === "control_response" && frame.id === id) as {
+					result: { commandId: string; turnId: string };
+				};
+				const correlation = acknowledgement.result;
+				await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+				await handlers.get("message_update")?.(
+					{
+						type: "message_update",
+						message: { role: "assistant", content: [] },
+						assistantMessageEvent: { type: "text_delta", delta: "live" },
+					},
+					sessionContext,
+				);
+				await waitFor(
+					() =>
+						frames.some(
+							frame =>
+								frame.type === "event" &&
+								frame.commandId === correlation.commandId &&
+								frame.turnId === correlation.turnId,
+						),
+					`live progress ${id}`,
+				);
+				await handlers.get("agent_end")?.(
+					{ type: "agent_end", stopReason: "completed", messages: [] },
+					sessionContext,
+				);
+				await waitFor(
+					() => correlatedTerminal(frames, correlation)?.type === "agent_end",
+					`retried terminal ${id}`,
+					1000,
+				);
+			}
+
+			const finalId = "backlog-success-capacity-final";
+			socket.send(
+				JSON.stringify({
+					type: "control_request",
+					id: finalId,
+					operation: "turn.prompt",
+					input: { text: "admission after successful retries" },
+				}),
+			);
+			await waitFor(
+				() => frames.some(frame => frame.type === "control_response" && frame.id === finalId),
+				"final prompt",
+			);
+			const response = frames.find(frame => frame.type === "control_response" && frame.id === finalId) as {
+				ok: boolean;
+			};
+			expect(response.ok).toBe(true);
+		} finally {
+			send.mockRestore();
+		}
+	},
+	30_000,
+);
+
+isolatedSdkHostTest(
+	"persistent terminal backlog reaches delivery_failed within a bound",
+	async () => {
+		const { handlers, sessionContext, frames, correlation } = await activePrompt("backlog-terminal-persistent");
+		const original = NotificationServer.prototype.sendTo;
+		let attempts = 0;
+		const send = spyOn(NotificationServer.prototype, "sendTo").mockImplementation(function (
+			this: NotificationServer,
+			id,
+			json,
+		) {
+			if ((JSON.parse(json) as { type?: string }).type === "agent_end") {
+				attempts++;
+				throw new Error("sdk directed delivery rejected: cause=writer_backlog_full frameBytes=200");
+			}
+			return original.call(this, id, json);
+		});
+		try {
+			await handlers.get("agent_end")?.(
+				{ type: "agent_end", stopReason: "completed", messages: [] },
+				sessionContext,
+			);
+			await waitFor(
+				() => correlatedTerminal(frames, correlation)?.type === "agent_failed",
+				"bounded delivery failure",
+				5000,
+			);
+			expect(attempts).toBeGreaterThan(1);
+			expect((correlatedTerminal(frames, correlation) as { error: { code: string } }).error.code).toBe(
+				"delivery_failed",
+			);
+		} finally {
+			send.mockRestore();
+		}
+	},
+	5000,
+);
+
+isolatedSdkHostTest(
+	"terminal retry failure releases abandoned prompt capacity",
+	async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-backlog-capacity-"));
+		dirs.push(cwd);
+		const sessionId = `sdk-backlog-capacity-${Date.now()}`;
+		const sessionContext = context(cwd, sessionId);
+		const handlers = start(sessionContext, () => new Promise<never>(() => {}) as never);
+		const { socket, frames } = await connect(cwd, sessionId);
+		const original = NotificationServer.prototype.sendTo;
+		const terminalAttempts = new Map<string, number>();
+		const send = spyOn(NotificationServer.prototype, "sendTo").mockImplementation(function (
+			this: NotificationServer,
+			id,
+			json,
+		) {
+			const frame = JSON.parse(json) as { type?: string };
+			if (frame.type === "agent_end") {
+				const attempt = (terminalAttempts.get(json) ?? 0) + 1;
+				terminalAttempts.set(json, attempt);
+				if (attempt === 1)
+					throw new Error("sdk directed delivery rejected: cause=writer_backlog_full frameBytes=200");
+				throw new Error("sdk directed delivery rejected: cause=connection_closed frameBytes=200");
+			}
+			return original.call(this, id, json);
+		});
+		try {
+			for (let index = 0; index < 128; index++) {
+				const id = `backlog-capacity-${index}`;
+				socket.send(
+					JSON.stringify({ type: "control_request", id, operation: "turn.prompt", input: { text: "stream" } }),
+				);
+				await waitFor(
+					() => frames.some(frame => frame.type === "control_response" && frame.id === id),
+					`prompt ${id}`,
+				);
+				const acknowledgement = frames.find(frame => frame.type === "control_response" && frame.id === id) as {
+					result: { commandId: string; turnId: string };
+				};
+				const correlation = acknowledgement.result;
+				await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+				await handlers.get("agent_end")?.(
+					{ type: "agent_end", stopReason: "completed", messages: [] },
+					sessionContext,
+				);
+				await waitFor(
+					() => correlatedTerminal(frames, correlation)?.type === "agent_failed",
+					`delivery failure ${id}`,
+					1000,
+				);
+			}
+
+			const finalId = "backlog-capacity-final";
+			socket.send(
+				JSON.stringify({
+					type: "control_request",
+					id: finalId,
+					operation: "turn.prompt",
+					input: { text: "admission after retry failures" },
+				}),
+			);
+			await waitFor(
+				() => frames.some(frame => frame.type === "control_response" && frame.id === finalId),
+				"final prompt",
+			);
+			const response = frames.find(frame => frame.type === "control_response" && frame.id === finalId) as {
+				type: string;
+				ok: boolean;
+				error?: { code?: string };
+			};
+			expect(response.ok).toBe(true);
+		} finally {
+			send.mockRestore();
+		}
+	},
+	30_000,
+);
+
+isolatedSdkHostTest("fatal progress delivery failure still abandons the prompt", async () => {
+	const { handlers, sessionContext, frames, correlation } = await activePrompt("fatal-progress");
+	const original = NotificationServer.prototype.sendTo;
+	let rejected = false;
+	const send = spyOn(NotificationServer.prototype, "sendTo").mockImplementation(function (
+		this: NotificationServer,
+		id,
+		json,
+	) {
+		const frame = JSON.parse(json) as { type?: string; kind?: string };
+		if (!rejected && frame.type === "event" && frame.kind === "message_update") {
+			rejected = true;
+			throw new Error("sdk directed delivery rejected: cause=connection_closed frameBytes=200");
+		}
+		return original.call(this, id, json);
+	});
+	try {
+		await handlers.get("message_update")?.(
+			{
+				type: "message_update",
+				message: { role: "assistant", content: [] },
+				assistantMessageEvent: { type: "text_delta", delta: "x" },
+			},
+			sessionContext,
+		);
+		await handlers.get("agent_end")?.({ type: "agent_end", stopReason: "completed", messages: [] }, sessionContext);
+		await Bun.sleep(100);
+		expect(rejected).toBe(true);
+		expect(correlatedTerminal(frames, correlation)).toBeUndefined();
+	} finally {
+		send.mockRestore();
+	}
+});
