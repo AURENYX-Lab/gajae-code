@@ -809,7 +809,7 @@ describe.skipIf(process.platform !== "linux")("file lock committed publication r
 	});
 });
 
-describe("file lock abandoned removal recovery", () => {
+describe.skipIf(process.platform === "win32")("file lock abandoned removal recovery", () => {
 	test("adopts an abandoned parseable removal transition and acquires", async () => {
 		const { file, lock } = await makeFixture();
 		const transition = `${lock}.removing`;
