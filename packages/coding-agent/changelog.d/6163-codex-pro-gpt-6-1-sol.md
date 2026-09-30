@@ -1,0 +1,3 @@
+### Changed
+
+- The built-in `codex-pro` preset now uses GPT-6.1 Sol wherever it previously used GPT-6 Sol: `default` (`gpt-6.1-sol:medium`), `planner` (`:high`), `critic` (`:max`) and `architect` (`:xhigh`). Reasoning efforts are unchanged and `executor` stays on `gpt-5.6-terra:medium`, so this is a like-for-like model swap with no tier change. The all-6.1 variant with GPT-6 Astra as architect remains available as `codex-sol61`. The `fable-opus-codex` combo intentionally keeps its GPT-6 Sol architect. Installs that load a signed preset registry revision defining `codex-pro` keep that registry binding (built-in, then registry, then user `models.yml`) until a registry revision carries this change (#6163).
