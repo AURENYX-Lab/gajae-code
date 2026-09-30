@@ -21,7 +21,7 @@ export async function runUpdateRecoveryCommand(
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
 		process.stderr.write(
-			`Post-update recovery failed: ${reason}. Manually run 'gjc daemon stop telegram --force' and then 'gjc daemon reload telegram'.\n`,
+			`Post-update recovery failed: ${reason}. For each configured notification daemon (telegram, discord, or slack), manually run 'gjc daemon stop <kind> --force' and then 'gjc daemon reload <kind>', then run 'gjc notify recovery'.\n`,
 		);
 		process.exitCode = 1;
 	}

@@ -1019,8 +1019,35 @@ describe("update-cli managed notification recovery", () => {
 			);
 			expect(process.exitCode).toBe(1);
 			expect(stderr.join("")).toContain("Post-update recovery failed");
-			expect(stderr.join("")).toContain("gjc daemon stop telegram --force");
-			expect(stderr.join("")).toContain("gjc daemon reload telegram");
+			expect(stderr.join("")).toContain("Post-update daemon stop --force failed: stop failed");
+			expect(stderr.join("")).toContain("gjc daemon stop <kind> --force");
+			expect(stderr.join("")).toContain("gjc daemon reload <kind>");
+			expect(stderr.join("")).toContain("gjc notify recovery");
+			expect(stderr.join("")).not.toContain("gjc daemon stop telegram");
+		} finally {
+			write.mockRestore();
+			process.exitCode = priorExitCode ?? 0;
+		}
+	});
+
+	it("gives provider-neutral recovery guidance when a non-Telegram stage fails", async () => {
+		const stderr: string[] = [];
+		const write = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+			stderr.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+			return true;
+		});
+		const priorExitCode = process.exitCode;
+		process.exitCode = 0;
+		try {
+			await runUpdateRecoveryCommand(async () => {
+				throw new Error("Post-update notify recovery failed: slack socket refused");
+			});
+			expect(process.exitCode).toBe(1);
+			const out = stderr.join("");
+			expect(out).toContain("slack socket refused");
+			expect(out).toContain("gjc notify recovery");
+			expect(out).not.toContain("gjc daemon stop telegram");
+			expect(out).not.toContain("gjc daemon reload telegram");
 		} finally {
 			write.mockRestore();
 			process.exitCode = priorExitCode ?? 0;
