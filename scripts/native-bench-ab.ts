@@ -47,7 +47,16 @@ export interface ParsedOptions {
 	rss: string[];
 }
 
-const SUITES: Record<string, { adapter: string; actualSuite: string; cases: string[] }> = {
+/**
+ * `defaultIterations` overrides DEFAULT_ITERATIONS for suites whose samples are
+ * expensive; an explicit `--iterations` still wins. Keep it at 20 or more:
+ * each block's p95 is `quantile(samples, 0.95)`, which degenerates to the
+ * block maximum below 20 samples and would weaken the p95 gate.
+ */
+const SUITES: Record<
+	string,
+	{ adapter: string; actualSuite: string; cases: string[]; support?: string[]; defaultIterations?: number }
+> = {
 	"edit-hotspots": { adapter: "packages/natives/bench/edit-hotspots.ts", actualSuite: "edit-hotspots", cases: ["H01", "H02", "H03", "H06"] },
 	grep: { adapter: "packages/natives/bench/grep.ts", actualSuite: "grep", cases: ["G01", "G02", "G03", "G04", "G05", "G06", "G07", "G08"] },
 	"natives-grep": { adapter: "packages/natives/bench/grep.ts", actualSuite: "grep", cases: ["G01", "G02", "G03", "G04", "G05", "G06", "G07", "G08"] },
@@ -61,10 +70,21 @@ const SUITES: Record<string, { adapter: string; actualSuite: string; cases: stri
 	"shell": { adapter: "packages/natives/bench/shell.ts", actualSuite: "shell", cases: ["S01"] },
 	"startup": { adapter: "packages/natives/bench/startup.ts", actualSuite: "startup", cases: ["S01", "S02", "S03"] },
 	"tools": { adapter: "packages/natives/bench/tools.ts", actualSuite: "tools", cases: ["F01", "W01"] },
-	"tools:ast_grep": { adapter: "packages/natives/bench/tools-ast-grep.ts", actualSuite: "tools:ast_grep", cases: ["A01"] },
+	"tools:ast_grep": { adapter: "packages/natives/bench/tools-ast-grep.ts", actualSuite: "tools:ast_grep", cases: ["A01", "A02"] },
 	"tools:bash": { adapter: "packages/natives/bench/tools-bash.ts", actualSuite: "tools:bash", cases: ["B01"] },
 	"tools:glob": { adapter: "packages/natives/bench/tools-glob.ts", actualSuite: "tools:glob", cases: ["G01"] },
 	"tui-input-write": { adapter: "packages/natives/bench/tui-input-write.ts", actualSuite: "tui-input-write", cases: ["I01"] },
+	"tty-write": { adapter: "packages/natives/bench/tty-write.ts", actualSuite: "tty-write", cases: ["W01", "W02"], support: ["packages/natives/bench/tty-write-child.ts"] },
+	pty: { adapter: "packages/natives/bench/pty.ts", actualSuite: "pty", cases: ["P01", "P02"] },
+	power: { adapter: "packages/natives/bench/power.ts", actualSuite: "power", cases: ["W01"] },
+	appearance: { adapter: "packages/natives/bench/appearance.ts", actualSuite: "appearance", cases: ["A01"] },
+	prof: { adapter: "packages/natives/bench/prof.ts", actualSuite: "prof", cases: ["R01", "R02"] },
+	iso: { adapter: "packages/natives/bench/iso.ts", actualSuite: "iso", cases: ["I01", "I02", "I03"] },
+	crash: { adapter: "packages/natives/bench/crash.ts", actualSuite: "crash", cases: ["C01", "C02"] },
+	// Each builtins sample loops the builtin 10,000 times (~0.3-0.55 s), so 200
+	// samples per case would blow the 10-minute adapter timeout and the job budget.
+	builtins: { adapter: "packages/natives/bench/builtins.ts", actualSuite: "builtins", cases: ["B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08"], defaultIterations: 20 },
+	clipboard: { adapter: "packages/natives/bench/clipboard.ts", actualSuite: "clipboard", cases: ["C01"] },
 	rss: { adapter: "", actualSuite: "rss", cases: [] },
 };
 
@@ -81,7 +101,7 @@ export function parseNativeBenchOptions(args: readonly string[]): ParsedOptions 
 	let calibrate = false;
 	let allowBaselineDrift = false;
 	let blocks = DEFAULT_BLOCKS;
-	let iterations = DEFAULT_ITERATIONS;
+	let iterations: number | undefined;
 	let rss: string[] = [];
 	for (let index = 0; index < args.length; index += 1) {
 		const arg = args[index];
@@ -109,6 +129,7 @@ export function parseNativeBenchOptions(args: readonly string[]): ParsedOptions 
 	if (!suite || !SUITES[suite]) throw new BenchError("InvalidSuite", `--suite must be one of: ${Object.keys(SUITES).join(", ")}`);
 	if (!base) throw new BenchError("MissingBase", "--base <git-ref> is required");
 	if (!Number.isInteger(blocks) || blocks < 1) throw new BenchError("InvalidBlocks", "--blocks must be a positive integer");
+	iterations ??= SUITES[suite].defaultIterations ?? DEFAULT_ITERATIONS;
 	if (!Number.isInteger(iterations) || iterations < 1) throw new BenchError("InvalidIterations", "--iterations must be a positive integer");
 	const invalidRss = rss.filter(id => !(RSS_SCENARIOS as readonly string[]).includes(id));
 	if (invalidRss.length) throw new BenchError("InvalidRssScenario", `unsupported RSS scenarios: ${invalidRss.join(", ")}`);
@@ -652,7 +673,7 @@ export async function runNativeBenchAb(repoRoot: string, options: ParsedOptions)
 		};
 	}
 	return withDetachedWorktree(repoRoot, baseSha, async baseRoot => {
-		const adapterDigest = await installHeadAdapter(repoRoot, baseRoot, config.adapter);
+		const adapterDigest = await installHeadAdapter(repoRoot, baseRoot, config.adapter, config.support);
 		return {
 			schema: BENCH_SCHEMA,
 			mode: "A/B",
@@ -675,10 +696,16 @@ export const AB_ADAPTER_SUPPORT = "packages/natives/bench/ab-adapter.ts";
  * implementation behind those entrypoints differs between sides. Returns the
  * digest of the installed bytes, adapter first.
  */
-export async function installHeadAdapter(headRoot: string, baseRoot: string, adapter: string): Promise<string> {
+export async function installHeadAdapter(
+	headRoot: string,
+	baseRoot: string,
+	adapter: string,
+	extraSupport: readonly string[] = [],
+): Promise<string> {
 	const hasher = new Bun.CryptoHasher("sha256");
 	const support = Bun.file(path.join(headRoot, AB_ADAPTER_SUPPORT));
-	const files = (await support.exists()) && adapter !== AB_ADAPTER_SUPPORT ? [adapter, AB_ADAPTER_SUPPORT] : [adapter];
+	const shared = (await support.exists()) && adapter !== AB_ADAPTER_SUPPORT ? [AB_ADAPTER_SUPPORT] : [];
+	const files = [adapter, ...shared, ...extraSupport];
 	for (const file of files) {
 		const bytes = await Bun.file(path.join(headRoot, file)).bytes();
 		await Bun.write(path.join(baseRoot, file), bytes);
