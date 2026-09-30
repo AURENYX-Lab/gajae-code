@@ -87,11 +87,11 @@ export const BUILTIN_MODEL_PROFILES: readonly ModelProfileDefinition[] = [
 		architect: "openai-codex/gpt-6-sol:high",
 	}),
 	profile("codex-pro", ["openai-codex"], {
-		default: "openai-codex/gpt-6-sol:medium",
-		executor: "openai-codex/gpt-5.6-terra:medium",
-		planner: "openai-codex/gpt-6-sol:high",
-		critic: "openai-codex/gpt-6-sol:max",
-		architect: "openai-codex/gpt-6-sol:xhigh",
+		default: "openai-codex/gpt-6.1-sol:medium",
+		executor: "openai-codex/gpt-6.1-sol:medium",
+		planner: "openai-codex/gpt-6.1-sol:high",
+		critic: "openai-codex/gpt-6.1-sol:xhigh",
+		architect: "openai-codex/gpt-6-astra:xhigh",
 	}),
 	profile("codex-sol61", ["openai-codex"], {
 		default: "openai-codex/gpt-6.1-sol:medium",

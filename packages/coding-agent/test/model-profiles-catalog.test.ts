@@ -55,11 +55,11 @@ const expectedProfiles: Array<{
 		name: "codex-pro",
 		requiredProviders: ["openai-codex"],
 		mapping: {
-			default: "openai-codex/gpt-6-sol:medium",
-			executor: "openai-codex/gpt-5.6-terra:medium",
-			planner: "openai-codex/gpt-6-sol:high",
-			critic: "openai-codex/gpt-6-sol:max",
-			architect: "openai-codex/gpt-6-sol:xhigh",
+			default: "openai-codex/gpt-6.1-sol:medium",
+			executor: "openai-codex/gpt-6.1-sol:medium",
+			planner: "openai-codex/gpt-6.1-sol:high",
+			critic: "openai-codex/gpt-6.1-sol:xhigh",
+			architect: "openai-codex/gpt-6-astra:xhigh",
 		},
 	},
 	{
@@ -1011,9 +1011,10 @@ describe("built-in model profile catalog", () => {
 		for (const role of ["default", "architect"] as const) {
 			expect(codexOpencodego[role]).toBe(medium[role]);
 		}
-		for (const role of ["executor", "architect"] as const) {
-			expect(fableOpusCodex[role]).toBe(pro[role]);
+		for (const role of ["executor"] as const) {
+			expect(fableOpusCodex[role]).toBe("openai-codex/gpt-5.6-terra:medium");
 		}
+		expect(fableOpusCodex.architect).toBe("openai-codex/gpt-6-sol:xhigh");
 		for (const role of ["default", "executor", "planner"] as const) {
 			expect(astraFable[role]).toBe(astraDefault[role]);
 		}
