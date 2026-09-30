@@ -1363,13 +1363,17 @@ test("Telegram control watcher aborts a blocked poll independently of the run lo
 					await new Promise<void>(resolve => {
 						if (options?.signal?.aborted) {
 							aborted = true;
-						resolve();
-						return;
-						}
-						options?.signal?.addEventListener("abort", () => {
-							aborted = true;
 							resolve();
-						}, { once: true });
+							return;
+						}
+						options?.signal?.addEventListener(
+							"abort",
+							() => {
+								aborted = true;
+								resolve();
+							},
+							{ once: true },
+						);
 					});
 					return { ok: true, result: [] };
 				}

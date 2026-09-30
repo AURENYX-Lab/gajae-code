@@ -637,7 +637,7 @@ describe("TelegramDaemonController.reload", () => {
 			}),
 			sleep: async ms => {
 				now += ms;
-				if (await readTelegramControlRequest(s) && now >= Date.now() + 20_000) alive.delete(999);
+				if ((await readTelegramControlRequest(s)) && now >= Date.now() + 20_000) alive.delete(999);
 			},
 		}).stop({ gracefulTimeoutMs: 1, force: true });
 		expect(result.ok).toBe(true);

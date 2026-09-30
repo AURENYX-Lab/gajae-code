@@ -667,7 +667,9 @@ export class TelegramDaemonController implements BuiltInDaemonController {
 		// dead pid, so stop succeeds and reload proceeds to spawn the replacement.
 
 		const cooperativeGraceMs =
-			signalResult === "hard_termination" ? Math.max(gracefulTimeoutMs, HARD_TERMINATION_GRACE_MS) : gracefulTimeoutMs;
+			signalResult === "hard_termination"
+				? Math.max(gracefulTimeoutMs, HARD_TERMINATION_GRACE_MS)
+				: gracefulTimeoutMs;
 		let dead = await this.waitForPidDeath(oldPid, cooperativeGraceMs);
 		if (!dead) {
 			// Old pid still alive after the cooperative SIGTERM. Inspect current ownership.
