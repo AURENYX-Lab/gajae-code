@@ -1,13 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { Effort } from "../src/model-thinking";
-import type { Model } from "../src/types";
+import type { Context, Model, SimpleStreamOptions } from "../src/types";
+import { streamSimple } from "../src/stream";
 
-// This test uses internal APIs to verify the fix for adaptive thinking max_tokens
-// The bug: anthropic-adaptive models with high/xhigh/max reasoning
-// request max_tokens = min(model.maxTokens, DEFAULT_REQUEST_MAX_TOKENS=32000)
-// But all 32K gets consumed by thinking, leaving no output tokens.
-// The fix: when reasoning is enabled with adaptive thinking,
-// increase cap to model.maxTokens to allow room for both thinking and output.
+// This test uses the public streamSimple API to verify the fix for adaptive thinking max_tokens.
+// The bug: anthropic-adaptive models with high/xhigh/max reasoning request max_tokens capped at
+// DEFAULT_REQUEST_MAX_TOKENS (32000). With adaptive thinking, this consumes all 32K for thinking,
+// leaving no tokens for output. The fix: when reasoning is enabled with adaptive thinking and no
+// explicit maxTokens is provided, increase to model.maxTokens to allow room for both thinking and output.
 
 describe("anthropic-adaptive thinking max_tokens for reasoning", () => {
 	const createAdaptiveModel = (maxTokens: number): Model<"anthropic-messages"> => ({
@@ -29,30 +29,69 @@ describe("anthropic-adaptive thinking max_tokens for reasoning", () => {
 		},
 	});
 
-	it("should NOT cap adaptive model maxTokens at 32000 when reasoning xhigh is enabled and no explicit maxTokens given", () => {
-		// This test documents the bug: currently, adaptive thinking models with xhigh reasoning
-		// will have maxTokens capped at 32000 (DEFAULT_REQUEST_MAX_TOKENS) in the wire request,
-		// causing all tokens to be consumed by thinking with no output.
-		// After the fix, maxTokens should be increased to allow room for output.
-		//
-		// The bug is in mapOptionsForApi at stream.ts ~1023 where anthropic-adaptive reasoning
-		// doesn't adjust maxTokens like budget-based thinking does at ~1099.
-		//
-		// Since we can't easily access mapOptionsForApi without integration testing,
-		// this test documents the expected behavior after fixing mapOptionsForApi.
-		// After the fix is applied:
-		// - models with thinking.mode === "anthropic-adaptive" AND reasoning enabled
-		// - should receive maxTokens > 32000 (when not explicitly set by caller)
-		// - should receive maxTokens <= model.maxTokens
-		// - should respect explicit caller maxTokens
-		//
-		// This test will be updated to use a real integration with stream() or
-		// by exposing the mapOptionsForApi logic for testing.
-		// For now, it documents the requirement.
+	function createContext(): Context {
+		return {
+			messages: [{ role: "user", content: "test", timestamp: Date.now() }],
+		};
+	}
 
+	it("should raise adaptive model maxTokens above 32000 when reasoning is enabled and no explicit maxTokens given", async () => {
+		// When caller does not explicitly specify maxTokens (undefined),
+		// and the model's maxTokens exceeds DEFAULT_REQUEST_MAX_TOKENS (32000),
+		// the adaptive thinking guard should increase wire max_tokens to model.maxTokens.
 		const model = createAdaptiveModel(128000);
-		expect(model.thinking?.mode).toBe("anthropic-adaptive");
-		expect(model.maxTokens).toBe(128000);
+		const payloadPromise = Promise.withResolvers<Record<string, unknown>>();
+		const controller = new AbortController();
+		controller.abort(); // Abort immediately to skip actual API call
+
+		streamSimple(model, createContext(), {
+			reasoning: Effort.XHigh,
+			apiKey: "test-key",
+			signal: controller.signal,
+			onPayload: (payload) => payloadPromise.resolve(payload as Record<string, unknown>),
+		});
+
+		const payload = await payloadPromise.promise;
+		expect(payload.max_tokens).toBe(128000);
+	});
+
+	it("should treat maxTokens=0 as unspecified and raise to model.maxTokens", async () => {
+		// Per docs/models.md, a request value of 0 is treated as unspecified.
+		// The adaptive guard should handle this case same as undefined.
+		const model = createAdaptiveModel(128000);
+		const payloadPromise = Promise.withResolvers<Record<string, unknown>>();
+		const controller = new AbortController();
+		controller.abort(); // Abort immediately to skip actual API call
+
+		streamSimple(model, createContext(), {
+			reasoning: Effort.XHigh,
+			maxTokens: 0,
+			apiKey: "test-key",
+			signal: controller.signal,
+			onPayload: (payload) => payloadPromise.resolve(payload as Record<string, unknown>),
+		});
+
+		const payload = await payloadPromise.promise;
+		expect(payload.max_tokens).toBe(128000);
+	});
+
+	it("should respect explicit positive maxTokens without override", async () => {
+		// When caller explicitly sets a positive maxTokens, preserve it.
+		const model = createAdaptiveModel(128000);
+		const payloadPromise = Promise.withResolvers<Record<string, unknown>>();
+		const controller = new AbortController();
+		controller.abort(); // Abort immediately to skip actual API call
+
+		streamSimple(model, createContext(), {
+			reasoning: Effort.XHigh,
+			maxTokens: 16000,
+			apiKey: "test-key",
+			signal: controller.signal,
+			onPayload: (payload) => payloadPromise.resolve(payload as Record<string, unknown>),
+		});
+
+		const payload = await payloadPromise.promise;
+		expect(payload.max_tokens).toBe(16000);
 	});
 
 	it("should maintain model catalog data for anthropic-adaptive models", () => {
