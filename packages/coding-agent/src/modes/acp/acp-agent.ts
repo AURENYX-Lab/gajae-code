@@ -250,8 +250,12 @@ type PromptPhaseOwner = PromptWaiter | "background" | undefined;
 type BrokerConnection = { adapter: AcpSdkAdapter; client: SdkClient };
 type PendingAttachment = { epoch: number; task: Promise<void> };
 
+type PromptAdmissionSettlement = { kind: "cancelled" } | { kind: "rejected"; error: AcpSdkAdapterError };
 type PromptAdmissionReservation = {
 	cancelled?: boolean;
+	settlement?: PromptAdmissionSettlement;
+	wake: () => void;
+	woken: Promise<void>;
 };
 
 type SessionRecord = {
@@ -2300,16 +2304,21 @@ export class AcpAgent implements Agent {
 				activePrompt.cancelAcknowledged === true;
 			if (!cancellationPending || record.pendingPromptAdmission)
 				throw new AcpSdkAdapterError("conflict", "ACP session already has an active prompt.");
-			admissionReservation = {};
+			const { promise: woken, resolve: wake } = Promise.withResolvers<void>();
+			admissionReservation = { wake, woken };
 			record.pendingPromptAdmission = admissionReservation;
 		}
 		try {
 			if (admissionReservation) {
-				const settled = await this.#waitForPromptSettlement(activePrompt as PromptWaiter);
+				const settled = await this.#waitForPromptSettlement(activePrompt as PromptWaiter, admissionReservation);
+				const settlement = admissionReservation.settlement;
+				if (settlement?.kind === "rejected") throw settlement.error;
+				if (settlement?.kind === "cancelled" || admissionReservation.cancelled) return { stopReason: "cancelled" };
 				if (!settled) throw new AcpSdkAdapterError("conflict", "ACP session already has an active prompt.");
-				if (admissionReservation.cancelled) return { stopReason: "cancelled" };
 				await this.#drainPromptPublicationTails(params.sessionId);
-				if (admissionReservation.cancelled) return { stopReason: "cancelled" };
+				if (admissionReservation.settlement?.kind === "rejected") throw admissionReservation.settlement.error;
+				if (admissionReservation.settlement?.kind === "cancelled" || admissionReservation.cancelled)
+					return { stopReason: "cancelled" };
 			}
 			return await this.#submitPromptCore(params, echoUserMessage, retryReservation, admissionReservation);
 		} finally {
@@ -2317,13 +2326,20 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #waitForPromptSettlement(waiter: PromptWaiter): Promise<boolean> {
+	async #waitForPromptSettlement(
+		waiter: PromptWaiter,
+		admissionReservation: PromptAdmissionReservation,
+	): Promise<boolean> {
 		let cancelTimer: (() => void) | undefined;
 		const timeout = new Promise<boolean>(resolve => {
 			cancelTimer = this.#promptWatchdogClock.schedule(() => resolve(false), ACP_BUSY_SETTLE_WAIT_MS);
 		});
 		try {
-			return await Promise.race([waiter.settlement.then(() => true), timeout]);
+			return await Promise.race([
+				waiter.settlement.then(() => true),
+				timeout,
+				admissionReservation.woken.then(() => true),
+			]);
 		} finally {
 			cancelTimer?.();
 		}
@@ -2335,9 +2351,12 @@ export class AcpAgent implements Agent {
 		retryReservation?: FirstPromptRetryReservation,
 		admissionReservation?: PromptAdmissionReservation,
 	): Promise<PromptResponse> {
+		const admissionSettlement = admissionReservation?.settlement;
+		if (admissionSettlement?.kind === "rejected") throw admissionSettlement.error;
+		if (admissionSettlement?.kind === "cancelled" || admissionReservation?.cancelled)
+			return { stopReason: "cancelled" };
 		const record = this.#sessions.get(params.sessionId);
 		if (!record) throw new AcpSdkAdapterError("not_found", `Unknown session, not found: ${params.sessionId}`);
-		if (admissionReservation?.cancelled) return { stopReason: "cancelled" };
 		// A first-turn retry holds the session across its backoff gap. Any prompt that is not the
 		// retry owner is rejected here, before any state mutation or dispatch, so it cannot steal
 		// the first turn while the authorized retry is still pending (review P1, issue #5574).
@@ -2570,7 +2589,8 @@ export class AcpAgent implements Agent {
 						waiter.cancelBeforeAdmission
 					)
 						throw error;
-					await this.#waitForSessionIdle(record);
+					const ready = await this.#waitForSessionIdle(record);
+					if (!ready) throw error;
 					if (
 						record.activePrompt !== waiter ||
 						waiter.settled ||
@@ -2877,11 +2897,7 @@ export class AcpAgent implements Agent {
 		// Record the client's intent before awaiting the SDK so a prompt that rejects
 		// mid-cancel (e.g. preflight `busy`) can still settle as `cancelled`.
 		record.cancelRequested = true;
-		if (record.pendingPromptAdmission) {
-			record.pendingPromptAdmission.cancelled = true;
-			for (const resolve of record.idleWaiters) resolve();
-			record.idleWaiters.clear();
-		}
+		this.#settlePendingPromptAdmission(record, { kind: "cancelled" });
 		// C04 terminal abort: an external client cancel stops the current turn
 		// (`scope:"turn"`, the default, matching the SDK `turn.abort` default and
 		// other ACP clients' cancel behavior). A client that also wants exact owned
@@ -2937,6 +2953,7 @@ export class AcpAgent implements Agent {
 			if (waiter) {
 				waiter.cancelAcknowledged = true;
 			}
+			this.#settlePendingPromptAdmission(record, { kind: "cancelled" });
 			if (waiter && record.activePrompt !== waiter) {
 				waiter.cancelAttemptResolve?.(true);
 				return;
@@ -3050,6 +3067,16 @@ export class AcpAgent implements Agent {
 				}
 			}
 		}
+	}
+
+	#settlePendingPromptAdmission(record: SessionRecord, settlement: PromptAdmissionSettlement): void {
+		const reservation = record.pendingPromptAdmission;
+		if (!reservation) return;
+		reservation.settlement ??= settlement;
+		if (settlement.kind === "cancelled") reservation.cancelled = true;
+		reservation.wake();
+		for (const resolve of record.idleWaiters) resolve();
+		record.idleWaiters.clear();
 	}
 
 	/**
@@ -4116,6 +4143,17 @@ export class AcpAgent implements Agent {
 							};
 					record.pendingFirstPromptRetry = undefined;
 				}
+				const admissionReservation = record.pendingPromptAdmission;
+				if (admissionReservation) {
+					admissionReservation.settlement ??= voluntary
+						? { kind: "cancelled" }
+						: {
+								kind: "rejected",
+								error: new AcpSdkAdapterError("connection_closed", `ACP session was ${reason}.`),
+							};
+					admissionReservation.wake();
+					record.pendingPromptAdmission = undefined;
+				}
 			}
 
 			const failures: unknown[] = [];
@@ -4168,6 +4206,11 @@ export class AcpAgent implements Agent {
 			clearPromptWatchdog(waiter);
 			this.#rememberSettledPromptCorrelation(id, record, waiter.correlation);
 			this.#fenceRetiredPromptAcknowledgement(id, waiter);
+		}
+		if (record.pendingPromptAdmission) {
+			record.pendingPromptAdmission.settlement = { kind: "rejected", error };
+			record.pendingPromptAdmission.wake();
+			record.pendingPromptAdmission = undefined;
 		}
 		waiter?.reject(error);
 		try {
