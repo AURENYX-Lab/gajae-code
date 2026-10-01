@@ -228,7 +228,11 @@ function codexOutputHasMeaningfulProgress(output: AssistantMessage): boolean {
 		block =>
 			(block.type === "text" && block.text.length > 0) ||
 			(block.type === "thinking" && block.thinking.length > 0) ||
-			(block.type === "toolCall" && Object.keys(block.arguments).length > 0),
+			(block.type === "toolCall" &&
+				typeof block.arguments === "object" &&
+				block.arguments !== null &&
+				!Array.isArray(block.arguments) &&
+				Object.keys(block.arguments).length > 0),
 	);
 }
 
