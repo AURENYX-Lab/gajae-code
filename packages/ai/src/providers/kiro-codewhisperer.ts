@@ -224,14 +224,18 @@ export const streamKiroCodeWhisperer: StreamFunction<"kiro-codewhisperer-stream"
 				"X-Amz-Target": "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
 			};
 
-			// Merge user-provided headers
+			// Merge user-provided headers (case-insensitively)
+			const headersList = new Headers(requestHeaders);
 			if (options.headers) {
-				Object.assign(requestHeaders, options.headers);
+				const userHeaders = new Headers(options.headers);
+				userHeaders.forEach((value, key) => {
+					headersList.set(key, value);
+				});
 			}
 
 			const response = await fetch(url, {
 				method: "POST",
-				headers: requestHeaders,
+				headers: headersList,
 				body,
 				redirect: "error",
 				signal: options.signal,
@@ -597,9 +601,22 @@ function handleToolUseEvent(
 	stream: AssistantMessageEventStream,
 	accumulator: Map<string, { name: string; input: string }>,
 ): void {
-	const toolUseId = ev.toolUseId ?? "";
 	const name = ev.name ?? "";
 	const input = ev.input ?? "";
+
+	// Determine the tool ID: use provided ID, or find the currently active tool call
+	let toolUseId = ev.toolUseId;
+	if (!toolUseId) {
+		// ID-less fragment: associate with the currently active tool call
+		// Find the last tool call being accumulated (the most recently started tool)
+		const keys = Array.from(accumulator.keys());
+		if (keys.length > 0) {
+			toolUseId = keys[keys.length - 1];
+		} else {
+			// No active tool calls; create a placeholder entry (should rarely happen)
+			toolUseId = "";
+		}
+	}
 
 	// Accumulate input fragments per toolUseId
 	let accumulated = accumulator.get(toolUseId);
@@ -609,13 +626,18 @@ function handleToolUseEvent(
 	}
 	accumulated.input += input;
 
+	// Update name if provided and not yet set
+	if (name && !accumulated.name) {
+		accumulated.name = name;
+	}
+
 	// Emit toolcall_end only when we have a stop signal
 	if (ev.stop) {
 		const inputStr = accumulated.input;
 		const toolCall: ToolCall = {
 			type: "toolCall",
 			id: toolUseId,
-			name: name || accumulated.name,
+			name: accumulated.name,
 			arguments: safeParseJson(inputStr) as Record<string, any>,
 		};
 		captureUnicodeEscapeEvidence(toolCall, inputStr);

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import { crc32 } from "../src/providers/aws-eventstream";
 import { streamKiroCodeWhisperer } from "../src/providers/kiro-codewhisperer";
 import type { Context, Model } from "../src/types";
@@ -50,60 +50,73 @@ function encodeFrame(headers: Record<string, string>, payload: Uint8Array): Uint
 // Mock fetch to capture request and serve responses
 let capturedRequest: { headers: Record<string, string>; body: string } | null = null;
 
-global.fetch = async (url: string, init?: RequestInit) => {
-	// Capture request
-	const headers: Record<string, string> = {};
-	const headerObj = init?.headers;
-	if (headerObj instanceof Headers) {
-		headerObj.forEach((v, k) => {
-			headers[k.toLowerCase()] = v;
-		});
-	} else if (Array.isArray(headerObj)) {
-		headerObj.forEach(([k, v]) => {
-			headers[k.toLowerCase()] = v;
-		});
-	} else if (typeof headerObj === "object" && headerObj !== null) {
-		Object.entries(headerObj).forEach(([k, v]) => {
-			headers[k.toLowerCase()] = v as string;
-		});
-	}
+function createMockFetch() {
+	return async (_url: string, init?: RequestInit) => {
+		// Capture request
+		const headers: Record<string, string> = {};
+		const headerObj = init?.headers;
+		if (headerObj instanceof Headers) {
+			headerObj.forEach((v, k) => {
+				headers[k.toLowerCase()] = v;
+			});
+		} else if (Array.isArray(headerObj)) {
+			headerObj.forEach(([k, v]) => {
+				headers[k.toLowerCase()] = v;
+			});
+		} else if (typeof headerObj === "object" && headerObj !== null) {
+			Object.entries(headerObj).forEach(([k, v]) => {
+				headers[k.toLowerCase()] = v as string;
+			});
+		}
 
-	const body = init?.body ? new TextDecoder().decode(init.body as Uint8Array) : "";
-	capturedRequest = { headers, body };
+		const body = init?.body ? new TextDecoder().decode(init.body as Uint8Array) : "";
+		capturedRequest = { headers, body };
 
-	// Return mock response
-	const frame = encodeFrame(
-		{ ":message-type": "event", ":event-type": "messageMetadataEvent" },
-		new TextEncoder().encode("{}"),
-	);
+		// Return mock response
+		const frame = encodeFrame(
+			{ ":message-type": "event", ":event-type": "messageMetadataEvent" },
+			new TextEncoder().encode("{}"),
+		);
 
-	return new Response(
-		new ReadableStream({
-			start(controller) {
-				controller.enqueue(frame);
-				controller.close();
+		return new Response(
+			new ReadableStream({
+				start(controller) {
+					controller.enqueue(frame);
+					controller.close();
+				},
+			}),
+			{
+				status: 200,
+				headers: { "content-type": "application/vnd.amazon.eventstream" },
 			},
-		}),
-		{
-			status: 200,
-			headers: { "content-type": "application/vnd.amazon.eventstream" },
-		},
-	);
-};
+		);
+	};
+}
+
+const mockFetch = vi.spyOn(globalThis, "fetch" as any).mockImplementation(createMockFetch());
+
+afterEach(() => {
+	mockFetch.mockClear();
+});
 
 const mockModel: Model<"kiro-codewhisperer-stream"> = {
 	id: "test-model",
-	provider: "kiro-codewhisperer-stream",
+	name: "Test Model",
+	api: "kiro-codewhisperer-stream" as const,
+	provider: "kiro" as const,
+	baseUrl: "",
+	reasoning: false,
+	input: ["text"],
+	output: ["text"],
 	contextWindow: 128000,
 	maxTokens: 4096,
-	cost: { input: 0.001, output: 0.002 },
-	reasoning: "none",
+	cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0 },
 };
 
 describe("kiro-codewhisperer wire protocol", () => {
 	test("sends correct x-amz-target header (not amzn-X-amz-target)", async () => {
 		const context: Context = {
-			messages: [{ role: "user", content: "hello" }],
+			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
 		};
 
 		const stream = streamKiroCodeWhisperer(mockModel, context, {
@@ -124,7 +137,7 @@ describe("kiro-codewhisperer wire protocol", () => {
 
 	test("sends application/x-amz-json-1.0 content-type (not application/json)", async () => {
 		const context: Context = {
-			messages: [{ role: "user", content: "hello" }],
+			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
 		};
 
 		const stream = streamKiroCodeWhisperer(mockModel, context, {
@@ -142,7 +155,7 @@ describe("kiro-codewhisperer wire protocol", () => {
 
 	test("does not send x-amzn-codewhisperer-proflearn header", async () => {
 		const context: Context = {
-			messages: [{ role: "user", content: "hello" }],
+			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
 		};
 
 		const stream = streamKiroCodeWhisperer(mockModel, context, {
@@ -161,7 +174,7 @@ describe("kiro-codewhisperer wire protocol", () => {
 
 	test("sends profileArn in request body next to conversationState", async () => {
 		const context: Context = {
-			messages: [{ role: "user", content: "hello" }],
+			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
 		};
 
 		const stream = streamKiroCodeWhisperer(mockModel, context, {
@@ -181,7 +194,7 @@ describe("kiro-codewhisperer wire protocol", () => {
 
 	test("sends tools as flat array in userInputMessageContext, not {tools:[...]}", async () => {
 		const context: Context = {
-			messages: [{ role: "user", content: "call a tool" }],
+			messages: [{ role: "user", content: "call a tool", timestamp: Date.now() }],
 			tools: [
 				{
 					name: "test-tool",
@@ -214,7 +227,7 @@ describe("kiro-codewhisperer wire protocol", () => {
 
 	test("handles flat event payloads {content} not {assistantResponseEvent:{content}}", async () => {
 		const context: Context = {
-			messages: [{ role: "user", content: "hello" }],
+			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
 		};
 
 		// Mock the response with flat payload
@@ -224,7 +237,7 @@ describe("kiro-codewhisperer wire protocol", () => {
 			new TextEncoder().encode(JSON.stringify(flatPayload)),
 		);
 
-		global.fetch = async () => {
+		mockFetch.mockImplementation(async () => {
 			return new Response(
 				new ReadableStream({
 					start(controller) {
@@ -237,7 +250,7 @@ describe("kiro-codewhisperer wire protocol", () => {
 					headers: { "content-type": "application/vnd.amazon.eventstream" },
 				},
 			);
-		};
+		});
 
 		const stream = streamKiroCodeWhisperer(mockModel, context, {
 			apiKey: "test-token",
@@ -256,7 +269,7 @@ describe("kiro-codewhisperer wire protocol", () => {
 
 	test("accumulates toolUseEvent input fragments per toolUseId", async () => {
 		const context: Context = {
-			messages: [{ role: "user", content: "hello" }],
+			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
 		};
 
 		// Tool input arrives in two frames, both with same toolUseId
@@ -284,7 +297,7 @@ describe("kiro-codewhisperer wire protocol", () => {
 			),
 		);
 
-		global.fetch = async () => {
+		mockFetch.mockImplementation(async () => {
 			return new Response(
 				new ReadableStream({
 					start(controller) {
@@ -298,7 +311,7 @@ describe("kiro-codewhisperer wire protocol", () => {
 					headers: { "content-type": "application/vnd.amazon.eventstream" },
 				},
 			);
-		};
+		});
 
 		const stream = streamKiroCodeWhisperer(mockModel, context, {
 			apiKey: "test-token",
@@ -315,5 +328,78 @@ describe("kiro-codewhisperer wire protocol", () => {
 		expect(toolcallEvent?.toolCall.id).toBe("tool-1");
 		expect(toolcallEvent?.toolCall.name).toBe("test-tool");
 		expect(toolcallEvent?.toolCall.arguments).toEqual({ key: "value" });
+	});
+
+	test("associates ID-less input fragments with the active tool call", async () => {
+		const context: Context = {
+			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+		};
+
+		// Tool input arrives in frames, last two without toolUseId
+		// Frame 1: toolUseId + partial input
+		const frame1 = encodeFrame(
+			{ ":message-type": "event", ":event-type": "toolUseEvent" },
+			new TextEncoder().encode(
+				JSON.stringify({
+					toolUseId: "tool-1",
+					name: "test-tool",
+					input: '{"data": "',
+				}),
+			),
+		);
+
+		// Frame 2: continuation without toolUseId
+		const frame2 = encodeFrame(
+			{ ":message-type": "event", ":event-type": "toolUseEvent" },
+			new TextEncoder().encode(
+				JSON.stringify({
+					input: "hello",
+				}),
+			),
+		);
+
+		// Frame 3: rest of input with stop:true, no toolUseId
+		const frame3 = encodeFrame(
+			{ ":message-type": "event", ":event-type": "toolUseEvent" },
+			new TextEncoder().encode(
+				JSON.stringify({
+					input: '"}',
+					stop: true,
+				}),
+			),
+		);
+
+		mockFetch.mockImplementation(async () => {
+			return new Response(
+				new ReadableStream({
+					start(controller) {
+						controller.enqueue(frame1);
+						controller.enqueue(frame2);
+						controller.enqueue(frame3);
+						controller.close();
+					},
+				}),
+				{
+					status: 200,
+					headers: { "content-type": "application/vnd.amazon.eventstream" },
+				},
+			);
+		});
+
+		const stream = streamKiroCodeWhisperer(mockModel, context, {
+			apiKey: "test-token",
+		});
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		// Should have one tool call with all input fragments accumulated
+		const toolcallEvent = events.find(e => e.type === "toolcall_end");
+		expect(toolcallEvent).toBeDefined();
+		expect(toolcallEvent?.toolCall.id).toBe("tool-1");
+		expect(toolcallEvent?.toolCall.name).toBe("test-tool");
+		expect(toolcallEvent?.toolCall.arguments).toEqual({ data: "hello" });
 	});
 });
