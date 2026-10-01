@@ -792,16 +792,28 @@ async fn wait_for_pipeline_processes_and_update_status(
 	let mut result = ExecutionResult::success();
 	let mut stopped_children = vec![];
 	let mut last_failure_exit_code: Option<ExecutionExitCode> = None;
+	let mut first_error: Option<error::Error> = None;
 
 	// Clear our the pipeline status so we can start filling it out.
 	shell.last_pipeline_statuses_mut().clear();
 
 	while let Some(child) = process_spawn_results.pop_front() {
 		ensure_not_cancelled(params)?;
-		let wait_result = if !stopped_children.is_empty() {
-			child.poll().await?
+		let wait_result = if first_error.is_some() {
+			child.wait_with_cancel(params.cancel_token()).await
+		} else if !stopped_children.is_empty() {
+			child.poll().await
 		} else {
-			child.wait_with_cancel(params.cancel_token()).await?
+			child.wait_with_cancel(params.cancel_token()).await
+		};
+		let wait_result = match wait_result {
+			Ok(wait_result) => wait_result,
+			Err(error) => {
+				if first_error.is_none() {
+					first_error = Some(error);
+				}
+				continue;
+			},
 		};
 
 		match wait_result {
@@ -827,6 +839,10 @@ async fn wait_for_pipeline_processes_and_update_status(
 				stopped_children.push(jobs::JobTask::External(child));
 			},
 		}
+	}
+
+	if let Some(error) = first_error {
+		return Err(error);
 	}
 
 	// Apply pipefail semantics if enabled

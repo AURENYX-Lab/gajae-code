@@ -297,6 +297,30 @@ describe("executeBash", () => {
 		expect(fs.readFileSync(marker, "utf8")).toBe("late");
 	}, 10_000);
 
+	it("joins remaining compound stages after a stage wait error", async () => {
+		if (process.platform === "win32") return;
+
+		const marker = path.join(tempDir, "marker");
+		const sessionKey = "pipeline-wait-error";
+		const result = await executeBash("{ { :; } <&99; } | { sleep 1; printf late > marker; }", {
+			cwd: tempDir,
+			timeout: 5000,
+			sessionKey,
+		});
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBeDefined();
+		expect(result.exitCode).not.toBe(0);
+		expect(fs.readFileSync(marker, "utf8")).toBe("late");
+
+		const reused = await executeBash("printf reuse-ok", {
+			cwd: tempDir,
+			timeout: 5000,
+			sessionKey,
+		});
+		expect(reused).toMatchObject({ exitCode: 0, cancelled: false });
+		expect(reused.output).toBe("reuse-ok");
+	}, 10_000);
+
 	it("preserves parent compound and lastpipe mutations across a compound pipeline", async () => {
 		if (process.platform === "win32") return;
 
