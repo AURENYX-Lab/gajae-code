@@ -4359,6 +4359,65 @@ describe("openai-codex streaming", () => {
 		}
 	});
 
+	it.each([
+		false,
+		true,
+	])("ends a silent todo_write start with complete arguments and zero usage (item finalized: %s)", async finalized => {
+		const args = {
+			ops: [{ op: "init", phases: [{ name: "Investigate", tasks: [{ content: "Inspect the stall" }] }] }],
+		};
+		class SilentTodoWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+			send(): void {
+				const item = {
+					type: "function_call",
+					id: "fc_todo",
+					call_id: "call_todo",
+					name: "todo_write",
+					arguments: JSON.stringify(args),
+				};
+				this.sendJson({ type: "response.output_item.added", item });
+				this.sendJson({ type: "response.function_call_arguments.delta", delta: item.arguments });
+				this.sendJson({ type: "response.function_call_arguments.done", arguments: item.arguments });
+				if (finalized) this.sendJson({ type: "response.output_item.done", item });
+				// No response.completed, usage, or subsequent transport activity.
+			}
+		}
+		global.WebSocket = SilentTodoWebSocket as unknown as typeof WebSocket;
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(new ReadableStream({ start() {} }), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+		);
+		try {
+			const result = await streamOpenAICodexResponses(
+				createCodexTestModel("https://chatgpt.com/backend-api"),
+				createCodexTestContext(),
+				{
+					apiKey: createCodexTestToken(),
+					sessionId: `silent-complete-todo-${finalized}`,
+					preferWebsockets: true,
+					streamIdleTimeoutMs: 25,
+					streamFirstEventTimeoutMs: 50,
+					providerSessionState: new Map<string, ProviderSessionState>(),
+				},
+			).result();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("idle timeout waiting for websocket");
+			expect(result.usage.totalTokens).toBe(0);
+			expect(result.content).toContainEqual(
+				expect.objectContaining({ type: "toolCall", name: "todo_write", arguments: args }),
+			);
+			expect(fetchSpy).not.toHaveBeenCalled();
+		} finally {
+			fetchSpy.mockRestore();
+		}
+	});
+
 	it("replays x-codex-turn-state on subsequent SSE requests", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

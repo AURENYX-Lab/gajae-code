@@ -226,7 +226,9 @@ function isCodexStreamProgressEvent(event: unknown): boolean {
 function codexOutputHasMeaningfulProgress(output: AssistantMessage): boolean {
 	return output.content.some(
 		block =>
-			(block.type === "text" && block.text.length > 0) || (block.type === "thinking" && block.thinking.length > 0),
+			(block.type === "text" && block.text.length > 0) ||
+			(block.type === "thinking" && block.thinking.length > 0) ||
+			(block.type === "toolCall" && Object.keys(block.arguments).length > 0),
 	);
 }
 
@@ -1738,12 +1740,9 @@ async function recoverCodexStreamError(
 	if (isCodexFirstEventTimeout(error)) return false;
 	// A post-progress idle timeout has already consumed the stream's silence budget.
 	// Replaying it over another transport can leave the turn silent for another full window.
+	// A tool-call start is progress even without reasoning, usage, or output_item.done.
 	if (
-		(codexOutputHasMeaningfulProgress(context.output) ||
-			(context.output.content.some(block => block.type === "thinking") &&
-				context.output.content.some(
-					block => block.type === "toolCall" && !runtime.finalizedToolCallIds.has(block.id),
-				))) &&
+		codexOutputHasMeaningfulProgress(context.output) &&
 		error instanceof Error &&
 		isCodexWebSocketTransportError(error) &&
 		error.message.includes("idle timeout waiting for websocket")
