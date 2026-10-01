@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, test, vi } from "bun:test";
 import { crc32 } from "../src/providers/aws-eventstream";
 import { streamKiroCodeWhisperer } from "../src/providers/kiro-codewhisperer";
 import type { Context, Model } from "../src/types";
@@ -97,6 +97,10 @@ const mockFetch = vi.spyOn(globalThis, "fetch" as any).mockImplementation(create
 
 afterEach(() => {
 	mockFetch.mockClear();
+});
+
+afterAll(() => {
+	mockFetch.mockRestore();
 });
 
 const mockModel: Model<"kiro-codewhisperer-stream"> = {
@@ -401,5 +405,94 @@ describe("kiro-codewhisperer wire protocol", () => {
 		expect(toolcallEvent?.toolCall.id).toBe("tool-1");
 		expect(toolcallEvent?.toolCall.name).toBe("test-tool");
 		expect(toolcallEvent?.toolCall.arguments).toEqual({ data: "hello" });
+	});
+
+	test("emits start exactly once for a tool-only multi-fragment stream", async () => {
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: "test",
+					timestamp: Date.now(),
+				},
+			],
+			tools: [
+				{
+					name: "test-tool",
+					description: "A test tool",
+					parameters: { type: "object" },
+				},
+			],
+		};
+
+		// Frame 1: tool use fragment (tool with ID, partial input, no stop)
+		const frame1 = encodeFrame(
+			{ ":message-type": "event", ":event-type": "toolUseEvent" },
+			new TextEncoder().encode(
+				JSON.stringify({
+					toolUseId: "tool-1",
+					name: "test-tool",
+					input: '{"data":"',
+				}),
+			),
+		);
+
+		// Frame 2: continuation without toolUseId (ID-less fragment)
+		const frame2 = encodeFrame(
+			{ ":message-type": "event", ":event-type": "toolUseEvent" },
+			new TextEncoder().encode(
+				JSON.stringify({
+					input: "world",
+				}),
+			),
+		);
+
+		// Frame 3: final fragment with stop
+		const frame3 = encodeFrame(
+			{ ":message-type": "event", ":event-type": "toolUseEvent" },
+			new TextEncoder().encode(
+				JSON.stringify({
+					input: '"}',
+					stop: true,
+				}),
+			),
+		);
+
+		mockFetch.mockImplementation(async () => {
+			return new Response(
+				new ReadableStream({
+					start(controller) {
+						controller.enqueue(frame1);
+						controller.enqueue(frame2);
+						controller.enqueue(frame3);
+						controller.close();
+					},
+				}),
+				{
+					status: 200,
+					headers: { "content-type": "application/vnd.amazon.eventstream" },
+				},
+			);
+		});
+
+		const stream = streamKiroCodeWhisperer(mockModel, context, {
+			apiKey: "test-token",
+		});
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		// Should have exactly one start event
+		const startEvents = events.filter(e => e.type === "start");
+		expect(startEvents).toHaveLength(1);
+
+		// Should have one tool call with all input fragments accumulated
+		const toolcallEvent = events.find(e => e.type === "toolcall_end");
+		expect(toolcallEvent).toBeDefined();
+		expect(toolcallEvent?.toolCall.id).toBe("tool-1");
+		expect(toolcallEvent?.toolCall.name).toBe("test-tool");
+		expect(toolcallEvent?.toolCall.arguments).toEqual({ data: "world" });
 	});
 });

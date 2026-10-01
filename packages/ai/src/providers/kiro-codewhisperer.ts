@@ -186,6 +186,7 @@ export const streamKiroCodeWhisperer: StreamFunction<"kiro-codewhisperer-stream"
 
 		const blocks = output.content as Block[];
 		const region = options.region ?? $env.KIRO_REGION ?? $env.AWS_REGION ?? $env.AWS_DEFAULT_REGION ?? DEFAULT_REGION;
+		let started = false; // Track whether start event has been emitted
 
 		try {
 			assertAwsRegionLabel(region);
@@ -299,8 +300,9 @@ export const streamKiroCodeWhisperer: StreamFunction<"kiro-codewhisperer-stream"
 						const content = ev.content;
 						if (content) {
 							if (!firstTokenTime) firstTokenTime = Date.now();
-							if (blocks.length === 0) {
+							if (!started) {
 								stream.push({ type: "start", partial: output });
+								started = true;
 							}
 							handleTextDelta(content, blocks, output, stream);
 						}
@@ -309,8 +311,9 @@ export const streamKiroCodeWhisperer: StreamFunction<"kiro-codewhisperer-stream"
 					case "toolUseEvent": {
 						const ev = payload as ToolUseEventPayload;
 						if (!firstTokenTime) firstTokenTime = Date.now();
-						if (blocks.length === 0) {
+						if (!started) {
 							stream.push({ type: "start", partial: output });
+							started = true;
 						}
 						handleToolUseEvent(ev, blocks, output, stream, toolInputAccumulator);
 						// Clear accumulator for completed tool
