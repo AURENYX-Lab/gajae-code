@@ -198,10 +198,10 @@ describe("executeBash", () => {
 	it("does not deadlock when a compound pipeline stage writes over a pipe buffer", async () => {
 		if (process.platform === "win32") return;
 
-		const result = await executeBash(
-			"{ head -c 70000 /dev/zero | tr '\\0' A; echo; } | grep ZZZ || true",
-			{ cwd: tempDir, timeout: 4000 },
-		);
+		const result = await executeBash("{ head -c 70000 /dev/zero | tr '\\0' A; echo; } | grep ZZZ || true", {
+			cwd: tempDir,
+			timeout: 4000,
+		});
 		expect(result.cancelled).toBe(false);
 		expect(result.exitCode).toBe(0);
 	}, 10_000);
@@ -209,10 +209,10 @@ describe("executeBash", () => {
 	it("does not deadlock when a for-loop pipeline stage writes over a pipe buffer", async () => {
 		if (process.platform === "win32") return;
 
-		const result = await executeBash(
-			"for i in $(seq 1 20000); do echo line$i; done | grep ZZZ || true",
-			{ cwd: tempDir, timeout: 4000 },
-		);
+		const result = await executeBash("for i in $(seq 1 20000); do echo line$i; done | grep ZZZ || true", {
+			cwd: tempDir,
+			timeout: 4000,
+		});
 		expect(result.cancelled).toBe(false);
 		expect(result.exitCode).toBe(0);
 	}, 10_000);
@@ -231,10 +231,10 @@ describe("executeBash", () => {
 	it("preserves byte counts through a compound pipeline stage", async () => {
 		if (process.platform === "win32") return;
 
-		const result = await executeBash(
-			"{ head -c 200000 /dev/zero | tr '\\0' A; echo; } | wc -c",
-			{ cwd: tempDir, timeout: 4000 },
-		);
+		const result = await executeBash("{ head -c 200000 /dev/zero | tr '\\0' A; echo; } | wc -c", {
+			cwd: tempDir,
+			timeout: 4000,
+		});
 		expect(result.cancelled).toBe(false);
 		expect(result.exitCode).toBe(0);
 		expect(result.output.trim()).toBe("200001");
@@ -281,6 +281,20 @@ describe("executeBash", () => {
 		expect(result.cancelled).toBe(false);
 		expect(result.exitCode).toBe(0);
 		expect(result.output.trim()).toBe("x");
+	}, 10_000);
+
+	it("joins started compound stages after a later launch error", async () => {
+		if (process.platform === "win32") return;
+
+		const marker = path.join(tempDir, "marker");
+		const result = await executeBash("{ sleep 1; printf late > marker; } | { :; } <&99", {
+			cwd: tempDir,
+			timeout: 5000,
+		});
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBeDefined();
+		expect(result.exitCode).not.toBe(0);
+		expect(fs.readFileSync(marker, "utf8")).toBe("late");
 	}, 10_000);
 
 	it("preserves parent compound and lastpipe mutations across a compound pipeline", async () => {
