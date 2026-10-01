@@ -83,7 +83,6 @@ import {
 	MANAGED_OWNER_INCARNATION_ENV,
 	MANAGED_OWNER_REDACT_COMMAND_ENV,
 	MANAGED_OWNER_RUN_ID_ENV,
-	MANAGED_OWNER_SESSION_ID_ENV,
 	MANAGED_OWNER_STATE_DIR_ENV,
 } from "../../src/gjc-runtime/managed-owner-supervisor";
 import { GJC_TMUX_OWNER_SERVER_KEY_ENV } from "../../src/gjc-runtime/session-state-sidecar";
@@ -107,7 +106,6 @@ const coordinatorOnlyEnvNames = [
 	MANAGED_OWNER_RUN_ID_ENV,
 	MANAGED_OWNER_INCARNATION_ENV,
 	MANAGED_OWNER_CHILD_TOKEN_ENV,
-	MANAGED_OWNER_SESSION_ID_ENV,
 	MANAGED_OWNER_COMMAND_ENV,
 	MANAGED_OWNER_REDACT_COMMAND_ENV,
 	// Managed-owner env family from managed-owner-admission.ts
@@ -158,7 +156,6 @@ describe("issue #5802: coordinator env isolation at the bash boundary", () => {
 				MANAGED_OWNER_RUN_ID_ENV,
 				MANAGED_OWNER_INCARNATION_ENV,
 				MANAGED_OWNER_CHILD_TOKEN_ENV,
-				MANAGED_OWNER_SESSION_ID_ENV,
 				MANAGED_OWNER_COMMAND_ENV,
 				MANAGED_OWNER_REDACT_COMMAND_ENV,
 				MANAGED_OWNER_PREDECESSOR_TOKEN_ENV,
