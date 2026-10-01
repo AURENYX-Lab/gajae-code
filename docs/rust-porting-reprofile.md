@@ -21,7 +21,7 @@ After #6125, a CI re-profile of that change (https://github.com/Yeachan-Heo/gaja
 | compaction | `serializeCanonicalJson` — `packages/coding-agent/src/config/model-preset-registry.ts:668` | 7.8% | Pure-TS fix, 32% faster with byte-identical output (#6127); Rust port rejected |
 | compaction | `getQualifiedNamespaceSuffixes` — `packages/coding-agent/src/config/model-equivalence.ts:364` | 5.2% | Rust port rejected (napi overhead per short-string candidate) |
 
-startup, session-load, session-save, tools and keystroke have no TypeScript function at ≥5%. Their top self time is runtime and native: module resolution, `spawnSync`, file I/O and the xterm test terminal.
+startup, session-save, tools and keystroke have no TypeScript function at ≥5%. Their top self time is runtime and native: module resolution, `spawnSync`, file I/O and the xterm test terminal. Session-load has two TypeScript functions over the threshold (see Critical paths below).
 
 ## Critical paths
 
@@ -31,4 +31,4 @@ startup, session-load, session-save, tools and keystroke have no TypeScript func
 | per token delta | no attributed samples in the window |
 | session-load | `openSync`, `entries`, `writeFileSync`, `materializeResidentValueSync` 10.8%, `measureJsonLikeBytes` 6.8% |
 
-None of the Phase 1a hand-port candidates (E-H*, E-M*, E-TUI-*) reaches 5% self time or leads a critical path in the re-profile. Each is recorded as `rejected` in `docs/rust-porting-inventory.md` with this report as the reason. The three functions that did cross the threshold are the rows E-P4-REGISTRY-SELECTOR, E-P4-CANONICAL-JSON and E-P4-NAMESPACE-SUFFIXES. None was hand-ported: in each case the cost is TypeScript work over JS objects or strings, where a napi boundary adds per-call overhead, so the adopted fixes are in TypeScript.
+None of the Phase 1a hand-port candidates (E-H*, E-M*, E-TUI-*) reaches 5% self time in any scenario or leads a critical path (except E-M01, where the per-token-delta window produced no attributed samples; see E-M01 note below). Each is recorded as `rejected` or `unconfirmed` in `docs/rust-porting-inventory.md`. The five functions that crossed 5% or showed significant critical-path presence are the rows E-P4-REGISTRY-SELECTOR, E-P4-CANONICAL-JSON, E-P4-NAMESPACE-SUFFIXES, E-P4-MATERIALIZE-RESIDENT, and E-P4-MEASURE-JSON-LIKE. None was hand-ported: in each case the cost is TypeScript work over JS objects or strings, where a napi boundary adds per-call overhead or the function is a utility that enables higher-level TypeScript optimizations.
