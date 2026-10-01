@@ -1742,7 +1742,11 @@ async function recoverCodexStreamError(
 	// Replaying it over another transport can leave the turn silent for another full window.
 	// A tool-call start is progress even without reasoning, usage, or output_item.done.
 	if (
-		codexOutputHasMeaningfulProgress(context.output) &&
+		(codexOutputHasMeaningfulProgress(context.output) ||
+			(context.output.content.some(block => block.type === "thinking") &&
+				context.output.content.some(
+					block => block.type === "toolCall" && !runtime.finalizedToolCallIds.has(block.id),
+				))) &&
 		error instanceof Error &&
 		isCodexWebSocketTransportError(error) &&
 		error.message.includes("idle timeout waiting for websocket")
