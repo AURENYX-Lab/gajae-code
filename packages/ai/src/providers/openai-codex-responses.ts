@@ -1940,13 +1940,14 @@ async function tryRecoverCodexPreviousResponseNotFound(
 		// validation fault: clearing session metadata and resending the identical
 		// body cannot fix it.
 		!runtime.sentPreviousResponseId ||
+		// Managed fallback forces streamMaxRetries to 0; this replay is exempt
+		// from that budget and bounded by previousResponseRecoveryAttempted.
 		runtime.previousResponseRecoveryAttempted ||
 		!websocketState ||
 		context.options?.disableProviderRetries ||
 		runtime.transport !== "websocket" ||
 		context.output.content.length > 0 ||
-		context.options?.signal?.aborted ||
-		runtime.providerRetryAttempt >= resolveRetryBudget(context.options?.streamMaxRetries, CODEX_MAX_RETRIES)
+		context.options?.signal?.aborted
 	) {
 		return false;
 	}

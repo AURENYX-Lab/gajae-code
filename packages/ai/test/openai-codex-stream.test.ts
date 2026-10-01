@@ -2200,7 +2200,10 @@ describe("openai-codex streaming", () => {
 		});
 	});
 
-	it("retries websocket continuations when previous_response_id expires with fallbackManaged enabled", async () => {
+	it.each([
+		undefined,
+		0,
+	])("retries websocket continuations when previous_response_id expires with fallbackManaged and streamMaxRetries=%s", async streamMaxRetries => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-fallback-managed-");
 		setAgentDir(tempDir.path());
 		const token = createCodexTestToken();
@@ -2261,7 +2264,7 @@ describe("openai-codex streaming", () => {
 		global.WebSocket = PreviousResponseMissingWebSocket as unknown as typeof WebSocket;
 		const model = createCodexTestModel("https://chatgpt.com/backend-api");
 		const providerSessionState = new Map<string, ProviderSessionState>();
-		const sessionId = "ws-expired-previous-response-fallback-managed-session";
+		const sessionId = `ws-expired-previous-response-fallback-managed-${streamMaxRetries}-session`;
 		const firstContext: Context = {
 			systemPrompt: ["You are a helpful assistant."],
 			messages: [{ role: "user", content: "First question", timestamp: Date.now() }],
@@ -2285,6 +2288,7 @@ describe("openai-codex streaming", () => {
 			apiKey: token,
 			sessionId,
 			fallbackManaged: true,
+			streamMaxRetries,
 			providerSessionState,
 		}).result();
 
@@ -2366,6 +2370,7 @@ describe("openai-codex streaming", () => {
 				apiKey: token,
 				sessionId,
 				fallbackManaged: true,
+				streamMaxRetries: 0,
 				disableProviderRetries: true,
 				providerSessionState,
 			},
