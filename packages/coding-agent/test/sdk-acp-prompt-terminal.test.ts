@@ -171,6 +171,7 @@ async function createFixture(
 	const terminalReservationEntered = Promise.withResolvers<void>();
 	const retryBackoffScheduled = Promise.withResolvers<void>();
 	const retryBackoffHandlers: Array<() => void> = [];
+	const deferredAbortAcknowledgements: Array<() => void> = [];
 
 	let promptWatchdogNow = 0;
 	const promptWatchdogHandlers: Array<{ due: number; handler: () => void; active: boolean }> = [];
@@ -187,7 +188,6 @@ async function createFixture(
 	let fixtureSdkIdle = true;
 	let deferredPromptAcknowledgement: (() => void) | undefined;
 	let rejectPromptAcknowledgement: (() => void) | undefined;
-	let deferredAbortAcknowledgement: (() => void) | undefined;
 	const activeCorrelation = (): { commandId: string; turnId: string } => {
 		const suffix = promptDeliveries > 1 && !options.reusePromptCorrelationOnSecond ? `-${promptDeliveries}` : "";
 		return { commandId: `${commandId}${suffix}`, turnId: `${turnId}${suffix}` };
@@ -521,7 +521,7 @@ async function createFixture(
 						);
 				} else if (frame.operation === "turn.abort" && options.deferAbortAcknowledgement) {
 					abortAcknowledgementEntered.resolve();
-					deferredAbortAcknowledgement = () => socket.send(response);
+					deferredAbortAcknowledgements.push(() => socket.send(response));
 				} else socket.send(response);
 			},
 		},
@@ -725,7 +725,9 @@ async function createFixture(
 		releaseAgentMessageUpdate: () => agentMessageUpdateRelease.resolve(),
 		releaseFailureDiagnostic: () => failureDiagnosticRelease.resolve(),
 		releasePromptAcknowledgement: () => deferredPromptAcknowledgement?.(),
-		releaseAbortAcknowledgement: () => deferredAbortAcknowledgement?.(),
+		releaseAbortAcknowledgement: () => {
+			for (const release of deferredAbortAcknowledgements.splice(0)) release();
+		},
 		rejectPromptAcknowledgement: () => rejectPromptAcknowledgement?.(),
 		sendTerminal,
 		rebindSession: async () => {
@@ -924,7 +926,34 @@ test("ACP accepts an immediate successor after cancellation while the SDK is win
 	}
 });
 
-test("ACP settles a successor as cancelled when cancel acknowledgement is delayed", async () => {
+test("ACP settles a successor as cancelled on its own delayed cancel", async () => {
+	const fixture = await createFixture({
+		cancelSettlementGraceMs: 60_000,
+		deferAbortAcknowledgement: true,
+		virtualPromptWatchdog: true,
+	});
+	try {
+		const first = prompt(fixture, "cancel before successor admission");
+		await bounded(fixture.promptDelivered, "first prompt delivery");
+		const firstCancellation = fixture.agent.cancel({ sessionId: fixture.sessionId });
+		await bounded(fixture.abortAcknowledgementEntered, "delayed abort acknowledgement");
+		const successor = prompt(fixture, "successor cancelled by owner");
+		const secondCancellation = fixture.agent.cancel({ sessionId: fixture.sessionId });
+		void firstCancellation.catch(() => undefined);
+		void secondCancellation.catch(() => undefined);
+		fixture.advancePromptWatchdog(5_001);
+		expect(await bounded(successor, "cancelled successor")).toEqual({ stopReason: "cancelled" });
+		expect(fixture.promptDeliveryCount()).toBe(1);
+		fixture.releaseAbortAcknowledgement();
+		fixture.sendStopped("cancelled");
+		expect(await bounded(first, "cancelled predecessor")).toEqual({ stopReason: "cancelled" });
+	} finally {
+		fixture.releaseAbortAcknowledgement();
+		fixture.dispose();
+	}
+});
+
+test("ACP does not let a predecessor abort acknowledgement cancel its retained successor", async () => {
 	const fixture = await createFixture({
 		cancelSettlementGraceMs: 60_000,
 		deferAbortAcknowledgement: true,
@@ -934,14 +963,16 @@ test("ACP settles a successor as cancelled when cancel acknowledgement is delaye
 		await bounded(fixture.promptDelivered, "first prompt delivery");
 		const cancellation = fixture.agent.cancel({ sessionId: fixture.sessionId });
 		await bounded(fixture.abortAcknowledgementEntered, "delayed abort acknowledgement");
-		const successor = prompt(fixture, "successor cancelled by owner");
+		const successor = prompt(fixture, "successor survives predecessor acknowledgement");
 		fixture.releaseAbortAcknowledgement();
 		await bounded(cancellation, "cancel acknowledgement");
-		expect(await bounded(successor, "cancelled successor")).toEqual({ stopReason: "cancelled" });
 		fixture.sendStopped("cancelled");
 		expect(await bounded(first, "cancelled predecessor")).toEqual({ stopReason: "cancelled" });
-		expect(fixture.promptDeliveryCount()).toBe(1);
+		await waitFor(() => fixture.promptDeliveryCount() === 2, "retained successor delivery");
+		fixture.sendStopped("end_turn");
+		expect(await bounded(successor, "successor settlement")).toEqual({ stopReason: "end_turn" });
 	} finally {
+		fixture.releaseAbortAcknowledgement();
 		fixture.dispose();
 	}
 });
@@ -2669,24 +2700,31 @@ test("ACP terminal processing preserves FIFO behind an earlier correlated update
 	}
 });
 
-test("ACP background publication failure remains fatal after a prompt generation starts", async () => {
+test("ACP frame publication failure rejects a retained successor through failSession", async () => {
 	const fixture = await createFixture({
 		blockInitialWorkingUpdate: true,
 		rejectBlockedWorkingUpdate: true,
-		observeTerminalReservation: true,
 	});
 	try {
 		fixture.sendTerminal({ type: "agent_start", sessionId: "prompt-terminal-session" });
 		await bounded(fixture.workingUpdateEntered, "entered background working publication");
-		const pending = prompt(fixture, "prompt during failed background publication");
-		void pending.catch(() => undefined);
+		const first = prompt(fixture, "prompt during failed background publication");
+		void first.catch(() => undefined);
 		await bounded(fixture.promptDelivered, "prompt delivery");
-		fixture.sendStopped("end_turn");
-		await bounded(fixture.terminalReservationEntered, "terminal reservation");
+		const cancellation = fixture.agent.cancel({ sessionId: fixture.sessionId });
+		void cancellation.catch(() => undefined);
+		const successor = prompt(fixture, "successor retained during failSession");
+		void successor.catch(() => undefined);
 		fixture.releaseWorkingUpdate();
-		await expect(bounded(pending, "background publication session failure")).rejects.toMatchObject({
+		await expect(bounded(first, "failed predecessor")).rejects.toMatchObject({
 			code: "frame_processing_failed",
 		});
+		await expect(bounded(successor, "background publication session failure")).rejects.toMatchObject({
+			code: "frame_processing_failed",
+		});
+		await cancellation.catch(() => undefined);
+		await Promise.resolve();
+		expect(fixture.promptDeliveryCount()).toBe(1);
 	} finally {
 		fixture.releaseWorkingUpdate();
 		fixture.dispose();
