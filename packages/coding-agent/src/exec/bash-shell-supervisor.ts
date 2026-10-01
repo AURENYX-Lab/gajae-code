@@ -128,7 +128,7 @@ async function reapLinuxAdoptedZombies(excludedPid: number | undefined): Promise
  * As the Linux child subreaper, the supervisor inherits orphaned descendants
  * and must reap them, but a full `/proc` sweep is expensive. Polling it on a
  * short interval kept every idle supervisor busy (issue #5972), so sweeps are
- * driven by SIGCHLD instead. At most one sweep runs at a time; a SIGCHLD that
+ * driven by SIGCHLD instead. At most one sweep runs at a time, and a SIGCHLD that
  * arrives mid-sweep schedules exactly one follow-up so a zombie created after
  * its `/proc` entry was passed is never missed. Returns the unsubscribe hook.
  */
@@ -141,26 +141,41 @@ export function startLinuxAdoptedZombieReaper(
 	let running = false;
 	let rerun = false;
 	let stopped = false;
+	let sweepPending = false;
 	const sweep = (): void => {
 		if (stopped) return;
 		if (running) {
 			rerun = true;
 			return;
 		}
+		if (sweepPending) return;
+		sweepPending = true;
 		running = true;
 		void reap(excludedPid)
 			.catch(() => undefined)
 			.finally(() => {
 				running = false;
-				if (!rerun) return;
+				sweepPending = false;
+				if (!rerun || stopped) return;
 				rerun = false;
-				sweep();
+				// Defer recursive call to avoid stack overflow
+				setImmediate(() => {
+					if (!stopped && !running) sweep();
+				});
 			});
 	};
-	signals.on("SIGCHLD", sweep);
+	try {
+		signals.on("SIGCHLD", sweep);
+	} catch {
+		// Signal handler installation may fail in some environments
+	}
 	return () => {
 		stopped = true;
-		signals.off("SIGCHLD", sweep);
+		try {
+			signals.off("SIGCHLD", sweep);
+		} catch {
+			// Signal handler removal may fail in some environments
+		}
 	};
 }
 
