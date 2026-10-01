@@ -252,6 +252,37 @@ describe("executeBash", () => {
 		expect(result.output.trim()).toBe("1 1 0");
 	}, 10_000);
 
+	it("does not deadlock with multiple blocking compound readers", async () => {
+		if (process.platform === "win32") return;
+
+		const trigger = path.join(tempDir, "trigger");
+		childProcess.execFileSync("mkfifo", [trigger]);
+		const stages = Array.from({ length: 32 }, (_, i) => `{ : > stage-${i}; read v; printf '%s\\n' "$v"; }`);
+		const started = new Set<string>();
+		let released = false;
+		const watcher = fs.watch(tempDir, (_event, filename) => {
+			if (filename?.startsWith("stage-")) {
+				started.add(filename);
+				if (!released && started.size === stages.length) {
+					released = true;
+					fs.writeFileSync(trigger, "x\n");
+				}
+			}
+		});
+		let result: BashResult;
+		try {
+			result = await executeBash(
+				`shopt -u lastpipe; { read v < trigger; printf '%s\\n' "$v"; } | ${stages.join(" | ")}`,
+				{ cwd: tempDir, timeout: 5000 },
+			);
+		} finally {
+			watcher.close();
+		}
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("x");
+	}, 10_000);
+
 	it("preserves parent compound and lastpipe mutations across a compound pipeline", async () => {
 		if (process.platform === "win32") return;
 

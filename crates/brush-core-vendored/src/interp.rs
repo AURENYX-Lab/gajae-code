@@ -874,8 +874,22 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 					commands::ShellForCommand::OwnedShell { target, .. } => {
 						let compound = compound.clone();
 						let mut shell = *target;
+						let handle = tokio::runtime::Handle::current();
+						let (sender, receiver) = tokio::sync::oneshot::channel();
+
+						// Compound stages may perform blocking reads. A dedicated thread
+						// keeps them off Tokio's bounded workers and ends with the stage.
+						std::thread::Builder::new()
+							.name("brush-pipeline-stage".into())
+							.spawn(move || {
+								let result = handle.block_on(compound.execute(&mut shell, &params));
+								let _ = sender.send(result);
+							})?;
+
 						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
-							compound.execute(&mut shell, &params).await
+							receiver
+								.await
+								.map_err(|_| std::io::Error::other("pipeline stage thread terminated"))?
 						})))
 					},
 					commands::ShellForCommand::ParentShell(shell) => {
@@ -885,19 +899,10 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 			},
 			Self::Function(func) => {
 				params.disable_command_output_marking();
-
-				match pipeline_context.shell {
-					commands::ShellForCommand::OwnedShell { target, .. } => {
-						let func = func.clone();
-						let mut shell = *target;
-						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
-							func.execute(&mut shell, &params).await
-						})))
-					},
-					commands::ShellForCommand::ParentShell(shell) => {
-						Ok(func.execute(shell, &params).await?.into())
-					},
-				}
+				Ok(func
+					.execute(&mut pipeline_context.shell, &params)
+					.await?
+					.into())
 			},
 			Self::ExtendedTest(e, redirects) => {
 				// Set up any additional redirects.
