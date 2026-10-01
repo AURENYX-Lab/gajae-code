@@ -3255,16 +3255,21 @@ describe.serial("AgentSession resilient retry", () => {
 		const { retryStartEvents, retryEndEvents } = track(session);
 
 		// Race the prompt against a timeout to verify it doesn't hang
-		const timeoutPromise = new Promise<never>((_, reject) =>
-			setTimeout(() => reject(new Error("Prompt timed out (possible hang)")), 5000),
-		);
-		await Promise.race([
-			(async () => {
-				await session.prompt("#6180 regression test");
-				await session.waitForIdle();
-			})(),
-			timeoutPromise,
-		]);
+		let watchdog: ReturnType<typeof setTimeout> | undefined;
+		const timeoutPromise = new Promise<never>((_, reject) => {
+			watchdog = setTimeout(() => reject(new Error("Prompt timed out (possible hang)")), 5000);
+		});
+		try {
+			await Promise.race([
+				(async () => {
+					await session.prompt("#6180 regression test");
+					await session.waitForIdle();
+				})(),
+				timeoutPromise,
+			]);
+		} finally {
+			clearTimeout(watchdog);
+		}
 
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryEndEvents).toHaveLength(1);
