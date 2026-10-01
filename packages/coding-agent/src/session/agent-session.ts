@@ -5078,6 +5078,7 @@ export class AgentSession {
 		if (lease) this.#deferredAgentEndLeases.delete(pending);
 		this.#startAgentEndPublication(pending, lease);
 	}
+
 	#startAgentEndPublication(pending: AgentSessionEvent, lease?: RunResourceProducerLease): void {
 		this.#agentEndPublicationInFlight++;
 		const pendingScope = (pending as AgentSessionEvent & { scope?: AttemptScopeRef }).scope as
@@ -22738,6 +22739,7 @@ export class AgentSession {
 				willRetry && !continuationSkipReason
 					? await this.#scheduleOverflowRetryContinuation(generation, options?.resourceRunId)
 					: false;
+
 			await this.#emitSessionEvent({
 				type: "auto_compaction_end",
 				action,
@@ -22746,6 +22748,7 @@ export class AgentSession {
 				willRetry: overflowContinuationScheduled,
 				continuationSkipReason,
 			});
+
 			if (autoCompactionSignal.aborted) return { kind: "aborted", source: "signal" };
 
 			if (willRetry) {
