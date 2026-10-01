@@ -352,6 +352,12 @@ export const streamKiroCodeWhisperer: StreamFunction<"kiro-codewhisperer-stream"
 
 			if (options.signal?.aborted) throw new Error("Request was aborted");
 
+			// Reject EOF while tool input is still being accumulated
+			if (toolInputAccumulator.size > 0) {
+				const unfinishedIds = Array.from(toolInputAccumulator.keys()).join(", ");
+				throw new Error(`Kiro CodeWhisperer stream ended with incomplete tool calls: ${unfinishedIds}`);
+			}
+
 			// Finalize blocks
 			for (const block of blocks) {
 				delete block.index;
