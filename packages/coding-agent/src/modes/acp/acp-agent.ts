@@ -2953,7 +2953,6 @@ export class AcpAgent implements Agent {
 			if (waiter) {
 				waiter.cancelAcknowledged = true;
 			}
-			this.#settlePendingPromptAdmission(record, { kind: "cancelled" });
 			if (waiter && record.activePrompt !== waiter) {
 				waiter.cancelAttemptResolve?.(true);
 				return;
