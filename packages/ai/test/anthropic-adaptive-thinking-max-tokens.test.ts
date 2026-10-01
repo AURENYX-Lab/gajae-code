@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { Effort } from "../src/model-thinking";
-import type { Context, Model, SimpleStreamOptions } from "../src/types";
 import { streamSimple } from "../src/stream";
+import type { Context, Model } from "../src/types";
 
 // This test uses the public streamSimple API to verify the fix for adaptive thinking max_tokens.
 // The bug: anthropic-adaptive models with high/xhigh/max reasoning request max_tokens capped at
@@ -48,7 +48,7 @@ describe("anthropic-adaptive thinking max_tokens for reasoning", () => {
 			reasoning: Effort.XHigh,
 			apiKey: "test-key",
 			signal: controller.signal,
-			onPayload: (payload) => payloadPromise.resolve(payload as Record<string, unknown>),
+			onPayload: payload => payloadPromise.resolve(payload as Record<string, unknown>),
 		});
 
 		const payload = await payloadPromise.promise;
@@ -68,7 +68,7 @@ describe("anthropic-adaptive thinking max_tokens for reasoning", () => {
 			maxTokens: 0,
 			apiKey: "test-key",
 			signal: controller.signal,
-			onPayload: (payload) => payloadPromise.resolve(payload as Record<string, unknown>),
+			onPayload: payload => payloadPromise.resolve(payload as Record<string, unknown>),
 		});
 
 		const payload = await payloadPromise.promise;
@@ -87,7 +87,7 @@ describe("anthropic-adaptive thinking max_tokens for reasoning", () => {
 			maxTokens: 16000,
 			apiKey: "test-key",
 			signal: controller.signal,
-			onPayload: (payload) => payloadPromise.resolve(payload as Record<string, unknown>),
+			onPayload: payload => payloadPromise.resolve(payload as Record<string, unknown>),
 		});
 
 		const payload = await payloadPromise.promise;
