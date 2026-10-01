@@ -66,6 +66,7 @@ type Fixture = {
 	releaseAgentMessageUpdate(): void;
 	releaseFailureDiagnostic(): void;
 	releasePromptAcknowledgement(): void;
+	rejectPromptAcknowledgement(): void;
 	sendTerminal(frame: Record<string, unknown>): void;
 	rebindSession(): Promise<void>;
 	mutationInputs: Record<string, unknown>[];
@@ -118,6 +119,7 @@ async function createFixture(
 		blockedAgentMessageText?: string;
 		deferSecondPromptAcknowledgement?: boolean;
 		deferFirstPromptAcknowledgement?: boolean;
+		deferredPromptAcknowledgementError?: { code: string; message: string };
 		reusePromptCorrelationOnSecond?: boolean;
 		failBrokerSessionClose?: boolean;
 		observeTerminalReservation?: boolean;
@@ -172,6 +174,7 @@ async function createFixture(
 	let promptSocket: TestSocket | undefined;
 	let promptDeliveries = 0;
 	let deferredPromptAcknowledgement: (() => void) | undefined;
+	let rejectPromptAcknowledgement: (() => void) | undefined;
 	const activeCorrelation = (): { commandId: string; turnId: string } => {
 		const suffix = promptDeliveries > 1 && !options.reusePromptCorrelationOnSecond ? `-${promptDeliveries}` : "";
 		return { commandId: `${commandId}${suffix}`, turnId: `${turnId}${suffix}` };
@@ -472,7 +475,7 @@ async function createFixture(
 					frame.operation === "turn.prompt" &&
 					((options.deferFirstPromptAcknowledgement && promptDeliveries === 1) ||
 						(options.deferSecondPromptAcknowledgement && promptDeliveries === 2))
-				)
+				) {
 					deferredPromptAcknowledgement = () =>
 						socket.send(
 							JSON.stringify({
@@ -482,7 +485,19 @@ async function createFixture(
 								result: { accepted: true, commandId },
 							}),
 						);
-				else socket.send(response);
+					rejectPromptAcknowledgement = () =>
+						socket.send(
+							JSON.stringify({
+								type: "control_response",
+								id: frame.id,
+								ok: false,
+								error: options.deferredPromptAcknowledgementError ?? {
+									code: "prompt_failed",
+									message: "Prompt submission failed.",
+								},
+							}),
+						);
+				} else socket.send(response);
 			},
 		},
 	});
@@ -680,6 +695,7 @@ async function createFixture(
 		releaseAgentMessageUpdate: () => agentMessageUpdateRelease.resolve(),
 		releaseFailureDiagnostic: () => failureDiagnosticRelease.resolve(),
 		releasePromptAcknowledgement: () => deferredPromptAcknowledgement?.(),
+		rejectPromptAcknowledgement: () => rejectPromptAcknowledgement?.(),
 		sendTerminal,
 		rebindSession: async () => {
 			reboundGeneration++;
@@ -842,6 +858,49 @@ test("ACP immediately rejects a successor while a non-cancelled prompt is active
 		expect(fixture.promptDeliveryCount()).toBe(1);
 		fixture.sendStopped("end_turn");
 		expect(await bounded(first, "running prompt settlement")).toEqual({ stopReason: "end_turn" });
+	} finally {
+		fixture.dispose();
+	}
+});
+
+test("ACP admits successor after failed cancellation and acknowledgement failure", async () => {
+	const fixture = await createFixture({
+		deferFirstPromptAcknowledgement: true,
+		deferredPromptAcknowledgementError: { code: "prompt_failed", message: "held prompt failed" },
+		virtualPromptWatchdog: true,
+		abortAcknowledgement: {
+			ok: true,
+			selection: "turn",
+			turn: "uncertain",
+			ownedWork: "uncertain",
+			automaticDelivery: "none",
+			resumeOnOwnedCompletion: false,
+			reason: "reservation_failed",
+		},
+	});
+	try {
+		const first = prompt(fixture, "acknowledgement failure A");
+		await bounded(fixture.promptDelivered, "prompt A delivery");
+		const cancellation = fixture.agent.cancel({ sessionId: fixture.sessionId });
+		const successor = prompt(fixture, "successor B");
+		await expect(bounded(cancellation, "failed cancellation")).rejects.toThrow(
+			"SDK did not acknowledge cancellation",
+		);
+		fixture.rejectPromptAcknowledgement();
+		await expect(bounded(first, "prompt A rejection")).rejects.toMatchObject({
+			code: "prompt_failed",
+			message: "held prompt failed",
+		});
+		await expect(
+			Promise.race([
+				waitFor(() => fixture.promptDeliveryCount() === 2, "successor B delivery"),
+				Bun.sleep(2_000).then(() => {
+					throw new Error("Successor B remained pinned with watchdog clock frozen.");
+				}),
+			]),
+		).resolves.toBeUndefined();
+		fixture.sendStopped("end_turn");
+		expect(await bounded(successor, "successor B settlement")).toEqual({ stopReason: "end_turn" });
 	} finally {
 		fixture.dispose();
 	}
