@@ -28,7 +28,7 @@ startup, session-save, tools and keystroke have no TypeScript function at ≥5%.
 | Window | Top self time |
 |---|---|
 | per keystroke | `match` (regex, runtime) 91–100%, `nativeKeys` 8.6% |
-| per token delta | no attributed samples in the window |
+| per token delta | `structuredClone` 6.8–7.0%, `managedChargeStringBytes` 3.1–3.7%, `stringify` 5.1–6.1% (profiled across all 19,719/26,292 per-token windows) |
 | session-load | `openSync`, `entries`, `writeFileSync`, `materializeResidentValueSync` 10.8%, `measureJsonLikeBytes` 6.8% |
 
 None of the Phase 1a hand-port candidates (E-H*, E-M*, E-TUI-*) reaches 5% self time in any scenario or leads a critical path (except E-M01, where the per-token-delta window produced no attributed samples; see E-M01 note below). Each is recorded as `rejected` or `unconfirmed` in `docs/rust-porting-inventory.md`. The five functions that crossed 5% or showed significant critical-path presence are the rows E-P4-REGISTRY-SELECTOR, E-P4-CANONICAL-JSON, E-P4-NAMESPACE-SUFFIXES, E-P4-MATERIALIZE-RESIDENT, and E-P4-MEASURE-JSON-LIKE. None was hand-ported: in each case the cost is TypeScript work over JS objects or strings, where a napi boundary adds per-call overhead or the function is a utility that enables higher-level TypeScript optimizations.
