@@ -250,6 +250,10 @@ type PromptPhaseOwner = PromptWaiter | "background" | undefined;
 type BrokerConnection = { adapter: AcpSdkAdapter; client: SdkClient };
 type PendingAttachment = { epoch: number; task: Promise<void> };
 
+type PromptAdmissionReservation = {
+	cancelled?: boolean;
+};
+
 type SessionRecord = {
 	cwd: string;
 	adapter: AcpSdkAdapter;
@@ -266,6 +270,8 @@ type SessionRecord = {
 	inboundSequence: number;
 	/** Updated at ingress so a prompt acknowledgement can distinguish a steer from a fresh turn. */
 	busy: boolean;
+	/** Last SDK activity state; ACP prompt settlement can precede the SDK's idle publication. */
+	sdkIdle: boolean;
 	backgroundBusy: boolean;
 	backgroundAnonymousCount: number;
 	backgroundCorrelations: PromptCorrelation[];
@@ -300,7 +306,7 @@ type SessionRecord = {
 	/** Owner token held across the first-turn retry backoff; a non-owner prompt is rejected as a conflict (review P1). */
 	pendingFirstPromptRetry?: FirstPromptRetryReservation;
 	/** Sole successor admitted while a cancelled prompt settles and publication tails drain. */
-	pendingPromptAdmission?: object;
+	pendingPromptAdmission?: PromptAdmissionReservation;
 };
 
 /**
@@ -2283,7 +2289,7 @@ export class AcpAgent implements Agent {
 	): Promise<PromptResponse> {
 		const record = this.#sessions.get(params.sessionId);
 		if (!record) throw new AcpSdkAdapterError("not_found", `Unknown session, not found: ${params.sessionId}`);
-		let admissionReservation: object | undefined;
+		let admissionReservation: PromptAdmissionReservation | undefined;
 		if (record.pendingPromptAdmission)
 			throw new AcpSdkAdapterError("conflict", "ACP session already has an active prompt.");
 		const activePrompt = record.activePrompt;
@@ -2296,14 +2302,15 @@ export class AcpAgent implements Agent {
 				throw new AcpSdkAdapterError("conflict", "ACP session already has an active prompt.");
 			admissionReservation = {};
 			record.pendingPromptAdmission = admissionReservation;
-			const settled = await this.#waitForPromptSettlement(activePrompt);
-			if (!settled) {
-				if (record.pendingPromptAdmission === admissionReservation) record.pendingPromptAdmission = undefined;
-				throw new AcpSdkAdapterError("conflict", "ACP session already has an active prompt.");
-			}
-			await this.#drainPromptPublicationTails(params.sessionId);
 		}
 		try {
+			if (admissionReservation) {
+				const settled = await this.#waitForPromptSettlement(activePrompt as PromptWaiter);
+				if (!settled) throw new AcpSdkAdapterError("conflict", "ACP session already has an active prompt.");
+				if (admissionReservation.cancelled) return { stopReason: "cancelled" };
+				await this.#drainPromptPublicationTails(params.sessionId);
+				if (admissionReservation.cancelled) return { stopReason: "cancelled" };
+			}
 			return await this.#submitPromptCore(params, echoUserMessage, retryReservation, admissionReservation);
 		} finally {
 			if (record.pendingPromptAdmission === admissionReservation) record.pendingPromptAdmission = undefined;
@@ -2326,10 +2333,11 @@ export class AcpAgent implements Agent {
 		params: PromptRequest,
 		echoUserMessage: boolean,
 		retryReservation?: FirstPromptRetryReservation,
-		admissionReservation?: object,
+		admissionReservation?: PromptAdmissionReservation,
 	): Promise<PromptResponse> {
 		const record = this.#sessions.get(params.sessionId);
 		if (!record) throw new AcpSdkAdapterError("not_found", `Unknown session, not found: ${params.sessionId}`);
+		if (admissionReservation?.cancelled) return { stopReason: "cancelled" };
 		// A first-turn retry holds the session across its backoff gap. Any prompt that is not the
 		// retry owner is rejected here, before any state mutation or dispatch, so it cannot steal
 		// the first turn while the authorized retry is still pending (review P1, issue #5574).
@@ -2530,6 +2538,7 @@ export class AcpAgent implements Agent {
 				return await response;
 			}
 			waiter.dispatched = true;
+			record.sdkIdle = false;
 			// The turn is now dispatched to the host: this prompt owned the session's first turn,
 			// so it — not a preflight rejection that threw before this point — is what settles
 			// `firstPromptDone` in `prompt()` (review P2).
@@ -2868,6 +2877,11 @@ export class AcpAgent implements Agent {
 		// Record the client's intent before awaiting the SDK so a prompt that rejects
 		// mid-cancel (e.g. preflight `busy`) can still settle as `cancelled`.
 		record.cancelRequested = true;
+		if (record.pendingPromptAdmission) {
+			record.pendingPromptAdmission.cancelled = true;
+			for (const resolve of record.idleWaiters) resolve();
+			record.idleWaiters.clear();
+		}
 		// C04 terminal abort: an external client cancel stops the current turn
 		// (`scope:"turn"`, the default, matching the SDK `turn.abort` default and
 		// other ACP clients' cancel behavior). A client that also wants exact owned
@@ -3410,6 +3424,7 @@ export class AcpAgent implements Agent {
 				backgroundBusy: retainedAbortOwner !== undefined,
 				backgroundAnonymousCount: 0,
 				backgroundCorrelations: retainedAbortOwner?.correlation ? [retainedAbortOwner.correlation] : [],
+				sdkIdle: retainedAbortOwner === undefined,
 				idleWaiters: new Set(),
 				toolArgs: new Map(),
 				uncertainAbortOwner: retainedAbortOwner,
@@ -4223,12 +4238,14 @@ export class AcpAgent implements Agent {
 	#observeSessionActivity(record: SessionRecord, frame: JsonObject): void {
 		if (frame.type === "activity") {
 			if (frame.state === "busy") {
+				record.sdkIdle = false;
 				record.busy = true;
 				if (!record.activePrompt) {
 					record.backgroundBusy = true;
 					record.backgroundAnonymousCount = Math.max(record.backgroundAnonymousCount, 1);
 				}
 			} else if (frame.state === "idle") {
+				record.sdkIdle = true;
 				if (record.backgroundAnonymousCount > 0 || record.backgroundCorrelations.length > 0) {
 					record.busy = true;
 					record.backgroundBusy = true;
@@ -4274,15 +4291,17 @@ export class AcpAgent implements Agent {
 	}
 
 	/** Wait for the SDK's winding-down turn to publish idle before retrying a fresh prompt. */
-	#waitForSessionIdle(record: SessionRecord): Promise<void> {
-		if (!record.busy) return Promise.resolve();
+	#waitForSessionIdle(record: SessionRecord): Promise<boolean> {
+		if (record.sdkIdle && !record.backgroundBusy) return Promise.resolve(true);
 		const deferred = Promise.withResolvers<void>();
 		record.idleWaiters.add(deferred.resolve);
 		const cancel = this.#promptWatchdogClock.schedule(deferred.resolve, ACP_BUSY_SETTLE_WAIT_MS);
-		return deferred.promise.finally(() => {
-			record.idleWaiters.delete(deferred.resolve);
-			cancel();
-		});
+		return deferred.promise
+			.then(() => record.sdkIdle && !record.backgroundBusy)
+			.finally(() => {
+				record.idleWaiters.delete(deferred.resolve);
+				cancel();
+			});
 	}
 
 	#frameProcessingFailure(error: unknown): AcpSdkAdapterError {
