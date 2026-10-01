@@ -39,6 +39,7 @@ type Fixture = {
 	terminalReservationEntered: Promise<void>;
 	retryBackoffScheduled: Promise<void>;
 	fireRetryBackoff(): void;
+	advancePromptWatchdog(ms: number): void;
 	promptDeliveryCount(): number;
 	sendStopped(reason: StoppedReason): void;
 	sendFailed(
@@ -121,6 +122,7 @@ async function createFixture(
 		failBrokerSessionClose?: boolean;
 		observeTerminalReservation?: boolean;
 		controlledRetryBackoff?: boolean;
+		virtualPromptWatchdog?: boolean;
 		busyOnSecondPrompt?: boolean;
 		busyAfterCancel?: boolean;
 		priorTranscriptUserTurn?: boolean;
@@ -160,6 +162,9 @@ async function createFixture(
 	const terminalReservationEntered = Promise.withResolvers<void>();
 	const retryBackoffScheduled = Promise.withResolvers<void>();
 	const retryBackoffHandlers: Array<() => void> = [];
+
+	let promptWatchdogNow = 0;
+	const promptWatchdogHandlers: Array<{ due: number; handler: () => void; active: boolean }> = [];
 	let blockNextIdleUpdate = false;
 	let blockNextWorkingUpdate = options.blockInitialWorkingUpdate === true;
 	const delivered = Promise.withResolvers<void>();
@@ -550,16 +555,23 @@ async function createFixture(
 		} as unknown as AgentSideConnection,
 		{
 			agentDir,
-			...(options.observeTerminalReservation
+			...(options.observeTerminalReservation || options.virtualPromptWatchdog
 				? {
 						promptWatchdogClock: {
-							now: () => Date.now(),
-							schedule: () => {
-								let armed = true;
+							now: () => (options.virtualPromptWatchdog ? promptWatchdogNow : Date.now()),
+							schedule: (handler: () => void, delayMs: number) => {
+								if (!options.virtualPromptWatchdog) {
+									let armed = true;
+									return () => {
+										if (!armed) return;
+										armed = false;
+										terminalReservationEntered.resolve();
+									};
+								}
+								const entry = { due: promptWatchdogNow + delayMs, handler, active: true };
+								promptWatchdogHandlers.push(entry);
 								return () => {
-									if (!armed) return;
-									armed = false;
-									terminalReservationEntered.resolve();
+									entry.active = false;
 								};
 							},
 						},
@@ -623,6 +635,14 @@ async function createFixture(
 		fireRetryBackoff: () => {
 			const handler = retryBackoffHandlers.shift();
 			handler?.();
+		},
+		advancePromptWatchdog: (ms: number) => {
+			promptWatchdogNow += ms;
+			for (const entry of promptWatchdogHandlers.splice(0)) {
+				if (!entry.active) continue;
+				if (entry.due <= promptWatchdogNow) entry.handler();
+				else promptWatchdogHandlers.push(entry);
+			}
 		},
 		promptDeliveryCount: () => promptDeliveries,
 		sendStopped,
@@ -827,9 +847,23 @@ test("ACP immediately rejects a successor while a non-cancelled prompt is active
 	}
 });
 
-test.skip("ACP bounds successor admission when the cancelled prompt never settles", () => {
-	// The prompt-terminal fixture injects the watchdog clock only for retry-backoff control;
-	// it does not expose a safe virtual-clock advancement hook for this admission timer.
+test("ACP bounds successor admission when the cancelled prompt never settles", async () => {
+	const fixture = await createFixture({ virtualPromptWatchdog: true });
+	try {
+		const first = prompt(fixture, "cancelled prompt that never settles");
+		await bounded(fixture.promptDelivered, "cancelled prompt delivery");
+		await bounded(fixture.agent.cancel({ sessionId: fixture.sessionId }), "cancel acknowledgement");
+		const successor = prompt(fixture, "expired successor");
+		fixture.advancePromptWatchdog(5_001);
+		await expect(bounded(successor, "expired successor conflict")).rejects.toMatchObject({ code: "conflict" });
+		const following = prompt(fixture, "following prompt");
+		await waitFor(() => fixture.promptDeliveryCount() === 2, "following prompt delivery");
+		fixture.sendStopped("end_turn");
+		expect(await bounded(following, "following prompt settlement")).toEqual({ stopReason: "end_turn" });
+		void first.catch(() => undefined);
+	} finally {
+		fixture.dispose();
+	}
 });
 
 test("ACP admits only one successor waiting on the same cancelled prompt", async () => {
