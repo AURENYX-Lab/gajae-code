@@ -1031,7 +1031,7 @@ function mapOptionsForApi<TApi extends Api>(
 				// increase the cap to model.maxTokens to allow room for output.
 				let adaptiveMaxTokens = base.maxTokens ?? model.maxTokens;
 				if (
-					options?.maxTokens === undefined &&
+					!(Number.isSafeInteger(options?.maxTokens) && options.maxTokens > 0) &&
 					adaptiveMaxTokens === DEFAULT_REQUEST_MAX_TOKENS &&
 					Number.isSafeInteger(model.maxTokens) &&
 					model.maxTokens > DEFAULT_REQUEST_MAX_TOKENS
