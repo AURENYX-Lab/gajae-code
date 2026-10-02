@@ -52,7 +52,11 @@ import {
 	sanitizeOpenAIResponsesHistoryItemsForReplay,
 } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { STREAM_FIRST_EVENT_TIMEOUT_PROVIDER_CODE, transportFailureFacts } from "../utils/fallback-transport";
+import {
+	SERVER_OVERLOADED_PROVIDER_CODE,
+	STREAM_FIRST_EVENT_TIMEOUT_PROVIDER_CODE,
+	transportFailureFacts,
+} from "../utils/fallback-transport";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import {
 	getOpenAIStreamIdleTimeoutMs,
@@ -158,7 +162,17 @@ const CODEX_PREVIOUS_RESPONSE_STALE_PROSE_MESSAGE = new RegExp(
 		`|${CODEX_PREVIOUS_RESPONSE_PROSE_TOKEN}(?:(?!${CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD})[^\\n]){0,48}?(?:${CODEX_ANCHOR_STALE_QUALIFIER})(?![^\\n]{0,48}(?:${CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD}))`,
 	"i",
 );
-const CODEX_RETRYABLE_EVENT_CODES = new Set(["model_error", "server_error", "internal_error"]);
+const CODEX_RETRYABLE_EVENT_CODES = new Set([
+	"model_error",
+	"server_error",
+	"internal_error",
+	SERVER_OVERLOADED_PROVIDER_CODE,
+]);
+const CODEX_TYPED_TRANSPORT_PROVIDER_CODES = new Set([
+	SERVER_OVERLOADED_PROVIDER_CODE,
+	"server_error",
+	"internal_error",
+]);
 const CODEX_NON_RETRYABLE_EVENT_CODES = new Set([
 	"invalid_function_parameters",
 	"invalid_request_error",
@@ -177,11 +191,31 @@ const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
 const CODEX_ACCOUNT_MODEL_UNAVAILABLE_MESSAGE = /\bnot supported when using codex with a chatgpt account\b/i;
 const CODEX_PROVIDER_SESSION_STATE_KEY = "openai-codex-responses";
+const providerSessionStateIdentities = new WeakMap<Map<string, ProviderSessionState>, number>();
+const disabledCodexPublicSessionKeys = new Set<string>();
+let nextProviderSessionStateIdentity = 1;
+
+function getProviderSessionStateIdentity(
+	providerSessionState: Map<string, ProviderSessionState> | undefined,
+): number | undefined {
+	if (!providerSessionState) return undefined;
+	let identity = providerSessionStateIdentities.get(providerSessionState);
+	if (identity === undefined) {
+		identity = nextProviderSessionStateIdentity++;
+		providerSessionStateIdentities.set(providerSessionState, identity);
+	}
+	return identity;
+}
 const X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
 const X_MODELS_ETAG_HEADER = "x-models-etag";
 const X_REASONING_INCLUDED_HEADER = "x-reasoning-included";
 /** Connection-level websocket failures that should immediately fall back to SSE without retrying. */
-const CODEX_WEBSOCKET_FATAL_PATTERNS = ["websocket error:", "websocket closed before open", "connection timeout"];
+const CODEX_WEBSOCKET_FATAL_PATTERNS = [
+	"websocket error:",
+	"websocket closed before open",
+	"websocket is closed before the connection is established",
+	"connection timeout",
+];
 /** Max total time to spend retrying 429s with server-provided delays (5 minutes). */
 const CODEX_RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
 
@@ -277,6 +311,7 @@ type CodexWebSocketSessionState = {
 interface CodexProviderSessionState extends ProviderSessionState {
 	webSocketSessions: Map<string, CodexWebSocketSessionState>;
 	webSocketPublicToPrivate: Map<string, string>;
+	disabledWebSocketPublicSessions: Set<string>;
 }
 
 interface CodexRequestContext {
@@ -436,12 +471,14 @@ function createCodexProviderSessionState(): CodexProviderSessionState {
 	const state: CodexProviderSessionState = {
 		webSocketSessions: new Map(),
 		webSocketPublicToPrivate: new Map(),
+		disabledWebSocketPublicSessions: new Set(),
 		close: () => {
 			for (const session of state.webSocketSessions.values()) {
 				session.connection?.close("session_disposed");
 			}
 			state.webSocketSessions.clear();
 			state.webSocketPublicToPrivate.clear();
+			state.disabledWebSocketPublicSessions.clear();
 		},
 	};
 	return state;
@@ -753,11 +790,27 @@ async function buildCodexRequestContext(
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
 	const sessionKey = getCodexWebSocketSessionKey(promptCacheKey, model, accountId, baseUrl);
 	const publicSessionKey = getCodexPublicSessionKey(promptCacheKey, model, baseUrl);
-	if (sessionKey && publicSessionKey) {
-		providerSessionState?.webSocketPublicToPrivate.set(publicSessionKey, sessionKey);
-	}
+	const effectiveSessionKey =
+		providerSessionState && sessionKey
+			? resolveCodexWebSocketSessionKey(sessionKey, publicSessionKey, providerSessionState)
+			: undefined;
+	logCodexDebug("build request context session keys", {
+		publicSessionKey,
+		effectiveSessionKey,
+		providerSessionStateMapIdentity: getProviderSessionStateIdentity(options?.providerSessionState),
+	});
 	const websocketState =
-		sessionKey && providerSessionState ? getCodexWebSocketSessionState(sessionKey, providerSessionState) : undefined;
+		providerSessionState && effectiveSessionKey
+			? getCodexWebSocketSessionState(effectiveSessionKey, providerSessionState)
+			: undefined;
+	if (
+		websocketState &&
+		publicSessionKey &&
+		(disabledCodexPublicSessionKeys.has(publicSessionKey) ||
+			providerSessionState?.disabledWebSocketPublicSessions.has(publicSessionKey))
+	) {
+		websocketState.disableWebsocket = true;
+	}
 
 	return {
 		apiKey,
@@ -2182,7 +2235,18 @@ async function handleCodexStreamFailure(
 	}
 	output.stopReason = context.options?.signal?.aborted ? "aborted" : "error";
 	output.errorStatus = extractHttpStatusFromError(error);
-	output.transportFailure = transportFailureFacts(error);
+	const transportFailure = transportFailureFacts(error);
+	const typedProviderCode =
+		error instanceof CodexProviderStreamError && CODEX_TYPED_TRANSPORT_PROVIDER_CODES.has(error.code ?? "")
+			? error.code
+			: undefined;
+	output.transportFailure = typedProviderCode
+		? {
+				...(transportFailure ?? { kind: "transport" as const }),
+				providerCode: typedProviderCode,
+				...(error instanceof CodexProviderStreamError && error.deterministicVeto ? { retryMaxAttempts: 1 } : {}),
+			}
+		: transportFailure;
 	output.errorMessage = await finalizeErrorMessage(error, context.requestContext.rawRequestDump);
 	output.duration = Date.now() - context.startTime;
 	if (context.firstTokenTime) {
@@ -2300,11 +2364,14 @@ export async function prewarmOpenAICodexResponses(
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
 	const sessionKey = getCodexWebSocketSessionKey(promptCacheKey, model, accountId, baseUrl);
 	const publicSessionKey = getCodexPublicSessionKey(promptCacheKey, model, baseUrl);
-	if (publicSessionKey && sessionKey) {
-		providerSessionState?.webSocketPublicToPrivate.set(publicSessionKey, sessionKey);
-	}
 	if (!sessionKey || !providerSessionState) return;
-	const state = getCodexWebSocketSessionState(sessionKey, providerSessionState);
+	const effectiveSessionKey = resolveCodexWebSocketSessionKey(sessionKey, publicSessionKey, providerSessionState);
+	logCodexDebug("prewarm session keys", {
+		publicSessionKey,
+		effectiveSessionKey,
+		providerSessionStateMapIdentity: getProviderSessionStateIdentity(options?.providerSessionState),
+	});
+	const state = getCodexWebSocketSessionState(effectiveSessionKey, providerSessionState);
 	if (!shouldUseCodexWebSocket(model, state, options?.preferWebsockets)) return;
 	const headers = logger.time(
 		"prewarmCodex:createHeaders",
@@ -2316,7 +2383,7 @@ export async function prewarmOpenAICodexResponses(
 		"websocket",
 		state,
 	);
-	await logger.time(
+	const connectionPromise = logger.time(
 		"prewarmCodex:establishWs",
 		getOrCreateCodexWebSocketConnection,
 		state,
@@ -2324,7 +2391,35 @@ export async function prewarmOpenAICodexResponses(
 		headers,
 		options?.signal,
 	);
-	state.prewarmed = true;
+	const attemptedConnection = state.connection;
+	try {
+		await connectionPromise;
+	} catch (error) {
+		const websocketError = error instanceof Error ? error : new Error(String(error));
+		const superseded =
+			attemptedConnection?.wasClosedLocally() === true ||
+			(attemptedConnection !== undefined && state.connection !== attemptedConnection);
+		const fatalPrewarmFailure =
+			isCodexWebSocketFatalError(websocketError) &&
+			!websocketError.message.toLowerCase().includes("connection timeout") &&
+			!/^.*websocket closed before open \((?:1000|1001|1005)\)$/i.test(websocketError.message) &&
+			!superseded &&
+			state.connection === attemptedConnection;
+		if (fatalPrewarmFailure) {
+			recordCodexWebSocketFailure(state, true);
+			if (publicSessionKey) providerSessionState.disabledWebSocketPublicSessions.add(publicSessionKey);
+			if (publicSessionKey) disabledCodexPublicSessionKeys.add(publicSessionKey);
+		} else if (superseded) {
+			logCodexDebug("ignoring superseded Codex websocket prewarm failure", {
+				error: websocketError.message,
+				publicSessionKey,
+			});
+		}
+		throw error;
+	}
+	if (state.connection === attemptedConnection) {
+		state.prewarmed = true;
+	}
 }
 
 function getCodexWebSocketSessionKey(
@@ -2336,6 +2431,17 @@ function getCodexWebSocketSessionKey(
 	const promptCacheKey = normalizeOpenAIResponsesPromptCacheKey(sessionId);
 	if (!promptCacheKey) return undefined;
 	return `${accountId ?? "opaque"}:${baseUrl}:${model.id}:${promptCacheKey}`;
+}
+
+function resolveCodexWebSocketSessionKey(
+	sessionKey: string,
+	publicSessionKey: string | undefined,
+	providerSessionState: CodexProviderSessionState,
+): string {
+	if (publicSessionKey) {
+		providerSessionState.webSocketPublicToPrivate.set(publicSessionKey, sessionKey);
+	}
+	return sessionKey;
 }
 
 function getCodexPublicSessionKey(
@@ -2603,6 +2709,7 @@ class CodexWebSocketConnection {
 	#waiters: Array<() => void> = [];
 	#connectPromise?: Promise<void>;
 	#activeRequest = false;
+	#localCloseReason?: string;
 
 	constructor(url: string, headers: Record<string, string>, options: CodexWebSocketConnectionOptions) {
 		this.#url = url;
@@ -2615,11 +2722,16 @@ class CodexWebSocketConnection {
 		return this.#socket?.readyState === WebSocket.OPEN;
 	}
 
+	wasClosedLocally(): boolean {
+		return this.#localCloseReason !== undefined;
+	}
+
 	matchesAuth(headers: Record<string, string>): boolean {
 		return this.#headers.authorization === headers.authorization;
 	}
 
 	close(reason = "done"): void {
+		this.#localCloseReason = reason;
 		if (
 			this.#socket &&
 			(this.#socket.readyState === WebSocket.OPEN || this.#socket.readyState === WebSocket.CONNECTING)
@@ -3291,6 +3403,7 @@ function getCodexEventErrorMessage(rawEvent: Record<string, unknown>): string {
 
 class CodexProviderStreamError extends Error {
 	readonly retryable: boolean;
+	readonly deterministicVeto: boolean;
 	readonly code?: string;
 	readonly credentialModelUnavailable: boolean;
 	/**
@@ -3304,6 +3417,7 @@ class CodexProviderStreamError extends Error {
 	constructor(
 		message: string,
 		retryable: boolean,
+		deterministicVeto: boolean,
 		code: string | undefined,
 		providerMessage: string,
 		credentialModelUnavailable: boolean,
@@ -3311,6 +3425,7 @@ class CodexProviderStreamError extends Error {
 		super(message);
 		this.name = "CodexProviderStreamError";
 		this.retryable = retryable;
+		this.deterministicVeto = deterministicVeto;
 		this.code = code;
 		this.providerMessage = providerMessage;
 		this.credentialModelUnavailable = credentialModelUnavailable;
@@ -3320,10 +3435,7 @@ class CodexProviderStreamError extends Error {
 function isRetryableCodexFailureEvent(rawEvent: Record<string, unknown>): boolean {
 	const code = getCodexEventErrorCode(rawEvent).toLowerCase();
 	const message = getCodexEventErrorMessage(rawEvent);
-	if (
-		(code && CODEX_NON_RETRYABLE_EVENT_CODES.has(code)) ||
-		(!!message && CODEX_NON_RETRYABLE_EVENT_MESSAGE.test(message))
-	) {
+	if (isCodexDeterministicVeto(code, message)) {
 		return false;
 	}
 	if (code && CODEX_RETRYABLE_EVENT_CODES.has(code)) {
@@ -3332,9 +3444,17 @@ function isRetryableCodexFailureEvent(rawEvent: Record<string, unknown>): boolea
 	return !!message && CODEX_RETRYABLE_EVENT_MESSAGE.test(message);
 }
 
+function isCodexDeterministicVeto(code: string, message: string): boolean {
+	return (
+		(code && CODEX_NON_RETRYABLE_EVENT_CODES.has(code)) ||
+		(!!message && CODEX_NON_RETRYABLE_EVENT_MESSAGE.test(message))
+	);
+}
+
 function createCodexProviderStreamError(rawEvent: Record<string, unknown>): CodexProviderStreamError {
 	const code = getCodexEventErrorCode(rawEvent);
 	const message = getCodexEventErrorMessage(rawEvent);
+	const deterministicVeto = isCodexDeterministicVeto(code.toLowerCase(), message);
 	const formattedMessage =
 		typeof rawEvent.type === "string" && rawEvent.type === "error"
 			? formatCodexErrorEvent(rawEvent, code, message)
@@ -3342,6 +3462,7 @@ function createCodexProviderStreamError(rawEvent: Record<string, unknown>): Code
 	return new CodexProviderStreamError(
 		formattedMessage,
 		isRetryableCodexFailureEvent(rawEvent),
+		deterministicVeto,
 		code || undefined,
 		message,
 		isCodexAccountModelUnavailable(message, code),

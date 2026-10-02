@@ -1423,8 +1423,11 @@ const BARE_DEFAULT_WATCHDOG_ERROR =
 const PROVIDER_FIRST_EVENT_TIMEOUT_ERROR = "Provider stream timed out while waiting for the first event";
 const WRAPPED_PROVIDER_FIRST_EVENT_TIMEOUT_ERROR = `Error: ${PROVIDER_FIRST_EVENT_TIMEOUT_ERROR}`;
 const PROVIDER_FIRST_EVENT_TIMEOUT_WITHOUT_ARTICLE_ERROR = "Provider stream timed out while waiting for first event";
-const BARE_DEFAULT_CODEX_OVERLOAD_ERROR = /^Codex error event(?:: .*)? \(code=server_is_overloaded(?:, [^)]+)*\)$/;
-/** Anthropic's typed capacity-overload `error.type`, the only overload code admitted below. */
+const BARE_DEFAULT_CODEX_RETRYABLE_ERROR =
+	/^Codex error event(?:: .*)? \(code=(?:server_is_overloaded|server_error|internal_error)(?:, [^)]+)*\)$/;
+const BARE_DEFAULT_CODEX_RETRYABLE_CODES = new Set(["server_is_overloaded", "server_error", "internal_error"]);
+const BARE_DEFAULT_OVERLOAD_CODES = new Set([SERVER_OVERLOADED_PROVIDER_CODE]);
+/** Anthropic's typed capacity-overload `error.type`, the only Anthropic overload code admitted below. */
 const ANTHROPIC_OVERLOADED_ERROR_TYPE = "overloaded_error";
 const KIMI_CODE_FIRST_EVENT_TIMEOUT_MESSAGES = {
 	"anthropic-messages": new Set([
@@ -1505,8 +1508,8 @@ function isBareDefaultMessageOnlyFirstEventTimeout(message: AssistantMessage): b
 	);
 }
 /**
- * True when the attempt's structured evidence is exactly the provider's typed
- * capacity-overload code and nothing else: no status, no retained retry header,
+ * True when the attempt's structured evidence is exactly an admitted provider
+ * code and nothing else: no status, no retained retry header,
  * no second typed code, no error kind, and none of the transport's other
  * observations (request size, first-event timing, endpoint class, provider retry
  * ceiling). The code arrives statuslessly (a Codex error event, an HTTP 200
@@ -1515,15 +1518,18 @@ function isBareDefaultMessageOnlyFirstEventTimeout(message: AssistantMessage): b
  * attempt is no longer provably that bare capacity rejection. The code is
  * compared case-sensitively, matching the parser and the transport gate.
  */
-function isExactTypedOverloadFacts(message: AssistantMessage): boolean {
+function isExactTypedOverloadFacts(
+	message: AssistantMessage,
+	acceptedProviderCodes: ReadonlySet<string> = BARE_DEFAULT_OVERLOAD_CODES,
+): boolean {
 	if (message.errorKind !== undefined || message.errorStatus !== undefined) return false;
 	const facts = message.transportFailure;
 	if (!facts) return false;
 	return (
-		facts.providerCode === SERVER_OVERLOADED_PROVIDER_CODE &&
+		acceptedProviderCodes.has(facts.providerCode ?? "") &&
 		facts.status === undefined &&
 		facts.anthropicErrorType === undefined &&
-		(facts.openaiErrorCode === undefined || facts.openaiErrorCode === SERVER_OVERLOADED_PROVIDER_CODE) &&
+		(facts.openaiErrorCode === undefined || facts.openaiErrorCode === facts.providerCode) &&
 		(facts.headers === undefined || Object.keys(facts.headers).length === 0) &&
 		facts.requestBytes === undefined &&
 		facts.firstEventElapsedMs === undefined &&
@@ -1552,8 +1558,9 @@ function isStatuslessTypedOverloadFacts(facts: TransportFailureFacts | undefined
 function isBareDefaultCodexOverload(message: AssistantMessage): boolean {
 	return (
 		message.api === "openai-codex-responses" &&
-		BARE_DEFAULT_CODEX_OVERLOAD_ERROR.test(message.errorMessage ?? "") &&
-		(isExactTypedOverloadFacts(message) || !hasBareDefaultRetryDisqualifyingFacts(message)) &&
+		(isExactTypedOverloadFacts(message, BARE_DEFAULT_CODEX_RETRYABLE_CODES) ||
+			(BARE_DEFAULT_CODEX_RETRYABLE_ERROR.test(message.errorMessage ?? "") &&
+				!hasBareDefaultRetryDisqualifyingFacts(message))) &&
 		!assistantMessageHasVisibleOrToolContent(message)
 	);
 }
@@ -22997,6 +23004,7 @@ export class AgentSession {
 			return false;
 		const contextWindow = this.model?.contextWindow ?? 0;
 		if (classifyContextOverflow(message, transportFailure, contextWindow)) return false;
+		if (isBareDefaultCodexOverload(message) && this.settings.get("retry.enabled") !== false) return true;
 		const managedFallback = this.#defaultFallbackChain().chain.entries.length > 1;
 		// An account-specific model rejection that cannot rotate to another
 		// credential stays terminal only on the session's own retry path; managed
@@ -24361,6 +24369,7 @@ export class AgentSession {
 			isBareDefaultCodexOverload(message) ||
 			isBareDefaultAnthropicOverload(message) ||
 			isBareDefaultOpenAIResponsesOverload(message);
+		const canReplayCodexProviderOverload = isBareDefaultCodexOverload(message);
 		const reportedRetryMaxAttempts = transportFailure?.retryMaxAttempts;
 		if (reportedRetryMaxAttempts !== undefined) {
 			this.#providerRetryMaxAttempts = Math.min(
@@ -24400,9 +24409,10 @@ export class AgentSession {
 					}
 				: false;
 		}
+		const fallbackTrigger = this.#fallbackTriggerFor(message, !managedFallback, transportFailure);
 		const trigger:
 			| { class: FallbackTriggerClass; retryAfterMs?: number; authDisposition?: AuthDisposition }
-			| undefined = this.#fallbackTriggerFor(message, !managedFallback, transportFailure);
+			| undefined = canReplayCodexProviderOverload ? { class: "server" } : fallbackTrigger;
 		// OpenAI's typed statusless capacity-overload code (issue #5018) must not
 		// gain managed-chain retry/advance authority from its new facts. Before
 		// the code survived transport, this failure reached the session as an
