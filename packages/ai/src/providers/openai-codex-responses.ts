@@ -1289,7 +1289,8 @@ function trySalvageCodexFinalizedToolCalls(
 		isCodexTransientStreamClose(error) &&
 		!runtime.toolArgumentCorrelationFailed &&
 		toolCalls.length > 0 &&
-		(runtime.currentBlock === null || (runtime.currentItem?.type === "reasoning" && runtime.currentBlock?.type === "thinking")) &&
+		(runtime.currentBlock === null ||
+			(runtime.currentItem?.type === "reasoning" && runtime.currentBlock?.type === "thinking")) &&
 		context.output.content.every(block => block.type === "thinking" || block.type === "toolCall") &&
 		toolCalls.every(toolCall => runtime.finalizedToolCallIds.has(toolCall.id));
 	const canSalvageCompleteArguments =
