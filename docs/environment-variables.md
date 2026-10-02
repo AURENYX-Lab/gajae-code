@@ -372,6 +372,15 @@ Coordinator MCP currently exposes durable polling/await tools, not push subscrip
 
 OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth.kimi.com`.
 
+### Grok Build (Grok CLI) provider
+
+| Variable | Default / behavior |
+| -------- | ------------------ |
+| `GJC_GROK_CLI_BASE_URL` | Base URL override for the bundled Grok Build provider (default `https://cli-chat-proxy.grok.com/v1`; trailing slashes are trimmed). `GROK_CLI_BASE_URL` is read when it is unset. To keep OAuth credentials on the Grok host, an override is honored only for `https://cli-chat-proxy.grok.com`; any other URL is ignored with a session warning and the default is used. |
+| `GJC_GROK_CLI_ALLOW_UNSAFE_BASE_URL` | Exactly `1` honors a base URL override on any other host. For trusted local testing only: the OAuth bearer token is sent to that host. |
+| `GJC_GROK_CLI_MODELS` | Comma-separated model ids that replace the built-in model list, in that order. Known ids keep their built-in metadata; unknown ids are added as text-only reasoning models with a 1,000,000-token context window. |
+| `GROK_CLI_OAUTH_TOKEN` | Bearer token bypass for local use. No refresh and no model discovery; a session warning recommends `/login grok-build` instead. |
+
 ### Gemini CLI compatibility
 
 | Variable                   | Default / behavior                                              |
@@ -484,6 +493,7 @@ Extra conditional behavior:
 | `GJC_MODEL_PRESET_REGISTRY_DISABLED` | `1`, `true`, `yes`, or `on` disables registry network refresh and excludes cached registry data without deleting accepted history. Embedded presets and user `models.yml` remain available. |
 | `GJC_NO_TITLE`                | If set (any non-empty value), disables auto session title generation on first user message         |
 | `GJC_NO_CMUX_RENAME`         | If set (any non-empty value), disables renaming the containing cmux workspace to the current session name |
+| `GJC_NO_WEBP`                | `1` or `true` (case-insensitive) keeps WebP out of image re-encoding: results are PNG or JPEG, and a WebP input is re-encoded even when it already fits. Use it for backends that cannot decode WebP (for example llama.cpp's STB loader). Read on every resize; any other value leaves WebP enabled. |
 | `NULL_PROMPT`                | If `true`, system prompt builder returns empty string                                              |
 | `GJC_BLOCKED_AGENT`           | Blocks a specific subagent type in task tool                                                       |
 | `GJC_SUBPROCESS_CMD`          | Overrides subagent spawn command (`gjc` / `gjc.cmd` resolution bypass)                             |
