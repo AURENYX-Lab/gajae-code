@@ -465,6 +465,7 @@ interface CodexStreamRuntime {
 	transport: CodexTransport;
 	websocketState?: CodexWebSocketSessionState;
 	currentItem: CodexEventItem | null;
+	currentItemOutputIndex?: number;
 	currentBlock: CodexOutputBlock | null;
 	nativeOutputItems: Array<Record<string, unknown>>;
 	websocketStreamRetries: number;
@@ -491,6 +492,8 @@ interface CodexStreamRuntime {
 	finalizedToolCallIds: Set<string>;
 	/** Event types whose degraded non-string increment was already diagnosed. */
 	degradedIncrementDiagnostics: Set<string>;
+	/** An argument event identified a different active item; never salvage this response. */
+	toolArgumentCorrelationFailed: boolean;
 }
 
 interface CodexStreamProcessingContext {
@@ -1212,6 +1215,7 @@ function createCodexStreamRuntime(initial: {
 		transport: initial.transport,
 		websocketState: initial.websocketState,
 		currentItem: null,
+		currentItemOutputIndex: undefined,
 		currentBlock: null,
 		nativeOutputItems: [],
 		websocketStreamRetries: 0,
@@ -1226,6 +1230,7 @@ function createCodexStreamRuntime(initial: {
 		canSafelyReplayWebsocketOverSse: true,
 		finalizedToolCallIds: new Set<string>(),
 		degradedIncrementDiagnostics: new Set<string>(),
+		toolArgumentCorrelationFailed: false,
 	};
 }
 
@@ -1282,17 +1287,31 @@ function trySalvageCodexFinalizedToolCalls(
 		error instanceof Error && error.message === "OpenAI Codex SSE stream stalled while waiting for the next event";
 	const canSalvageFinalizedCall =
 		isCodexTransientStreamClose(error) &&
+		!runtime.toolArgumentCorrelationFailed &&
 		toolCalls.length > 0 &&
-		runtime.currentBlock === null &&
+		(runtime.currentBlock === null || (runtime.currentItem?.type === "reasoning" && runtime.currentBlock?.type === "thinking")) &&
 		context.output.content.every(block => block.type === "thinking" || block.type === "toolCall") &&
 		toolCalls.every(toolCall => runtime.finalizedToolCallIds.has(toolCall.id));
 	const canSalvageCompleteArguments =
 		(isCodexTransientStreamClose(error) || isIdleStall) &&
+		!runtime.toolArgumentCorrelationFailed &&
 		toolCalls.length > 0 &&
 		context.output.content.every(block => block.type === "thinking" || block.type === "toolCall") &&
 		hasCompleteArguments;
 	if (!canSalvageFinalizedCall && !canSalvageCompleteArguments) {
 		return false;
+	}
+
+	if (canSalvageFinalizedCall && runtime.currentBlock?.type === "thinking") {
+		context.stream.push({
+			type: "thinking_end",
+			contentIndex: context.output.content.length - 1,
+			content: runtime.currentBlock.thinking,
+			partial: context.output,
+		});
+		runtime.currentItem = null;
+		runtime.currentItemOutputIndex = undefined;
+		runtime.currentBlock = null;
 	}
 
 	if (canSalvageCompleteArguments && activeToolCall && !runtime.finalizedToolCallIds.has(activeToolCall.id)) {
@@ -1344,10 +1363,12 @@ function trySalvageCodexFinalizedToolCalls(
 
 function isCodexTransientStreamClose(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
-	const message = error.message.toLowerCase();
+	const providerMessage = (error as CodexProviderStreamError).providerMessage;
+	const message = (providerMessage || error.message).toLowerCase();
 	const providerCode =
 		(error as CodexProviderStreamError & { providerCode?: string }).code?.toLowerCase() ??
 		(error as { providerCode?: string }).providerCode?.toLowerCase();
+	if (providerCode && CODEX_NON_RETRYABLE_EVENT_CODES.has(providerCode)) return false;
 	const hasRequestTimeout = providerCode === "request_timeout" || message.includes("request_timeout");
 	const hasClosedStreamMessage =
 		message.includes("stream disconnected before completion") ||
@@ -1376,6 +1397,7 @@ function handleCodexStreamEvent(args: {
 		if (!firstTokenTime) firstTokenTime = Date.now();
 		const item = rawEvent.item as CodexEventItem;
 		runtime.currentItem = item;
+		runtime.currentItemOutputIndex = typeof rawEvent.output_index === "number" ? rawEvent.output_index : undefined;
 		runtime.currentBlock = createOutputBlockForItem(item);
 		if (!runtime.currentBlock) return firstTokenTime;
 		const currentBlock = runtime.currentBlock;
@@ -1462,12 +1484,20 @@ function handleCodexStreamEvent(args: {
 	}
 
 	if (eventType === "response.function_call_arguments.delta") {
+		if (!isActiveToolArgumentEvent(runtime, rawEvent)) {
+			runtime.toolArgumentCorrelationFailed = true;
+			return firstTokenTime;
+		}
 		const delta = assertStringToolArgumentIncrement(rawEvent, "response.function_call_arguments.delta");
 		handleToolCallArgumentsDelta(runtime.currentItem, runtime.currentBlock, delta, stream, output, blockIndex);
 		return firstTokenTime;
 	}
 
 	if (eventType === "response.function_call_arguments.done") {
+		if (!isActiveToolArgumentEvent(runtime, rawEvent)) {
+			runtime.toolArgumentCorrelationFailed = true;
+			return firstTokenTime;
+		}
 		handleToolCallArgumentsDone(runtime.currentItem, runtime.currentBlock, rawEvent);
 		return firstTokenTime;
 	}
@@ -1711,7 +1741,8 @@ function handleToolCallArgumentsDelta(
 	currentBlock.partialJson += delta;
 	currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
 	currentBlock.argumentsComplete = isCompleteJsonObject(currentBlock.partialJson);
-	currentBlock.argumentsAuthoritative = currentBlock.argumentsComplete;
+	currentBlock.argumentsAuthoritative =
+		currentBlock.argumentsAuthoritative || (currentBlock.argumentsComplete && delta.trim().length > 0);
 	stream.push({ type: "toolcall_delta", contentIndex: blockIndex(), delta, partial: output });
 }
 
@@ -1729,6 +1760,19 @@ function handleToolCallArgumentsDone(
 		currentBlock.argumentsAuthoritative = currentBlock.argumentsComplete;
 		captureUnicodeEscapeEvidence(currentBlock, args);
 	}
+}
+
+function isActiveToolArgumentEvent(runtime: CodexStreamRuntime, rawEvent: Record<string, unknown>): boolean {
+	if (runtime.currentItem?.type !== "function_call" || runtime.currentBlock?.type !== "toolCall") return false;
+	const itemId = rawEvent.item_id;
+	if (typeof itemId === "string" && itemId !== runtime.currentItem.id) return false;
+	const callId = rawEvent.call_id;
+	if (typeof callId === "string" && callId !== runtime.currentItem.call_id) return false;
+	const outputIndex = rawEvent.output_index;
+	if (typeof outputIndex === "number" && outputIndex !== runtime.currentItemOutputIndex) {
+		return false;
+	}
+	return true;
 }
 
 function handleCustomToolCallInputDelta(
@@ -2080,6 +2124,7 @@ async function tryRetryWithoutForcedToolChoice(
 	runtime.sawTerminalEvent = false;
 	runtime.nativeOutputItems.length = 0;
 	runtime.finalizedToolCallIds.clear();
+	runtime.toolArgumentCorrelationFailed = false;
 	resetOutputState(context.output);
 	context.firstTokenTime = undefined;
 
@@ -2178,6 +2223,7 @@ async function tryReconnectCodexWebSocketOnConnectionLimit(
 		runtime.currentBlock = null;
 		runtime.nativeOutputItems.length = 0;
 		runtime.finalizedToolCallIds.clear();
+		runtime.toolArgumentCorrelationFailed = false;
 		resetOutputState(context.output);
 		context.firstTokenTime = undefined;
 		recordCodexWebSocketFailure(websocketState, true);
@@ -2236,6 +2282,7 @@ async function tryRecoverCodexPreviousResponseNotFound(
 	runtime.sawTerminalEvent = false;
 	runtime.nativeOutputItems.length = 0;
 	runtime.finalizedToolCallIds.clear();
+	runtime.toolArgumentCorrelationFailed = false;
 	resetOutputState(context.output);
 	context.firstTokenTime = undefined;
 
@@ -2296,6 +2343,7 @@ async function tryReplayWebsocketFailureOverSse(
 		runtime.currentBlock = null;
 		runtime.nativeOutputItems.length = 0;
 		runtime.finalizedToolCallIds.clear();
+		runtime.toolArgumentCorrelationFailed = false;
 		resetOutputState(context.output);
 		context.firstTokenTime = undefined;
 	}
@@ -2339,6 +2387,7 @@ async function tryRetryCodexProviderError(
 	runtime.sawTerminalEvent = false;
 	runtime.nativeOutputItems.length = 0;
 	runtime.finalizedToolCallIds.clear();
+	runtime.toolArgumentCorrelationFailed = false;
 	resetOutputState(context.output);
 	context.firstTokenTime = undefined;
 	await scheduler.wait(CODEX_RETRY_DELAY_MS * runtime.providerRetryAttempt, {
