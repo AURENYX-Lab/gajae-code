@@ -1564,8 +1564,9 @@ const TERMINAL_ERROR_MESSAGE =
 	/unauthorized|forbidden|authentication_error|permission_error|permission denied|invalid api key|invalid_request_error|invalid request|bad request|bad_request|validation_error|unprocessable|payload too large|payment required|insufficient_quota|insufficient credits|missing required (parameter|field)|invalid schema|invalid tool_choice|unsupported (parameter|value|model)|model_not_found|no such model|unknown model|does not (exist|support)|request was aborted|request aborted|the user aborted/i;
 
 function isTerminalCodexProviderFailure(message: AssistantMessage): boolean {
+	if (message.api !== "openai-codex-responses") return false;
+	if (isExplicitCodexTerminalVeto(message.transportFailure?.providerCode, message.errorMessage)) return true;
 	return (
-		message.api === "openai-codex-responses" &&
 		(BARE_DEFAULT_CODEX_RETRYABLE_CODES.has(message.transportFailure?.providerCode ?? "") ||
 			BARE_DEFAULT_CODEX_RETRYABLE_ERROR.test(message.errorMessage ?? "")) &&
 		TERMINAL_ERROR_MESSAGE.test(message.errorMessage ?? "")

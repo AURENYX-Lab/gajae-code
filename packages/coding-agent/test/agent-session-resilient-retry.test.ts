@@ -2005,6 +2005,52 @@ describe.serial("AgentSession resilient retry", () => {
 		session = undefined;
 	});
 	it.each([
+		"invalid_prompt",
+		"invalid_function_parameters",
+	])("does not retry configured Codex explicit terminal veto %s", async vetoCode => {
+		const bundled = getBundledModel("openai-codex", "gpt-5.5");
+		if (!bundled) throw new Error("Expected bundled Codex test model to exist");
+		const model: Model<"openai-codex-responses"> = { ...bundled, api: "openai-codex-responses" };
+		authStorage.setRuntimeApiKey(model.provider, "fake-key");
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": true,
+			"retry.maxRetries": 1,
+			"retry.streamMaxRetries": 0,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const agent = new Agent({
+			streamMaxRetries: 0,
+			getApiKey: provider => `${provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) =>
+				streamOpenAICodexResponses({ ...model, id: requestedModel.id }, context, options ?? {}),
+		});
+		const testSession = configureRetryTestSession(
+			new AgentSession({ agent, sessionManager: createRetryTestSessionManager(), settings, modelRegistry }),
+		);
+		session = testSession;
+		let requests = 0;
+		const veto = `data: ${JSON.stringify({
+			type: "error",
+			code: "server_error",
+			message: `Request blocked (code=${vetoCode})`,
+		})}\n\n`;
+		vi.spyOn(globalThis, "fetch").mockImplementation((async () => {
+			requests++;
+			return new Response(veto, { headers: { "content-type": "text/event-stream" } });
+		}) as unknown as typeof fetch);
+		const { retryStartEvents } = track(testSession);
+
+		await testSession.prompt(`surface configured Codex ${vetoCode} veto`);
+		await testSession.waitForIdle();
+
+		expect(retryStartEvents).toHaveLength(0);
+		expect(requests).toBe(1);
+		await disposeAfterCoordinatorPersistence(testSession);
+		session = undefined;
+	});
+	it.each([
 		"server_error",
 		"internal_error",
 	])("preserves configured legacy retries for content-free Codex %s", async code => {
@@ -2021,6 +2067,7 @@ describe.serial("AgentSession resilient retry", () => {
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const agent = new Agent({
+			streamMaxRetries: 0,
 			getApiKey: provider => `${provider}-test-key`,
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: (requestedModel, context, options) =>
@@ -2054,10 +2101,12 @@ describe.serial("AgentSession resilient retry", () => {
 			});
 		}) as unknown as typeof fetch);
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { retryStartEvents } = track(session);
 
 		await session.prompt(`preserve configured Codex ${code} retries`);
 		await session.waitForIdle();
 
+		expect(retryStartEvents.length).toBeGreaterThan(0);
 		expect(requests).toBe(3);
 		expect(lastAssistant(session)).toMatchObject({
 			stopReason: "stop",
