@@ -1771,6 +1771,10 @@ export class AcpAgent implements Agent {
 		this.#agentDir = typeof candidate?.agentDir === "string" ? candidate.agentDir : getAgentDir();
 		this.#router = new SessionRouter({
 			agentDir: this.#agentDir,
+			attachFilter: sessionId =>
+				this.#sessions.has(sessionId) ||
+				this.#pendingRouterAdapters.has(sessionId) ||
+				this.#pendingRouterFrames.has(sessionId),
 			deps: {
 				onAttachment: attachment => {
 					const record = this.#sessions.get(attachment.sessionId);
@@ -3418,6 +3422,7 @@ export class AcpAgent implements Agent {
 		this.#pendingRouterFrames.set(id, bufferedFrames);
 		try {
 			await this.#ensureRouterReady();
+			await this.#router.reconcile({ waitForReplay: false });
 			if (lifecycleResult) await this.#router.adoptLifecycleResult(lifecycleResult, { sessionId: id, cwd });
 			let currentAttachment = this.#router.attachment(id);
 			for (let attempt = 0; !currentAttachment && attempt < 40; attempt++) {
