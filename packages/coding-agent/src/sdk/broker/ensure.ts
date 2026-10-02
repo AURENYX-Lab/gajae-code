@@ -856,26 +856,6 @@ async function ensureBrokerOnce(settings: EnsureBrokerSettings, initiator: Ensur
 			}
 			await ensureBrokerTiming.sleep(50);
 		}
-		// Reap the detached broker on discovery timeout if the trampoline reported it.
-		// After PR #6221, the real broker is detached from the trampoline,
-		// so the timeout exit (loop due to deadline) leaves the real broker orphaned.
-		// Use the trampoline-reported pid and incarnation to ensure we only reap our broker.
-		// Note: the trampoline exits after reporting the broker, so childExited may be true.
-		if (
-			isTrampoline &&
-			spawnedBrokerPid !== undefined &&
-			spawnedBrokerIncarnation !== undefined &&
-			!brokerDeathObserved
-		) {
-			// The loop exited due to deadline (discovery timeout), not due to child death.
-			// The trampoline is still alive and reported the real broker's identity.
-			// Reap the reparented broker using identity-safe logic.
-			try {
-				await reapSpawnedBrokerIdentity(spawnedBrokerPid, spawnedBrokerIncarnation);
-			} catch {
-				// Best-effort; if reap fails, owner.stop() will handle the trampoline child
-			}
-		}
 		const exitedBeforeDiscovery =
 			(isTrampoline &&
 				(!trampolineReported ||
