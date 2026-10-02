@@ -10,7 +10,6 @@ import { SdkClient } from "../client/client";
 import { type BrokerStartupExitRecord, clearBrokerStartupExitRecord, readBrokerStartupExitRecord } from "./broker-exit";
 import {
 	type BrokerDiscovery,
-	brokerDiscoveryPath,
 	brokerProcessIncarnation,
 	readBrokerDiscovery,
 	readBrokerRestartIntent,
@@ -857,6 +856,26 @@ async function ensureBrokerOnce(settings: EnsureBrokerSettings, initiator: Ensur
 			}
 			await ensureBrokerTiming.sleep(50);
 		}
+		// Reap the detached broker on discovery timeout if the trampoline reported it.
+		// After PR #6221, the real broker is detached from the trampoline,
+		// so the timeout exit (loop due to deadline) leaves the real broker orphaned.
+		// Use the trampoline-reported pid and incarnation to ensure we only reap our broker.
+		// Note: the trampoline exits after reporting the broker, so childExited may be true.
+		if (
+			isTrampoline &&
+			spawnedBrokerPid !== undefined &&
+			spawnedBrokerIncarnation !== undefined &&
+			!brokerDeathObserved
+		) {
+			// The loop exited due to deadline (discovery timeout), not due to child death.
+			// The trampoline is still alive and reported the real broker's identity.
+			// Reap the reparented broker using identity-safe logic.
+			try {
+				await reapSpawnedBrokerIdentity(spawnedBrokerPid, spawnedBrokerIncarnation);
+			} catch {
+				// Best-effort; if reap fails, owner.stop() will handle the trampoline child
+			}
+		}
 		const exitedBeforeDiscovery =
 			(isTrampoline &&
 				(!trampolineReported ||
@@ -974,35 +993,6 @@ async function ensureBrokerOnce(settings: EnsureBrokerSettings, initiator: Ensur
 				: discoveryError
 					? discoveryError
 					: new Error("Timed out waiting for detached SDK broker discovery.");
-		// Reap any orphaned reparented broker before reaping the trampoline child.
-		// After PR #6221, the real broker is detached from the trampoline,
-		// so reaping the child alone leaves the real broker orphaned on discovery timeout.
-		if (isTrampoline) {
-			try {
-				const content = await fs.readFile(brokerDiscoveryPath(settings.agentDir), "utf8");
-				const raw: unknown = JSON.parse(content);
-				if (raw && typeof raw === "object") {
-					const disco = raw as { pid?: unknown };
-					// Only reap if this is actually a reparented process (different from the child)
-					if (typeof disco.pid === "number" && disco.pid !== child.pid) {
-						// Reap the actual reparented broker with SIGKILL
-						try {
-							process.kill(disco.pid, "SIGKILL");
-							// Wait briefly for the process to exit
-							let attempts = 0;
-							while (attempts < 20 && observeProcessIncarnation(disco.pid).status !== "absent") {
-								await Bun.sleep(100);
-								attempts++;
-							}
-						} catch {
-							// Best-effort; any error here is non-terminal as owner.stop() still runs
-						}
-					}
-				}
-			} catch {
-				// File not found or malformed is fine; owner.stop() will handle the child
-			}
-		}
 		try {
 			await owner.stop();
 		} catch (cleanupError) {
