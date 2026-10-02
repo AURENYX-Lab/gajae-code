@@ -1269,7 +1269,8 @@ function trySalvageCodexFinalizedToolCalls(
 		runtime.currentItem?.type === "function_call" && runtime.currentBlock?.type === "toolCall"
 			? runtime.currentBlock
 			: undefined;
-	const completeActiveToolCall = activeToolCall?.argumentsComplete === true;
+	const completeActiveToolCall =
+		activeToolCall?.argumentsComplete === true && Object.keys(activeToolCall.arguments).length > 0;
 	const hasCompleteArguments = toolCalls.every(
 		toolCall =>
 			runtime.finalizedToolCallIds.has(toolCall.id) || (toolCall === activeToolCall && completeActiveToolCall),
@@ -1507,14 +1508,26 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 		return { type: "text", text: "" };
 	}
 	if (item.type === "function_call") {
-		return {
+		const initialArguments = item.arguments || "";
+		let parsedArguments: Record<string, unknown> = parseStreamingJson(initialArguments);
+		try {
+			const parsed = JSON.parse(initialArguments);
+			if (isPlainJsonObject(parsed)) parsedArguments = parsed;
+		} catch {
+			// Keep the streaming parser's partial object for deltas, but do not
+			// treat an incomplete snapshot as executable arguments.
+		}
+		const hasValidInitialArguments = isCompleteJsonObject(initialArguments);
+		const block: ToolCall & { partialJson: string; argumentsComplete: boolean } = {
 			type: "toolCall",
 			id: encodeResponsesToolCallId(item.call_id, item.id),
 			name: codexToolCanonicalName(item.name),
-			arguments: {},
-			partialJson: item.arguments || "",
-			argumentsComplete: isCompleteJsonObject(item.arguments || ""),
+			arguments: hasValidInitialArguments ? parsedArguments : {},
+			partialJson: initialArguments,
+			argumentsComplete: hasValidInitialArguments && Object.keys(parsedArguments).length > 0,
 		};
+		captureUnicodeEscapeEvidence(block, initialArguments);
+		return block;
 	}
 	if (item.type === "custom_tool_call") {
 		const initialInput: unknown = item.input;
