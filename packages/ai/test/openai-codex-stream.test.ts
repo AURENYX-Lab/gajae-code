@@ -409,6 +409,910 @@ describe("openai-codex streaming", () => {
 		]);
 	});
 
+	it("keeps a complete tool call when transient close omits output_item.done", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_unfinalized",
+					call_id: "call_unfinalized",
+					name: "todo_write",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_unfinalized", delta: '{"ops":[]}' },
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.errorCode).toBe("codex_stream_closed_after_complete_tool_arguments");
+		expect(result.content).toEqual([
+			{ type: "toolCall", id: "call_unfinalized|fc_unfinalized", name: "todo_write", arguments: { ops: [] } },
+		]);
+	});
+
+	it("salvages arguments provided only by the initial output item snapshot", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_snapshot",
+					call_id: "call_snapshot",
+					name: "job",
+					arguments: '{"cancel":["job-1"]}',
+				},
+			},
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			{ type: "toolCall", id: "call_snapshot|fc_snapshot", name: "job", arguments: { cancel: ["job-1"] } },
+		]);
+	});
+
+	it("refuses to salvage a placeholder initial argument snapshot", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_placeholder",
+					call_id: "call_placeholder",
+					name: "job",
+					arguments: "{}",
+				},
+			},
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const stream = streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		);
+		const events = [];
+		for await (const event of stream) events.push(event);
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("error");
+		expect(events.filter(event => event.type === "toolcall_end")).toHaveLength(0);
+	});
+
+	it("refuses to salvage when another returned tool call is unfinished", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_incomplete",
+					call_id: "call_incomplete",
+					name: "todo_write",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_incomplete", delta: '{"ops":[]' },
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_complete",
+					call_id: "call_complete",
+					name: "todo_write",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_complete", delta: '{"ops":[]}' },
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.content.filter(block => block.type === "toolCall")).toHaveLength(2);
+	});
+
+	it("salvages a complete tool call after an idle stall", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		global.fetch = ((input: string | URL | Request, init?: RequestInit) =>
+			Promise.resolve(
+				createTimedCodexSse(
+					getRequestSignal(input, init),
+					[
+						{
+							type: "response.output_item.added",
+							item: {
+								type: "function_call",
+								id: "fc_idle_complete",
+								call_id: "call_idle_complete",
+								name: "todo_write",
+								arguments: "",
+							},
+						},
+						{
+							type: "response.function_call_arguments.delta",
+							item_id: "fc_idle_complete",
+							delta: '{"ops":[]}',
+						},
+					],
+					10,
+					false,
+				),
+			)) as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken(), streamIdleTimeoutMs: 20 },
+		).result();
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.errorCode).toBe("codex_stream_closed_after_complete_tool_arguments");
+		expect(result.content).toEqual([
+			{ type: "toolCall", id: "call_idle_complete|fc_idle_complete", name: "todo_write", arguments: { ops: [] } },
+		]);
+	});
+
+	it.each([
+		["delta", { type: "response.function_call_arguments.delta", item_id: "fc_unknown", delta: '{"ops":[]}' }],
+		["done", { type: "response.function_call_arguments.done", item_id: "fc_unknown", arguments: '{"ops":[]}' }],
+	])("fails closed when a %s targets an unknown tool item", async (_label, argumentEvent) => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: { type: "function_call", id: "fc_active", call_id: "call_active", name: "todo_write", arguments: "" },
+			},
+			argumentEvent,
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.content.filter(block => block.type === "toolCall")).toHaveLength(1);
+	});
+
+	it("fails closed for an unknown-item argument delta during an idle stall", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-mismatch-idle-");
+		setAgentDir(tempDir.path());
+		global.fetch = ((input: string | URL | Request, init?: RequestInit) =>
+			Promise.resolve(
+				createTimedCodexSse(
+					getRequestSignal(input, init),
+					[
+						{
+							type: "response.output_item.added",
+							item: {
+								type: "function_call",
+								id: "fc_active_idle",
+								call_id: "call_active_idle",
+								name: "todo_write",
+								arguments: "",
+							},
+						},
+						{ type: "response.function_call_arguments.delta", item_id: "fc_unknown_idle", delta: '{"ops":[]}' },
+					],
+					10,
+					false,
+				),
+			)) as typeof fetch;
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken(), streamIdleTimeoutMs: 20 },
+		).result();
+		expect(result.stopReason).toBe("error");
+	});
+
+	it("still salvages an argument event whose item_id matches the active call", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_matching",
+					call_id: "call_matching",
+					name: "todo_write",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_matching", delta: '{"ops":[]}' },
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+		expect(result.stopReason).toBe("toolUse");
+	});
+
+	it("does not salvage after a generic thrown stream error", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: { type: "function_call", id: "fc_throw", call_id: "call_throw", name: "todo_write", arguments: "" },
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_throw", delta: '{"ops":[]}' },
+			{ type: "response.function_call_arguments.delta", item_id: "fc_throw", delta: 7 },
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+		const streamResult = streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		);
+		const events: Array<{ type: string }> = [];
+		for await (const event of streamResult) events.push(event as { type: string });
+		const result = await streamResult.result();
+		expect(result.stopReason).toBe("error");
+		expect(events.filter(event => event.type === "toolcall_end")).toHaveLength(0);
+	});
+
+	it("does not salvage after a mismatched item receives a late terminal acknowledgement", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_late_ack",
+					call_id: "call_late_ack",
+					name: "todo_write",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_unknown_late_ack", delta: '{"ops":[]}' },
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "function_call",
+					id: "fc_unknown_late_ack",
+					call_id: "call_unknown_late_ack",
+					name: "todo_write",
+					arguments: '{"ops":[]}',
+				},
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+		expect(result.stopReason).toBe("error");
+	});
+
+	it.each([
+		"stream disconnected before completion: timed out (request_timeout)",
+		"stream closed before response.completed (request_timeout)",
+	])("does not salvage on an explicitly non-transient error code (%s)", async message => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_typed_error",
+					call_id: "call_typed_error",
+					name: "todo_write",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.done", item_id: "fc_typed_error", arguments: '{"ops":[]}' },
+			{ type: "error", code: "invalid_request_error", message },
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.content.filter(block => block.type === "toolCall")).toHaveLength(1);
+	});
+
+	it("still salvages timeout wording when no authoritative error code is present", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_untyped_error",
+					call_id: "call_untyped_error",
+					name: "todo_write",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.done", item_id: "fc_untyped_error", arguments: '{"ops":[]}' },
+			{ type: "error", message: "stream disconnected before completion: timed out (code=request_timeout)" },
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+		expect(result.stopReason).toBe("toolUse");
+	});
+
+	it.each([" ", "\n"])("does not authenticate whitespace after an empty snapshot (%j)", async delta => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_empty_snapshot",
+					call_id: "call_empty_snapshot",
+					name: "noop",
+					arguments: "{}",
+				},
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_empty_snapshot", delta },
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+		expect(result.stopReason).toBe("error");
+	});
+
+	it("does not authenticate whitespace after an empty snapshot during an idle stall", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-empty-snapshot-idle-");
+		setAgentDir(tempDir.path());
+		global.fetch = ((input: string | URL | Request, init?: RequestInit) =>
+			Promise.resolve(
+				createTimedCodexSse(
+					getRequestSignal(input, init),
+					[
+						{
+							type: "response.output_item.added",
+							item: {
+								type: "function_call",
+								id: "fc_empty_snapshot_idle",
+								call_id: "call_empty_snapshot_idle",
+								name: "noop",
+								arguments: "{}",
+							},
+						},
+						{ type: "response.function_call_arguments.delta", item_id: "fc_empty_snapshot_idle", delta: " " },
+					],
+					10,
+					false,
+				),
+			)) as typeof fetch;
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken(), streamIdleTimeoutMs: 20 },
+		).result();
+		expect(result.stopReason).toBe("error");
+	});
+
+	it("closes an open thinking lifecycle before salvaging a finalized call", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_finalized_then_thinking",
+					call_id: "call_finalized_then_thinking",
+					name: "noop",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.done", item_id: "fc_finalized_then_thinking", arguments: "{}" },
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "function_call",
+					id: "fc_finalized_then_thinking",
+					call_id: "call_finalized_then_thinking",
+					name: "noop",
+					arguments: "{}",
+				},
+			},
+			{ type: "response.output_item.added", item: { type: "reasoning", id: "reasoning_open", summary: [] } },
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+		const events: Array<{ type: string }> = [];
+		const streamResult = streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		);
+		for await (const event of streamResult) events.push(event as { type: string });
+		const result = await streamResult.result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(events.findIndex(event => event.type === "thinking_end")).toBeGreaterThan(-1);
+		expect(events.findIndex(event => event.type === "thinking_end")).toBeLessThan(
+			events.findIndex(event => event.type === "done"),
+		);
+	});
+
+	it("salvages an empty object from arguments.done after a transient close", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_empty_done",
+					call_id: "call_empty_done",
+					name: "noop",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.done", item_id: "fc_empty_done", arguments: "{}" },
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			{ type: "toolCall", id: "call_empty_done|fc_empty_done", name: "noop", arguments: {} },
+		]);
+	});
+
+	it("salvages an empty object from arguments.done after an idle stall", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-empty-done-idle-");
+		setAgentDir(tempDir.path());
+		global.fetch = ((input: string | URL | Request, init?: RequestInit) =>
+			Promise.resolve(
+				createTimedCodexSse(
+					getRequestSignal(input, init),
+					[
+						{
+							type: "response.output_item.added",
+							item: {
+								type: "function_call",
+								id: "fc_empty_done_idle",
+								call_id: "call_empty_done_idle",
+								name: "noop",
+								arguments: "",
+							},
+						},
+						{
+							type: "response.function_call_arguments.done",
+							item_id: "fc_empty_done_idle",
+							arguments: "{}",
+						},
+					],
+					10,
+					false,
+				),
+			)) as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken(), streamIdleTimeoutMs: 20 },
+		).result();
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			{
+				type: "toolCall",
+				id: "call_empty_done_idle|fc_empty_done_idle",
+				name: "noop",
+				arguments: {},
+			},
+		]);
+	});
+
+	it("salvages an empty object assembled from argument deltas", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_empty_delta",
+					call_id: "call_empty_delta",
+					name: "noop",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_empty_delta", delta: "{" },
+			{ type: "response.function_call_arguments.delta", item_id: "fc_empty_delta", delta: "}" },
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			{ type: "toolCall", id: "call_empty_delta|fc_empty_delta", name: "noop", arguments: {} },
+		]);
+	});
+
+	it("rejects an empty object when only the initial snapshot proves it", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_empty_snapshot",
+					call_id: "call_empty_snapshot",
+					name: "noop",
+					arguments: "{}",
+				},
+			},
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("error");
+	});
+
+	it("rejects an empty object when the initial snapshot has no argument events", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_empty_missing",
+					call_id: "call_empty_missing",
+					name: "noop",
+					arguments: "",
+				},
+			},
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("error");
+	});
+
+	it("rejects an authoritative empty object invalidated by a later delta", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_empty_invalidated",
+					call_id: "call_empty_invalidated",
+					name: "noop",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.done", item_id: "fc_empty_invalidated", arguments: "{}" },
+			{ type: "response.function_call_arguments.delta", item_id: "fc_empty_invalidated", delta: '{"later"' },
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("error");
+	});
+
+	it("salvages a finalized call and an active empty-object call together", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_finalized",
+					call_id: "call_finalized",
+					name: "first",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_finalized", delta: '{"ok":true}' },
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "function_call",
+					id: "fc_finalized",
+					call_id: "call_finalized",
+					name: "first",
+					arguments: '{"ok":true}',
+				},
+			},
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_empty_sibling",
+					call_id: "call_empty_sibling",
+					name: "second",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.done", item_id: "fc_empty_sibling", arguments: "{}" },
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			{ type: "toolCall", id: "call_finalized|fc_finalized", name: "first", arguments: { ok: true } },
+			{ type: "toolCall", id: "call_empty_sibling|fc_empty_sibling", name: "second", arguments: {} },
+		]);
+	});
+
+	it("rejects an active empty-object call when an earlier call is unfinished", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_partial_sibling",
+					call_id: "call_partial_sibling",
+					name: "first",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_partial_sibling", delta: '{"partial":' },
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_empty_active",
+					call_id: "call_empty_active",
+					name: "second",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.done", item_id: "fc_empty_active", arguments: "{}" },
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("error");
+	});
+
+	it("does not salvage an empty object after a non-transient failure", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_empty_error",
+					call_id: "call_empty_error",
+					name: "noop",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.done", item_id: "fc_empty_error", arguments: "{}" },
+			{ type: "error", code: "invalid_request_error", message: "invalid request" },
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Codex error event: invalid request (code=invalid_request_error)");
+	});
+
+	it("preserves malformed Unicode evidence when salvaging after a transient close", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_unicode",
+					call_id: "call_unicode",
+					name: "todo_write",
+					arguments: "",
+				},
+			},
+			{
+				type: "response.function_call_arguments.delta",
+				item_id: "fc_unicode",
+				delta: String.raw`{"value":"\uD800"}`,
+			},
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+		const [toolCall] = result.content.filter(block => block.type === "toolCall");
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(toolCall?.arguments).toEqual({ value: String.fromCharCode(0xd800) });
+		expect(toolCall?.escapedNonAsciiArguments).toBe(true);
+		expect(toolCall?.escapedUnicodeArgumentEvidence).toMatchObject({ malformed: true });
+		expect(JSON.stringify(toolCall)).not.toContain("escapedUnicodeArgumentEvidence");
+	});
+
 	it.each([
 		[
 			"unfinalized function call",
@@ -672,8 +1576,8 @@ describe("openai-codex streaming", () => {
 			createCodexTestContext(),
 			{ apiKey: createCodexTestToken(), streamIdleTimeoutMs: 20 },
 		).result();
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toBe("OpenAI Codex SSE stream stalled while waiting for the next event");
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.errorCode).toBe("codex_stream_closed_after_complete_tool_arguments");
 	});
 
 	it("does not time out SSE while whitespace arrives inside incomplete tool arguments", async () => {
