@@ -187,6 +187,12 @@ const CODEX_NON_RETRYABLE_EVENT_CODES = new Set([
 ]);
 const CODEX_NON_RETRYABLE_EVENT_MESSAGE =
 	/invalid[_ -]function[_ -]parameters|invalid schema for function|invalid[_ -]tool[_ -]schema|schema must have type ["']?object["']?|request blocked[^\n]*invalid[_ -]prompt|code=invalid[_ -]prompt/i;
+const CODEX_EXPLICIT_TERMINAL_VETO_CODES = new Set([
+	"invalid_function_parameters",
+	"invalid_schema",
+	"invalid_tool_schema",
+	"invalid_prompt",
+]);
 const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
 const CODEX_ACCOUNT_MODEL_UNAVAILABLE_MESSAGE = /\bnot supported when using codex with a chatgpt account\b/i;
@@ -2236,17 +2242,24 @@ async function handleCodexStreamFailure(
 	output.stopReason = context.options?.signal?.aborted ? "aborted" : "error";
 	output.errorStatus = extractHttpStatusFromError(error);
 	const transportFailure = transportFailureFacts(error);
+	const codexError = error instanceof CodexProviderStreamError ? error : undefined;
+	const explicitTerminalVeto =
+		codexError !== undefined && isExplicitCodexTerminalVeto(codexError.code, codexError.providerMessage);
 	const typedProviderCode =
-		error instanceof CodexProviderStreamError && CODEX_TYPED_TRANSPORT_PROVIDER_CODES.has(error.code ?? "")
-			? error.code
+		codexError !== undefined && CODEX_TYPED_TRANSPORT_PROVIDER_CODES.has(codexError.code ?? "")
+			? codexError.code
 			: undefined;
 	output.transportFailure = typedProviderCode
-		? {
-				...(transportFailure ?? { kind: "transport" as const }),
-				providerCode: typedProviderCode,
-				...(error instanceof CodexProviderStreamError && error.deterministicVeto ? { retryMaxAttempts: 1 } : {}),
-			}
-		: transportFailure;
+		? explicitTerminalVeto
+			? undefined
+			: {
+					...(transportFailure ?? { kind: "transport" as const }),
+					providerCode: typedProviderCode,
+					...(codexError?.deterministicVeto ? { retryMaxAttempts: 1 } : {}),
+				}
+		: explicitTerminalVeto
+			? undefined
+			: transportFailure;
 	output.errorMessage = await finalizeErrorMessage(error, context.requestContext.rawRequestDump);
 	output.duration = Date.now() - context.startTime;
 	if (context.firstTokenTime) {
@@ -3448,6 +3461,13 @@ function isCodexDeterministicVeto(code: string, message: string): boolean {
 	return (
 		(code && CODEX_NON_RETRYABLE_EVENT_CODES.has(code)) ||
 		(!!message && CODEX_NON_RETRYABLE_EVENT_MESSAGE.test(message))
+	);
+}
+
+export function isExplicitCodexTerminalVeto(code?: string, providerMessage?: string): boolean {
+	return (
+		CODEX_EXPLICIT_TERMINAL_VETO_CODES.has(code?.toLowerCase() ?? "") ||
+		CODEX_NON_RETRYABLE_EVENT_MESSAGE.test(providerMessage ?? "")
 	);
 }
 

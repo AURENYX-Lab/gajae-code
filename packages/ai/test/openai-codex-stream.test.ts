@@ -1239,6 +1239,30 @@ describe("openai-codex streaming", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain(`code=${code}`);
 		expect(result.transportFailure).toMatchObject({ kind: "transport", providerCode: code });
+		expect(result.transportFailure?.retryMaxAttempts).toBeUndefined();
+	});
+
+	it("preserves a code-only Codex overload as retryable transport facts", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-provider-overload-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const sse = `data: ${JSON.stringify({ type: "error", code: "server_is_overloaded" })}\n\n`;
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: token,
+			streamMaxRetries: 0,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.transportFailure).toMatchObject({
+			kind: "transport",
+			providerCode: "server_is_overloaded",
+		});
+		expect(result.transportFailure?.retryMaxAttempts).toBeUndefined();
 	});
 
 	it("stops reading SSE responses after a terminal response event", async () => {
@@ -1515,7 +1539,7 @@ describe("openai-codex streaming", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("invalid_function_parameters");
-		expect(result.transportFailure?.retryMaxAttempts).toBe(1);
+		expect(result.transportFailure).toBeUndefined();
 	});
 
 	it("honors streamMaxRetries for replay-safe Codex stream failures", async () => {
