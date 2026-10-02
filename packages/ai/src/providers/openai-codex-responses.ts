@@ -368,6 +368,7 @@ type CodexOutputBlock =
 			partialJson: string;
 			doneInput?: string;
 			argumentsComplete?: boolean;
+			argumentsAuthoritative?: boolean;
 	  });
 export interface OpenAICodexWebSocketDebugStats {
 	fullContextRequests: number;
@@ -811,6 +812,7 @@ function removeTransientBlockIndices(output: AssistantMessage): void {
 			delete (block as { partialJson?: string }).partialJson;
 			delete (block as { doneInput?: string }).doneInput;
 			delete (block as { argumentsComplete?: boolean }).argumentsComplete;
+			delete (block as { argumentsAuthoritative?: boolean }).argumentsAuthoritative;
 		}
 	}
 }
@@ -1270,7 +1272,8 @@ function trySalvageCodexFinalizedToolCalls(
 			? runtime.currentBlock
 			: undefined;
 	const completeActiveToolCall =
-		activeToolCall?.argumentsComplete === true && Object.keys(activeToolCall.arguments).length > 0;
+		activeToolCall?.argumentsComplete === true &&
+		(activeToolCall.argumentsAuthoritative === true || Object.keys(activeToolCall.arguments).length > 0);
 	const hasCompleteArguments = toolCalls.every(
 		toolCall =>
 			runtime.finalizedToolCallIds.has(toolCall.id) || (toolCall === activeToolCall && completeActiveToolCall),
@@ -1306,6 +1309,7 @@ function trySalvageCodexFinalizedToolCalls(
 		captureUnicodeEscapeEvidence(activeToolCall, rawPartialJson);
 		delete (activeToolCall as { partialJson?: string }).partialJson;
 		delete (activeToolCall as { argumentsComplete?: boolean }).argumentsComplete;
+		delete (activeToolCall as { argumentsAuthoritative?: boolean }).argumentsAuthoritative;
 		runtime.finalizedToolCallIds.add(toolCall.id);
 		runtime.nativeOutputItems.push({
 			...item,
@@ -1518,13 +1522,18 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 			// treat an incomplete snapshot as executable arguments.
 		}
 		const hasValidInitialArguments = isCompleteJsonObject(initialArguments);
-		const block: ToolCall & { partialJson: string; argumentsComplete: boolean } = {
+		const block: ToolCall & {
+			partialJson: string;
+			argumentsComplete: boolean;
+			argumentsAuthoritative: boolean;
+		} = {
 			type: "toolCall",
 			id: encodeResponsesToolCallId(item.call_id, item.id),
 			name: codexToolCanonicalName(item.name),
 			arguments: hasValidInitialArguments ? parsedArguments : {},
 			partialJson: initialArguments,
 			argumentsComplete: hasValidInitialArguments && Object.keys(parsedArguments).length > 0,
+			argumentsAuthoritative: false,
 		};
 		captureUnicodeEscapeEvidence(block, initialArguments);
 		return block;
@@ -1702,6 +1711,7 @@ function handleToolCallArgumentsDelta(
 	currentBlock.partialJson += delta;
 	currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
 	currentBlock.argumentsComplete = isCompleteJsonObject(currentBlock.partialJson);
+	currentBlock.argumentsAuthoritative = currentBlock.argumentsComplete;
 	stream.push({ type: "toolcall_delta", contentIndex: blockIndex(), delta, partial: output });
 }
 
@@ -1716,6 +1726,7 @@ function handleToolCallArgumentsDone(
 		currentBlock.partialJson = args;
 		currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
 		currentBlock.argumentsComplete = isCompleteJsonObject(currentBlock.partialJson);
+		currentBlock.argumentsAuthoritative = currentBlock.argumentsComplete;
 		captureUnicodeEscapeEvidence(currentBlock, args);
 	}
 }
@@ -1860,6 +1871,7 @@ function handleOutputItemDone(
 		captureUnicodeEscapeEvidence(runtime.currentBlock, item.arguments);
 		delete (runtime.currentBlock as { partialJson?: string }).partialJson;
 		delete (runtime.currentBlock as { argumentsComplete?: boolean }).argumentsComplete;
+		delete (runtime.currentBlock as { argumentsAuthoritative?: boolean }).argumentsAuthoritative;
 		delete (runtime.currentBlock as { doneInput?: string }).doneInput;
 		runtime.canSafelyReplayWebsocketOverSse = false;
 		stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
