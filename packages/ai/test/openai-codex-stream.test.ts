@@ -721,7 +721,10 @@ describe("openai-codex streaming", () => {
 		expect(result.stopReason).toBe("error");
 	});
 
-	it.each(["timed out", "stream closed before response.completed"])(
+	it.each([
+		"stream disconnected before completion: timed out (request_timeout)",
+		"stream closed before response.completed (request_timeout)",
+	])(
 		"does not salvage on an explicitly non-transient error code (%s)",
 		async message => {
 			const sse = createCodexErrorSse([
