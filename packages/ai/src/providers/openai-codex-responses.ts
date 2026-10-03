@@ -153,7 +153,7 @@ const CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD = `tool[ _]calls?|function[ _
 const CODEX_ANCHOR_STALE_QUALIFIER = `invalid|expired|unknown|stale|not[ _-]?found|no longer`;
 const CODEX_PREVIOUS_RESPONSE_STALE_MESSAGE = new RegExp(
 	`(?:${CODEX_ANCHOR_STALE_QUALIFIER})[^\\n]{0,48}?${CODEX_PREVIOUS_RESPONSE_ID_TOKEN}` +
-	`|${CODEX_PREVIOUS_RESPONSE_ID_TOKEN}[^\\n]{0,48}?(?:${CODEX_ANCHOR_STALE_QUALIFIER})`,
+		`|${CODEX_PREVIOUS_RESPONSE_ID_TOKEN}[^\\n]{0,48}?(?:${CODEX_ANCHOR_STALE_QUALIFIER})`,
 	"i",
 );
 const CODEX_PREVIOUS_RESPONSE_STALE_PROSE_MESSAGE = new RegExp(
@@ -162,7 +162,7 @@ const CODEX_PREVIOUS_RESPONSE_STALE_PROSE_MESSAGE = new RegExp(
 	// `Previous response includes an unknown tool call.`), so every alternative
 	// carries both the tempered inter-token scan and a post-anchor lookahead.
 	`(?:${CODEX_ANCHOR_STALE_QUALIFIER})(?:(?!${CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD})[^\\n]){0,48}?${CODEX_PREVIOUS_RESPONSE_PROSE_TOKEN}(?![^\\n]{0,48}(?:${CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD}))` +
-	`|${CODEX_PREVIOUS_RESPONSE_PROSE_TOKEN}(?:(?!${CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD})[^\\n]){0,48}?(?:${CODEX_ANCHOR_STALE_QUALIFIER})(?![^\\n]{0,48}(?:${CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD}))`,
+		`|${CODEX_PREVIOUS_RESPONSE_PROSE_TOKEN}(?:(?!${CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD})[^\\n]){0,48}?(?:${CODEX_ANCHOR_STALE_QUALIFIER})(?![^\\n]{0,48}(?:${CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD}))`,
 	"i",
 );
 const CODEX_RETRYABLE_EVENT_CODES = new Set([
@@ -2495,10 +2495,10 @@ async function handleCodexStreamFailure(
 			: undefined;
 	output.transportFailure = typedProviderCode
 		? {
-			...(transportFailure ?? { kind: "transport" as const }),
-			providerCode: typedProviderCode,
-			...(error instanceof CodexProviderStreamError && error.deterministicVeto ? { retryMaxAttempts: 1 } : {}),
-		}
+				...(transportFailure ?? { kind: "transport" as const }),
+				providerCode: typedProviderCode,
+				...(error instanceof CodexProviderStreamError && error.deterministicVeto ? { retryMaxAttempts: 1 } : {}),
+			}
 		: transportFailure;
 	output.errorMessage = await finalizeErrorMessage(error, context.requestContext.rawRequestDump);
 	output.duration = Date.now() - context.startTime;
@@ -2791,10 +2791,10 @@ function getCodexWebSocketStateForPublicSession(
 	model: Model<"openai-codex-responses">,
 	options:
 		| {
-			sessionId?: string;
-			baseUrl?: string;
-			providerSessionState?: Map<string, ProviderSessionState>;
-		}
+				sessionId?: string;
+				baseUrl?: string;
+				providerSessionState?: Map<string, ProviderSessionState>;
+		  }
 		| undefined,
 ): CodexWebSocketSessionState | undefined {
 	const baseUrl = options?.baseUrl || model.baseUrl || CODEX_BASE_URL;
@@ -2831,8 +2831,8 @@ export function getOpenAICodexTransportDetails(
 		options?.preferWebsockets === false
 			? false
 			: isCodexWebSocketEnvEnabled() ||
-			options?.preferWebsockets === true ||
-			(isCodexWebSocketSafeByDefault() && model.preferWebsockets === true);
+				options?.preferWebsockets === true ||
+				(isCodexWebSocketSafeByDefault() && model.preferWebsockets === true);
 	const state = getCodexWebSocketStateForPublicSession(model, options);
 
 	return {
@@ -3588,18 +3588,18 @@ function supportsFreeformApplyPatchCodex(model: Model<"openai-codex-responses">)
 
 type CodexToolPayload =
 	| {
-		type: "function";
-		name: string;
-		description: string;
-		parameters: Record<string, unknown>;
-		strict?: boolean;
-	}
+			type: "function";
+			name: string;
+			description: string;
+			parameters: Record<string, unknown>;
+			strict?: boolean;
+	  }
 	| {
-		type: "custom";
-		name: string;
-		description: string;
-		format: { type: "grammar"; syntax: "lark" | "regex"; definition: string };
-	};
+			type: "custom";
+			name: string;
+			description: string;
+			format: { type: "grammar"; syntax: "lark" | "regex"; definition: string };
+	  };
 
 /** @internal Exported for tests. */
 export function convertOpenAICodexResponsesTools(
