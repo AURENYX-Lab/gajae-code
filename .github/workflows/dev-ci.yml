@@ -513,10 +513,12 @@ jobs:
           bun test ./packages/natives/test/path-identity-windows.test.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-  # RSS checkpoint gate: runs the existing harness scripts/verify-rss-checkpoints.ts
-  # against the compiled gjc binary and compares it, fail-closed, with the previous
-  # published stable release binary (same baseline convention as the release
-  # rss_checkpoint job in ci.yml). Only the cheap subset runs by default:
+  # RSS checkpoint compare: runs the existing harness scripts/verify-rss-checkpoints.ts
+  # against the compiled gjc binary and compares it with the previous published
+  # stable release binary (same baseline convention and same --advisory stage as the
+  # release rss_checkpoint job in ci.yml). Regressions over tolerance are reported in
+  # the job summary, not failed; a missing baseline or harness error still fails the
+  # job. Only the cheap subset runs by default:
   # S1(--help startup), S2(--version), S3(interactive first render). Each scenario
   # costs 13 short-lived runs, so the gate stays minutes-scale; the heavy
   # tool-workload scenarios S4(1 MiB read), S5(8 MiB bash) and S7(MCP echo) remain
@@ -611,19 +613,31 @@ jobs:
           out="$RUNNER_TEMP/rss/checkpoints"
           bun scripts/verify-rss-checkpoints.ts --scenario S1,S2,S3 --write-baseline --matrix dev-ci \
              --binary "$RUNNER_TEMP/rss/previous/gjc-linux-x64" --commit "$PREVIOUS_COMMIT" --output-dir "$out"
-      - name: Measure and compare current binary (fail-closed)
+      - name: Measure and compare current binary (advisory)
         env:
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
           PREVIOUS_COMMIT: ${{ steps.previous.outputs.commit }}
           CURRENT_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         shell: bash
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/rss/checkpoints"
-          # --compare without --advisory: a regression over tolerance exits 1 and
-          # fails this job; no step masks the harness exit code.
-          bun scripts/verify-rss-checkpoints.ts --scenario S1,S2,S3 --compare --allow-baseline-drift --matrix dev-ci \
+          # Stage 1 of the threshold-promotion process (docs/perf-profiling-corpus.md):
+          # RSS thresholds stay advisory until variance is characterized and a human
+          # approves enforcement. --advisory reports regressions in the job summary
+          # without failing; every other harness error (missing baseline, bad binary,
+          # usage) still exits non-zero, and pipefail keeps tee from masking it.
+          # The baseline is the previous stable release, so a reported delta is
+          # release-to-head drift, not a delta caused by this commit alone.
+          {
+            echo "### RSS checkpoint compare (advisory)"
+            echo "Baseline: \`$PREVIOUS_TAG\` (\`$PREVIOUS_COMMIT\`). Deltas are release-to-head drift, not attributable to this commit alone."
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          bun scripts/verify-rss-checkpoints.ts --scenario S1,S2,S3 --compare --advisory --allow-baseline-drift --matrix dev-ci \
              --baseline "$out/$PREVIOUS_COMMIT.json" \
-             --binary packages/coding-agent/dist/gjc --commit "$CURRENT_COMMIT" --output-dir "$out"
+             --binary packages/coding-agent/dist/gjc --commit "$CURRENT_COMMIT" --output-dir "$out" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Upload RSS checkpoint evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
