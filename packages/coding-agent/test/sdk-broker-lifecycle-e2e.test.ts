@@ -561,27 +561,30 @@ test("readiness polling avoids repeated heartbeat checkpoints and full index ref
 	const agentDir = path.join(root, "agent");
 	const fixture = path.join(root, "ready-poll-cost.ts");
 	const pollingStartedPath = path.join(root, "polling-started");
-	const broker = new Broker({ agentDir });
+	const broker = new Broker({ agentDir, heartbeatTtlMs: 60_000 });
 	let nowMs = 1_000;
 	await fs.writeFile(
 		fixture,
 		`const request = JSON.parse(process.env.GJC_SDK_LIFECYCLE_REQUEST ?? "{}");
 const stateRoot = request.stateRoot;
 const sessionId = request.sessionId;
+const marker = JSON.stringify({ pid: process.pid, effectMarker: request.effectMarker, incarnation: "fixture-incarnation" });
+await Bun.write(stateRoot + "/sdk/" + sessionId + ".lifecycle.json", marker);
 const readyPath = stateRoot + "/sdk/" + sessionId + ".lifecycle.ready.json";
 const endpointPath = stateRoot + "/sdk/" + sessionId + ".json";
-await Bun.write(readyPath, JSON.stringify({ pid: process.pid, effectMarker: request.effectMarker }));
-await Bun.write(endpointPath, "{}");
+await Bun.write(readyPath, marker);
+await Bun.write(endpointPath, JSON.stringify({ sessionId, url: "ws://127.0.0.1:1", token: "fixture-token", pid: process.pid }));
 await Bun.write(${JSON.stringify(pollingStartedPath)}, "ready");
 setInterval(() => {}, 1_000_000);
 `,
 	);
-	const checkpointSpy = vi.spyOn(SessionIndex.prototype, "checkpointLiveHeartbeats");
+	const heartbeatSpy = vi.spyOn(Broker.prototype, "heartbeatSessions");
 	const refreshSpy = vi.spyOn(SessionIndex.prototype, "refresh");
 	const pollingStarted = Promise.withResolvers<void>();
 	const watcher = syncFs.watch(root, (_event, filename) => {
 		if (filename?.toString() === path.basename(pollingStartedPath)) pollingStarted.resolve();
 	});
+	setProcessIncarnationForTest(broker, () => "fixture-incarnation");
 	setLifecycleCommandResolverForTest(broker, () => ({ file: process.execPath, args: ["run", fixture] }));
 	setLifecycleTimingForTest(broker, {
 		now: () => nowMs,
@@ -598,17 +601,18 @@ setInterval(() => {}, 1_000_000);
 			"ready-poll-cost",
 		);
 		await pollingStarted.promise;
-		checkpointSpy.mockClear();
+		heartbeatSpy.mockClear();
 		refreshSpy.mockClear();
 		const response = await responsePromise;
 		expect(response).toMatchObject({ ok: false });
-		expect(checkpointSpy.mock.calls.length).toBeLessThanOrEqual(1);
+		expect(heartbeatSpy.mock.calls.length).toBeLessThanOrEqual(1);
 		expect(refreshSpy.mock.calls.length).toBeLessThanOrEqual(2);
 	} finally {
 		watcher.close();
 		setLifecycleTimingForTest(broker, undefined);
 		setLifecycleCommandResolverForTest(broker, undefined);
-		checkpointSpy.mockRestore();
+		setProcessIncarnationForTest(broker, undefined);
+		heartbeatSpy.mockRestore();
 		refreshSpy.mockRestore();
 		await broker.stop();
 		await fs.rm(root, { recursive: true, force: true });
