@@ -80,7 +80,10 @@ async function createThinkingFixture(validLevels: string[], applyThinking: boole
 					if (frame.operation === "session.create") {
 						const endpointPath = path.join(cwd, ".gjc", "state", "sdk", `${sessionId}.json`);
 						await fs.mkdir(path.dirname(endpointPath), { recursive: true });
-						await Bun.write(endpointPath, JSON.stringify({ sessionId, pid: process.pid, url: `ws://127.0.0.1:${server.port}`, token }));
+						await Bun.write(
+							endpointPath,
+							JSON.stringify({ sessionId, pid: process.pid, url: `ws://127.0.0.1:${server.port}`, token }),
+						);
 						await fs.utimes(endpointPath, 0.001, 0.001);
 						const endpointMtimeMs = (await fs.stat(endpointPath)).mtimeMs;
 						const index = await new SessionIndex(agentDir).open();
