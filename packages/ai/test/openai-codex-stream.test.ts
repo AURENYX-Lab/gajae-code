@@ -221,9 +221,9 @@ class MockWebSocket {
 	constructor(
 		public readonly url: string,
 		public readonly options?: { headers?: WsHeaders },
-	) {}
+	) { }
 
-	send(_data: string): void {}
+	send(_data: string): void { }
 
 	close(): void {
 		this.readyState = MockWebSocket.CLOSED;
@@ -407,6 +407,56 @@ describe("openai-codex streaming", () => {
 		expect(result.content).toEqual([
 			{ type: "toolCall", id: "call_1|fc_1", name: "todo_write", arguments: { ops: [] } },
 		]);
+	});
+
+	it("salvages a complete todo_write snapshot after a later reasoning item opens", async () => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: { type: "reasoning", id: "rs_production", summary: [] },
+			},
+			{
+				type: "response.output_item.done",
+				item: { type: "reasoning", id: "rs_production", summary: [] },
+			},
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_production",
+					call_id: "call_production",
+					name: "todo_write",
+					arguments: '{"ops":[]}',
+				},
+			},
+			{
+				type: "response.output_item.added",
+				item: { type: "reasoning", id: "rs_after_call", summary: [] },
+			},
+			{
+				type: "error",
+				code: "request_timeout",
+				message:
+					"stream error: stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toContainEqual({
+			type: "toolCall",
+			id: "call_production|fc_production",
+			name: "todo_write",
+			arguments: { ops: [] },
+		});
 	});
 
 	it("keeps a complete tool call when transient close omits output_item.done", async () => {
@@ -1358,11 +1408,11 @@ describe("openai-codex streaming", () => {
 			label === "non-transient failure"
 				? { type: "error", code: "invalid_request_error", message: "invalid request" }
 				: {
-						type: "error",
-						code: "request_timeout",
-						message:
-							"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
-					};
+					type: "error",
+					code: "request_timeout",
+					message:
+						"stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+				};
 		const sse = createCodexErrorSse([...prefix, error]);
 		global.fetch = vi.fn(
 			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
@@ -2083,13 +2133,13 @@ describe("openai-codex streaming", () => {
 				},
 				...(streamedDelta
 					? [
-							{
-								type: "response.reasoning_summary_text.delta",
-								item_id: "reasoning_1",
-								output_index: 0,
-								delta: streamedDelta,
-							},
-						]
+						{
+							type: "response.reasoning_summary_text.delta",
+							item_id: "reasoning_1",
+							output_index: 0,
+							delta: streamedDelta,
+						},
+					]
 					: []),
 				{ type: "response.reasoning_summary_part.done", item_id: "reasoning_1", output_index: 0 },
 				{
@@ -5538,7 +5588,7 @@ describe("openai-codex streaming", () => {
 				.mockResolvedValue(
 					new Response(
 						`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] } })}\n\n` +
-							createCompletedCodexSse("Recovered from SSE"),
+						createCompletedCodexSse("Recovered from SSE"),
 						{ headers: { "content-type": "text/event-stream" } },
 					),
 				);
@@ -6295,7 +6345,7 @@ describe("openai-codex streaming", () => {
 		}
 		global.WebSocket = StalledToolCallWebSocket as unknown as typeof WebSocket;
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			new Response(new ReadableStream({ start() {} }), {
+			new Response(new ReadableStream({ start() { } }), {
 				status: 200,
 				headers: { "content-type": "text/event-stream" },
 			}),
@@ -6352,7 +6402,7 @@ describe("openai-codex streaming", () => {
 		}
 		global.WebSocket = SilentTodoWebSocket as unknown as typeof WebSocket;
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			new Response(new ReadableStream({ start() {} }), {
+			new Response(new ReadableStream({ start() { } }), {
 				status: 200,
 				headers: { "content-type": "text/event-stream" },
 			}),

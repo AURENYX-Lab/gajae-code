@@ -153,7 +153,7 @@ const CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD = `tool[ _]calls?|function[ _
 const CODEX_ANCHOR_STALE_QUALIFIER = `invalid|expired|unknown|stale|not[ _-]?found|no longer`;
 const CODEX_PREVIOUS_RESPONSE_STALE_MESSAGE = new RegExp(
 	`(?:${CODEX_ANCHOR_STALE_QUALIFIER})[^\\n]{0,48}?${CODEX_PREVIOUS_RESPONSE_ID_TOKEN}` +
-		`|${CODEX_PREVIOUS_RESPONSE_ID_TOKEN}[^\\n]{0,48}?(?:${CODEX_ANCHOR_STALE_QUALIFIER})`,
+	`|${CODEX_PREVIOUS_RESPONSE_ID_TOKEN}[^\\n]{0,48}?(?:${CODEX_ANCHOR_STALE_QUALIFIER})`,
 	"i",
 );
 const CODEX_PREVIOUS_RESPONSE_STALE_PROSE_MESSAGE = new RegExp(
@@ -162,7 +162,7 @@ const CODEX_PREVIOUS_RESPONSE_STALE_PROSE_MESSAGE = new RegExp(
 	// `Previous response includes an unknown tool call.`), so every alternative
 	// carries both the tempered inter-token scan and a post-anchor lookahead.
 	`(?:${CODEX_ANCHOR_STALE_QUALIFIER})(?:(?!${CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD})[^\\n]){0,48}?${CODEX_PREVIOUS_RESPONSE_PROSE_TOKEN}(?![^\\n]{0,48}(?:${CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD}))` +
-		`|${CODEX_PREVIOUS_RESPONSE_PROSE_TOKEN}(?:(?!${CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD})[^\\n]){0,48}?(?:${CODEX_ANCHOR_STALE_QUALIFIER})(?![^\\n]{0,48}(?:${CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD}))`,
+	`|${CODEX_PREVIOUS_RESPONSE_PROSE_TOKEN}(?:(?!${CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD})[^\\n]){0,48}?(?:${CODEX_ANCHOR_STALE_QUALIFIER})(?![^\\n]{0,48}(?:${CODEX_PREVIOUS_RESPONSE_STALE_SUBFIELD_GUARD}))`,
 	"i",
 );
 const CODEX_RETRYABLE_EVENT_CODES = new Set([
@@ -367,11 +367,13 @@ type CodexOutputBlock =
 	| CodexThinkingBlock
 	| TextContent
 	| (ToolCall & {
-			partialJson: string;
-			doneInput?: string;
-			argumentsComplete?: boolean;
-			argumentsAuthoritative?: boolean;
-	  });
+		partialJson: string;
+		doneInput?: string;
+		argumentsComplete?: boolean;
+		argumentsAuthoritative?: boolean;
+		sourceItemId?: string;
+		sourceCallId?: string;
+	});
 export interface OpenAICodexWebSocketDebugStats {
 	fullContextRequests: number;
 	deltaRequests: number;
@@ -818,6 +820,8 @@ function removeTransientBlockIndices(output: AssistantMessage): void {
 			delete (block as { doneInput?: string }).doneInput;
 			delete (block as { argumentsComplete?: boolean }).argumentsComplete;
 			delete (block as { argumentsAuthoritative?: boolean }).argumentsAuthoritative;
+			delete (block as { sourceItemId?: string }).sourceItemId;
+			delete (block as { sourceCallId?: string }).sourceCallId;
 		}
 	}
 }
@@ -1274,16 +1278,19 @@ function trySalvageCodexFinalizedToolCalls(
 	error: unknown,
 ): boolean {
 	const toolCalls = context.output.content.filter((block): block is ToolCall => block.type === "toolCall");
-	const activeToolCall =
-		runtime.currentItem?.type === "function_call" && runtime.currentBlock?.type === "toolCall"
-			? runtime.currentBlock
-			: undefined;
-	const completeActiveToolCall =
-		activeToolCall?.argumentsComplete === true &&
-		(activeToolCall.argumentsAuthoritative === true || Object.keys(activeToolCall.arguments).length > 0);
+	const completeToolCalls = toolCalls.filter(toolCall => {
+		const block = toolCall as ToolCall & {
+			argumentsComplete?: boolean;
+			argumentsAuthoritative?: boolean;
+		};
+		return (
+			!runtime.finalizedToolCallIds.has(toolCall.id) &&
+			block.argumentsComplete === true &&
+			(block.argumentsAuthoritative === true || Object.keys(block.arguments).length > 0)
+		);
+	});
 	const hasCompleteArguments = toolCalls.every(
-		toolCall =>
-			runtime.finalizedToolCallIds.has(toolCall.id) || (toolCall === activeToolCall && completeActiveToolCall),
+		toolCall => runtime.finalizedToolCallIds.has(toolCall.id) || completeToolCalls.includes(toolCall),
 	);
 	const isIdleStall =
 		error instanceof Error && error.message === "OpenAI Codex SSE stream stalled while waiting for the next event";
@@ -1305,7 +1312,7 @@ function trySalvageCodexFinalizedToolCalls(
 		return false;
 	}
 
-	if (canSalvageFinalizedCall && runtime.currentBlock?.type === "thinking") {
+	if ((canSalvageFinalizedCall || canSalvageCompleteArguments) && runtime.currentBlock?.type === "thinking") {
 		context.stream.push({
 			type: "thinking_end",
 			contentIndex: context.output.content.length - 1,
@@ -1317,33 +1324,54 @@ function trySalvageCodexFinalizedToolCalls(
 		runtime.currentBlock = null;
 	}
 
-	if (canSalvageCompleteArguments && activeToolCall && !runtime.finalizedToolCallIds.has(activeToolCall.id)) {
-		const item = runtime.currentItem;
-		const toolCall: ToolCall = {
-			type: "toolCall",
-			id: activeToolCall.id,
-			name: activeToolCall.name,
-			arguments: activeToolCall.arguments,
-		};
-		const rawPartialJson = activeToolCall.partialJson;
-		captureUnicodeEscapeEvidence(toolCall, rawPartialJson);
-		Object.assign(activeToolCall, toolCall);
-		captureUnicodeEscapeEvidence(activeToolCall, rawPartialJson);
-		delete (activeToolCall as { partialJson?: string }).partialJson;
-		delete (activeToolCall as { argumentsComplete?: boolean }).argumentsComplete;
-		delete (activeToolCall as { argumentsAuthoritative?: boolean }).argumentsAuthoritative;
-		runtime.finalizedToolCallIds.add(toolCall.id);
-		runtime.nativeOutputItems.push({
-			...item,
-			arguments: JSON.stringify(toolCall.arguments),
-			status: "completed",
-		} as Record<string, unknown>);
-		context.stream.push({
-			type: "toolcall_end",
-			contentIndex: context.output.content.length - 1,
-			toolCall,
-			partial: context.output,
-		});
+	if (canSalvageCompleteArguments) {
+		for (const toolCallBlock of completeToolCalls) {
+			const activeToolCall = toolCallBlock as ToolCall & {
+				partialJson: string;
+				argumentsComplete?: boolean;
+				argumentsAuthoritative?: boolean;
+				sourceItemId?: string;
+				sourceCallId?: string;
+			};
+			const item =
+				runtime.currentBlock === activeToolCall && runtime.currentItem?.type === "function_call"
+					? runtime.currentItem
+					: {
+						type: "function_call",
+						id: activeToolCall.sourceItemId,
+						call_id: activeToolCall.sourceCallId,
+						name: activeToolCall.name,
+						arguments: activeToolCall.partialJson,
+					};
+			if (typeof item.id !== "string" || typeof item.call_id !== "string") continue;
+			const toolCall: ToolCall = {
+				type: "toolCall",
+				id: activeToolCall.id,
+				name: activeToolCall.name,
+				arguments: activeToolCall.arguments,
+			};
+			const rawPartialJson = activeToolCall.partialJson;
+			captureUnicodeEscapeEvidence(toolCall, rawPartialJson);
+			Object.assign(activeToolCall, toolCall);
+			captureUnicodeEscapeEvidence(activeToolCall, rawPartialJson);
+			delete (activeToolCall as { partialJson?: string }).partialJson;
+			delete (activeToolCall as { argumentsComplete?: boolean }).argumentsComplete;
+			delete (activeToolCall as { argumentsAuthoritative?: boolean }).argumentsAuthoritative;
+			delete (activeToolCall as { sourceItemId?: string }).sourceItemId;
+			delete (activeToolCall as { sourceCallId?: string }).sourceCallId;
+			runtime.finalizedToolCallIds.add(toolCall.id);
+			runtime.nativeOutputItems.push({
+				...item,
+				arguments: JSON.stringify(toolCall.arguments),
+				status: "completed",
+			} as Record<string, unknown>);
+			context.stream.push({
+				type: "toolcall_end",
+				contentIndex: context.output.content.indexOf(activeToolCall),
+				toolCall,
+				partial: context.output,
+			});
+		}
 		runtime.currentItem = null;
 		runtime.currentBlock = null;
 	}
@@ -1559,6 +1587,8 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 			partialJson: string;
 			argumentsComplete: boolean;
 			argumentsAuthoritative: boolean;
+			sourceItemId?: string;
+			sourceCallId?: string;
 		} = {
 			type: "toolCall",
 			id: encodeResponsesToolCallId(item.call_id, item.id),
@@ -1567,6 +1597,8 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 			partialJson: initialArguments,
 			argumentsComplete: hasValidInitialArguments && Object.keys(parsedArguments).length > 0,
 			argumentsAuthoritative: false,
+			sourceItemId: item.id,
+			sourceCallId: item.call_id,
 		};
 		captureUnicodeEscapeEvidence(block, initialArguments);
 		return block;
@@ -1920,6 +1952,8 @@ function handleOutputItemDone(
 		delete (runtime.currentBlock as { argumentsComplete?: boolean }).argumentsComplete;
 		delete (runtime.currentBlock as { argumentsAuthoritative?: boolean }).argumentsAuthoritative;
 		delete (runtime.currentBlock as { doneInput?: string }).doneInput;
+		delete (runtime.currentBlock as { sourceItemId?: string }).sourceItemId;
+		delete (runtime.currentBlock as { sourceCallId?: string }).sourceCallId;
 		runtime.canSafelyReplayWebsocketOverSse = false;
 		stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
 		runtime.currentItem = null;
@@ -2461,10 +2495,10 @@ async function handleCodexStreamFailure(
 			: undefined;
 	output.transportFailure = typedProviderCode
 		? {
-				...(transportFailure ?? { kind: "transport" as const }),
-				providerCode: typedProviderCode,
-				...(error instanceof CodexProviderStreamError && error.deterministicVeto ? { retryMaxAttempts: 1 } : {}),
-			}
+			...(transportFailure ?? { kind: "transport" as const }),
+			providerCode: typedProviderCode,
+			...(error instanceof CodexProviderStreamError && error.deterministicVeto ? { retryMaxAttempts: 1 } : {}),
+		}
 		: transportFailure;
 	output.errorMessage = await finalizeErrorMessage(error, context.requestContext.rawRequestDump);
 	output.duration = Date.now() - context.startTime;
@@ -2757,10 +2791,10 @@ function getCodexWebSocketStateForPublicSession(
 	model: Model<"openai-codex-responses">,
 	options:
 		| {
-				sessionId?: string;
-				baseUrl?: string;
-				providerSessionState?: Map<string, ProviderSessionState>;
-		  }
+			sessionId?: string;
+			baseUrl?: string;
+			providerSessionState?: Map<string, ProviderSessionState>;
+		}
 		| undefined,
 ): CodexWebSocketSessionState | undefined {
 	const baseUrl = options?.baseUrl || model.baseUrl || CODEX_BASE_URL;
@@ -2797,8 +2831,8 @@ export function getOpenAICodexTransportDetails(
 		options?.preferWebsockets === false
 			? false
 			: isCodexWebSocketEnvEnabled() ||
-				options?.preferWebsockets === true ||
-				(isCodexWebSocketSafeByDefault() && model.preferWebsockets === true);
+			options?.preferWebsockets === true ||
+			(isCodexWebSocketSafeByDefault() && model.preferWebsockets === true);
 	const state = getCodexWebSocketStateForPublicSession(model, options);
 
 	return {
@@ -3554,18 +3588,18 @@ function supportsFreeformApplyPatchCodex(model: Model<"openai-codex-responses">)
 
 type CodexToolPayload =
 	| {
-			type: "function";
-			name: string;
-			description: string;
-			parameters: Record<string, unknown>;
-			strict?: boolean;
-	  }
+		type: "function";
+		name: string;
+		description: string;
+		parameters: Record<string, unknown>;
+		strict?: boolean;
+	}
 	| {
-			type: "custom";
-			name: string;
-			description: string;
-			format: { type: "grammar"; syntax: "lark" | "regex"; definition: string };
-	  };
+		type: "custom";
+		name: string;
+		description: string;
+		format: { type: "grammar"; syntax: "lark" | "regex"; definition: string };
+	};
 
 /** @internal Exported for tests. */
 export function convertOpenAICodexResponsesTools(
