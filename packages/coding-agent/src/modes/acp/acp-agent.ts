@@ -1798,12 +1798,13 @@ export class AcpAgent implements Agent {
 					if (adapter) adapter.acceptFrame(acpFrame);
 					else this.#pendingRouterFrames.get(attachment.sessionId)?.push(acpFrame);
 				},
-				onSessionRemoved: attachment => {
+				onSessionRemoved: (attachment, removalReason) => {
 					const adapter =
 						this.#sessions.get(attachment.sessionId)?.adapter ??
 						this.#pendingRouterAdapters.get(attachment.sessionId);
 					adapter?.revokeAttachment(attachment);
-					if (adapter) this.#settlePromptAfterHostClose(attachment.sessionId, "host_exit");
+					if (adapter && removalReason !== "replaced_same_generation")
+						this.#settlePromptAfterHostClose(attachment.sessionId, removalReason ?? "host_exit");
 				},
 			},
 		});
@@ -4477,6 +4478,7 @@ export class AcpAgent implements Agent {
 			this.#startUncertainPromptRecovery(id, record, waiter);
 			return;
 		}
+		record.busy = record.backgroundBusy;
 		void this.#rejectPrompt(
 			record,
 			id,
@@ -4540,7 +4542,7 @@ export class AcpAgent implements Agent {
 				"prompt_abandoned",
 				`ACP prompt was abandoned after ${Math.round(silenceMs / 1_000)}s of silence: ${cause}. Last frame was ` +
 					`"${waiter.lastFrameType}" (${describeCorrelation(waiter.correlation)}). The turn was settled so the ` +
-					`client stops waiting; a new prompt requires a valid or re-established session attachment.`,
+					`client stops waiting; the session still accepts the next prompt.`,
 				plan,
 			),
 		);

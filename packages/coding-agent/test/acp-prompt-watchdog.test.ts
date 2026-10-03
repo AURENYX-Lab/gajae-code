@@ -131,6 +131,16 @@ function idleUpdates(updates: SessionNotification[]): number {
 	).length;
 }
 
+function latestPhase(updateList: SessionNotification[]): { phase?: string; running?: boolean } | undefined {
+	for (let index = updateList.length - 1; index >= 0; index--) {
+		const update = updateList[index]?.update;
+		if (update?.sessionUpdate !== "session_info_update") continue;
+		const meta = (update as { _meta?: { gjcPhase?: string; gjcRunning?: boolean } })._meta;
+		if (meta) return { phase: meta.gjcPhase, running: meta.gjcRunning };
+	}
+	return undefined;
+}
+
 function textChunks(updates: SessionNotification[]): number {
 	return updates.filter(update => update.update.sessionUpdate === "agent_message_chunk").length;
 }
@@ -541,6 +551,7 @@ test("a prompt awaiting the model past the inference bound is rejected instead o
 		expect(message).toContain("ACP prompt was abandoned");
 		expect(message).toContain(`${Math.round(ACP_PROMPT_INFERENCE_TIMEOUT_MS / 1_000)}s of silence`);
 		expect(message).toContain("the SDK session host stopped producing frames");
+		expect(message).toContain("the session still accepts the next prompt");
 		expect(message).toContain('"agent_start"');
 		expect(message).toContain(`commandId=${commandId}`);
 		expect(message).toContain(`turnId=${turnId}`);
@@ -788,6 +799,7 @@ test("a session host close settles an active prompt immediately", async () => {
 	const fixture = await createFixture();
 	try {
 		const { pending } = await startTurn(fixture);
+		const idleBefore = idleUpdates(fixture.updates);
 		fixture.sendToolStart("host-exit-tool");
 		await waitFor(() => toolCalls(fixture.updates) > 0, "tool start");
 		fixture.sendSessionClosed();
@@ -804,6 +816,32 @@ test("a session host close settles an active prompt immediately", async () => {
 		expect(error).toMatchObject({ code: "prompt_abandoned" });
 		expect((error as { message: string }).message).toContain("host_exit");
 		expect((error as { message: string }).message).not.toContain("still accepts the next prompt");
+		await waitFor(() => idleUpdates(fixture.updates) > idleBefore, "host-close idle phase");
+		expect(latestPhase(fixture.updates)).toMatchObject({
+			phase: "idle",
+			running: false,
+		});
+	} finally {
+		fixture.dispose();
+	}
+});
+
+test("host-close settlement preserves independent background busy state", async () => {
+	const fixture = await createFixture();
+	try {
+		const first = await startTurn(fixture);
+		fixture.sendSessionClosed();
+		await expect(bounded(first.pending, "first host-close settlement")).rejects.toMatchObject({
+			code: "prompt_abandoned",
+		});
+		fixture.send({ type: "activity", sessionId: fixture.sessionId, state: "busy" });
+		const { pending } = await startTurn(fixture);
+		fixture.sendSessionClosed();
+		await expect(bounded(pending, "host-close settlement")).rejects.toMatchObject({ code: "prompt_abandoned" });
+		expect(latestPhase(fixture.updates)).toMatchObject({
+			phase: "working",
+			running: true,
+		});
 	} finally {
 		fixture.dispose();
 	}
