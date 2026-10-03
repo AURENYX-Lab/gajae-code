@@ -20,7 +20,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function displayText(value: string): string {
-	return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 4000);
+	return value.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, " ").slice(0, 4000);
 }
 
 /** Unsupported constraints are rejected, never silently discarded. */
@@ -102,13 +102,18 @@ export function createMCPFormInputHandler(deps: MCPFormInputDependencies): MCPIn
 					await receipt?.settle({ kind: "resolve_without_commit", reason: "aborted" });
 					return undefined;
 				}
+				if (receipt?.interaction.kind === "control") {
+					await receipt.settle({ kind: "invalid", reason: "invalid_control" });
+					throw new Error("Invalid MCP form control");
+				}
 				if (value !== undefined && choices && !choices.includes(value)) {
 					await receipt?.settle({ kind: "invalid", reason: "invalid_option" });
 					throw new Error("Invalid MCP form answer");
 				}
-				await receipt?.settle(
+				const settlement = await receipt?.settle(
 					value === undefined ? { kind: "resolve_without_commit", reason: "cancelled" } : { kind: "commit" },
 				);
+				if (receipt && value !== undefined && settlement?.kind !== "committed") return undefined;
 				return value;
 			});
 		};
@@ -120,7 +125,10 @@ export function createMCPFormInputHandler(deps: MCPFormInputDependencies): MCPIn
 			if (action === "Decline") return { kind: "result", result: { action: "decline" } };
 			if (action !== "Accept") return { kind: "failed", reason: "error", message: "Invalid MCP form action" };
 			const choices = field.type === "boolean" ? ["Yes", "No"] : field.choices;
-			const answer = await ask(field.label, choices);
+			const answer = await ask(
+				`MCP server ${displayText(context.serverName)} (untrusted server text): ${field.label}`,
+				choices,
+			);
 			if (signal?.aborted) return { kind: "failed", reason: "cancelled" };
 			if (answer === undefined) return { kind: "result", result: { action: "cancel" } };
 			if (choices && !choices.includes(answer))

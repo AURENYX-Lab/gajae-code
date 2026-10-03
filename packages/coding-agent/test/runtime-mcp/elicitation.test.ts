@@ -9,7 +9,7 @@ import { createMCPFormInputHandler } from "../../src/runtime-mcp/elicitation";
 import type { MCPInputRequestHandler } from "../../src/runtime-mcp/types";
 import { createAgentSession } from "../../src/sdk/session";
 import { SessionManager } from "../../src/session/session-manager";
-import type { AskAnswerSource, AskSettlement } from "../../src/tools";
+import type { AskAnswerSource, AskRemoteReceipt, AskSettlement } from "../../src/tools";
 import { registerAskAnswerSource } from "../../src/tools/ask-answer-registry";
 
 const context = { serverName: "fixture", originMethod: "tools/call", correlationId: "exchange-1" };
@@ -145,7 +145,7 @@ describe("MCP form input user decisions", () => {
 				interaction: { kind: "value", value: values.shift()! },
 				settle: async settlement => {
 					settlements.push(settlement);
-					return { kind: "resolved_without_commit" };
+					return { kind: "committed", ack: { status: "delivered", messageId: 1 } };
 				},
 			}),
 		};
@@ -155,6 +155,93 @@ describe("MCP form input user decisions", () => {
 			result: { action: "accept", content: { value: "remote" } },
 		});
 		expect(settlements).toEqual([{ kind: "commit" }, { kind: "commit" }]);
+	});
+	it("attributes both prompts and strips bidi/format controls", async () => {
+		const { handler, prompts } = handlerWithAnswers(["Accept", "safe"]);
+		const form = request({ type: "string", title: "value\u202e\u200b\u2028" });
+		form.params.message = "request\u202e\u200b\u2029";
+		expect(await handler("input", form, context)).toMatchObject({ kind: "result" });
+		for (const prompt of prompts) {
+			expect(prompt).toContain("MCP server fixture");
+			expect(prompt).toContain("untrusted server text");
+			expect(prompt).not.toMatch(/[\p{Cc}\p{Cf}\u2028\u2029]/u);
+		}
+		const rejected = handlerWithAnswers(["Accept", "unsafe"]);
+		expect(
+			await rejected.handler("input", request({ type: "string", enum: ["value\u202e"] }), context),
+		).toMatchObject({ kind: "failed", reason: "unavailable" });
+		expect(rejected.prompts).toEqual([]);
+	});
+	it("does not accept a remote answer that was never committed", async () => {
+		for (const kind of ["resolved_without_commit", "invalid_closed"] as const) {
+			const source: AskAnswerSource = {
+				awaitAnswer: async () => undefined,
+				awaitAnswerRequest: async () => ({
+					source: "remote",
+					interaction: { kind: "value", value: "Accept" },
+					settle: async () => ({ kind }),
+				}),
+			};
+			const handler = createMCPFormInputHandler({
+				getUi: () => ({ hasUI: false }),
+				getAskAnswerSource: () => source,
+			});
+			expect(await handler("input", request(), context)).toEqual({ kind: "result", result: { action: "cancel" } });
+		}
+	});
+	it("closes invalid remote options and controls without accepting", async () => {
+		for (const interaction of [
+			{ kind: "value", value: "not offered" },
+			{ kind: "control", controlId: "navigation_forward" },
+		] as const) {
+			const settlements: AskSettlement[] = [];
+			const source: AskAnswerSource = {
+				awaitAnswer: async () => undefined,
+				awaitAnswerRequest: async () => ({
+					source: "remote",
+					interaction,
+					settle: async value => {
+						settlements.push(value);
+						return { kind: "invalid_closed" };
+					},
+				}),
+			};
+			const handler = createMCPFormInputHandler({
+				getUi: () => ({ hasUI: false }),
+				getAskAnswerSource: () => source,
+			});
+			expect(await handler("input", request(), context)).toEqual({ kind: "failed", reason: "error" });
+			expect(settlements).toEqual([
+				{ kind: "invalid", reason: interaction.kind === "value" ? "invalid_option" : "invalid_control" },
+			]);
+		}
+	});
+	it("settles a remote receipt arriving after abort without committing", async () => {
+		const controller = new AbortController();
+		const started = Promise.withResolvers<void>();
+		const pending = Promise.withResolvers<AskRemoteReceipt>();
+		const settled = Promise.withResolvers<AskSettlement>();
+		const source: AskAnswerSource = {
+			awaitAnswer: async () => undefined,
+			awaitAnswerRequest: async () => {
+				started.resolve();
+				return pending.promise;
+			},
+		};
+		const handler = createMCPFormInputHandler({ getUi: () => ({ hasUI: false }), getAskAnswerSource: () => source });
+		const running = handler("input", request(), { ...context, signal: controller.signal });
+		await started.promise;
+		controller.abort();
+		expect(await running).toEqual({ kind: "failed", reason: "cancelled" });
+		pending.resolve({
+			source: "remote",
+			interaction: { kind: "value", value: "Accept" },
+			settle: async value => {
+				settled.resolve(value);
+				return { kind: "resolved_without_commit" };
+			},
+		});
+		expect(await settled.promise).toEqual({ kind: "resolve_without_commit", reason: "aborted" });
 	});
 	it("aborts even if an input surface ignores its signal", async () => {
 		const controller = new AbortController();
