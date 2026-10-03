@@ -1798,11 +1798,13 @@ export class AcpAgent implements Agent {
 					if (adapter) adapter.acceptFrame(acpFrame);
 					else this.#pendingRouterFrames.get(attachment.sessionId)?.push(acpFrame);
 				},
-				onSessionRemoved: attachment => {
+				onSessionRemoved: (attachment, removalReason) => {
 					const adapter =
 						this.#sessions.get(attachment.sessionId)?.adapter ??
 						this.#pendingRouterAdapters.get(attachment.sessionId);
 					adapter?.revokeAttachment(attachment);
+					if (adapter && removalReason !== "replaced_same_generation")
+						this.#settlePromptAfterHostClose(attachment.sessionId, removalReason ?? "host_exit");
 				},
 			},
 		});
@@ -4459,6 +4461,37 @@ export class AcpAgent implements Agent {
 		return undefined;
 	}
 
+	/** Settles the active prompt when the host explicitly reports that its session closed. */
+	#settlePromptAfterHostClose(id: string, reason: string): void {
+		const record = this.#sessions.get(id);
+		if (!record) return;
+		const waiter = record.activePrompt;
+		if (!waiter || waiter.settled || waiter.terminalReserved) return;
+		if (record.cancelRequested && waiter.cancelAcknowledged) {
+			void this.#settleCancelledPrompt(id, record, waiter);
+			return;
+		}
+		// An accepted mutation without its acknowledgement remains uncertain. Keep the
+		// existing reconciliation path so a host exit never turns an ambiguous prompt
+		// into a retryable failure.
+		if (waiter.dispatched && !waiter.acknowledged) {
+			this.#startUncertainPromptRecovery(id, record, waiter);
+			return;
+		}
+		record.busy = record.backgroundBusy;
+		void this.#rejectPrompt(
+			record,
+			id,
+			waiter,
+			new AcpPromptAbandonedError(
+				"prompt_abandoned",
+				`ACP prompt was abandoned because the SDK session host closed (${reason}). The turn was settled so the ` +
+					`client stops waiting; a new prompt requires a valid or re-established session attachment.`,
+				waiter.planSnapshot,
+			),
+		);
+	}
+
 	/**
 	 * Settles the ACP prompt only. The agent's own work is left alone: this reports that the
 	 * turn can no longer be observed, it does not cancel or tear down the session.
@@ -4530,6 +4563,14 @@ export class AcpAgent implements Agent {
 					record.activePrompt?.correlation,
 				);
 			else logger.warn(`ACP session ${id} dropped an event from a foreign session identity.`);
+			return;
+		}
+		if (ingressEvent?.type === "session_closed" || ingressEvent?.type === "session_terminated") {
+			const reason =
+				typeof ingressEvent.reason === "string" && ingressEvent.reason.length > 0
+					? ingressEvent.reason
+					: ingressEvent.type;
+			this.#settlePromptAfterHostClose(id, reason);
 			return;
 		}
 		if (frame.type !== "hello" && frame.type !== "server_hello" && typeof frame.connectionId === "string")
