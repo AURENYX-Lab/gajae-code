@@ -3073,11 +3073,18 @@ describe("SessionSdkSessionRuntime", () => {
 				handlers.set(event, handler);
 			},
 			sendUserMessage: (
-				_content: string,
-				options: { onPreflightAccepted?: () => void; onPreflightAcceptCommit?: () => void } | undefined,
+				content: string,
+				options:
+					| {
+							onPreflightAccepted?: () => void;
+							onPreflightAcceptCommit?: () => void;
+							onQueuedPromoted?: (promotion: { startsOwnRun?: boolean; removed?: boolean }) => void;
+					  }
+					| undefined,
 			) =>
 				Promise.resolve(options?.onPreflightAcceptCommit?.()).then(() => {
 					options?.onPreflightAccepted?.();
+					if (content === "follow up b") options?.onQueuedPromoted?.({ startsOwnRun: false });
 					return {};
 				}),
 		} as unknown as ExtensionAPI;
@@ -4465,7 +4472,7 @@ test.each(["natural", "removed"] as const)("SDK-only text follow-up has a durabl
 			harness.broadcasts.filter(
 				frame =>
 					frame.type === "event" &&
-					(frame.kind === "agent_end" || frame.kind === "agent_failed") &&
+					frame.kind === "agent_end" &&
 					(frame.payload as { commandId?: string; turnId?: string } | undefined)?.commandId ===
 						correlation.commandId &&
 					(frame.payload as { commandId?: string; turnId?: string } | undefined)?.turnId === correlation.turnId,
@@ -4641,7 +4648,7 @@ test.each([
 			harness.broadcasts.filter(
 				frame =>
 					frame.type === "event" &&
-					(frame.kind === "agent_end" || frame.kind === "agent_failed") &&
+					frame.kind === "agent_end" &&
 					(frame.payload as { commandId?: string; turnId?: string } | undefined)?.commandId ===
 						correlation.commandId &&
 					(frame.payload as { commandId?: string; turnId?: string } | undefined)?.turnId === correlation.turnId,
@@ -9653,23 +9660,30 @@ test("SDK-only host does not assign a follow-up requester ownership until the fo
 	const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-sdk-followup-stale-"));
 	const idle = true;
 	let promoted: ((promotion: { startsOwnRun: boolean }) => void) | undefined;
+	let queueSignal: AbortSignal | undefined;
 	const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void> | void>();
 	const api = {
 		on(event: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void> | void) {
 			handlers.set(event, handler);
 		},
-		sendUserMessage: (
-			_content: string,
-			options:
-				| {
-						onPreflightAccepted?: () => void;
-						onPreflightAcceptCommit?: () => void;
-						onQueuedPromoted?: (promotion: { startsOwnRun?: boolean; removed?: boolean }) => void;
-				  }
-				| undefined,
-		) =>
+		sendUserMessage: (_content: string, options: PreflightHooks | undefined) =>
 			Promise.resolve(options?.onPreflightAcceptCommit?.()).then(() => {
-				promoted = options?.onQueuedPromoted;
+				let queued = true;
+				queueSignal = options?.preflightSignal;
+				promoted = promotion => {
+					if (!queued) return;
+					queued = false;
+					options?.onQueuedPromoted?.(promotion);
+				};
+				queueSignal?.addEventListener(
+					"abort",
+					() => {
+						if (!queued) return;
+						queued = false;
+						options?.onQueuedPromoted?.({ startsOwnRun: false, removed: true });
+					},
+					{ once: true },
+				);
 				options?.onPreflightAccepted?.();
 				return {};
 			}),
@@ -9736,7 +9750,16 @@ test("SDK-only host does not assign a follow-up requester ownership until the fo
 			result: expect.objectContaining({ turn: "no_active_turn" }),
 		});
 		expect(seamCalls).toHaveLength(0);
-		// When the follow-up IS promoted, B owns its run and can abort it.
+		expect(queueSignal?.aborted).toBe(true);
+		// The cancelled input cannot be promoted. A fresh follow-up receives fresh authority.
+		transport.feed("conn-b", {
+			type: "control_request",
+			id: "followup-b-next",
+			operation: "turn.follow_up",
+			input: { text: "fresh followup" },
+		} as SdkFrame);
+		await waitResponse("followup-b-next");
+		expect(queueSignal?.aborted).toBe(false);
 		promoted!({ startsOwnRun: true });
 		await handlers.get("agent_start")?.({ type: "agent_start" }, ctx);
 		transport.feed("conn-b", {
