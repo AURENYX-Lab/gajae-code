@@ -549,6 +549,62 @@ describe("openai-codex streaming", () => {
 		}
 	});
 
+	it.each([
+		"finalized",
+		"unfinished",
+		"visible text",
+	])("handles EOF without response.completed after a %s tool call", async state => {
+		const item = {
+			type: "function_call",
+			id: "fc_eof",
+			call_id: "call_eof",
+			name: "todo_write",
+			arguments: '{"ops":[]}',
+		};
+		const events: Record<string, unknown>[] = [{ type: "response.output_item.added", output_index: 0, item }];
+		if (state !== "unfinished") {
+			events.push({ type: "response.output_item.done", output_index: 0, item });
+		}
+		events.push({
+			type: "response.output_item.added",
+			output_index: 1,
+			item: {
+				type: "message",
+				id: "msg_eof",
+				role: "assistant",
+				content: state === "visible text" ? [{ type: "output_text", text: "visible" }] : [],
+			},
+		});
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(createCodexErrorSse(events), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+		);
+		global.fetch = fetchMock as unknown as typeof fetch;
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe(state === "finalized" ? "toolUse" : "error");
+		if (state === "finalized") {
+			expect(result.errorCode).toBe("codex_stream_closed_after_finalized_tool_calls");
+			expect(result.providerPayload).toMatchObject({
+				items: [{ ...item }],
+			});
+			expect(result.content).toContainEqual({
+				type: "toolCall",
+				id: "call_eof|fc_eof",
+				name: "todo_write",
+				arguments: { ops: [] },
+			});
+		}
+	});
+
 	it("fails closed when a complete tool call has no source item id", async () => {
 		const sse = createCodexErrorSse([
 			{
