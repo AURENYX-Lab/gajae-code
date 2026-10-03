@@ -1275,6 +1275,12 @@ export async function runSessionHost(
 	};
 	const sessionEndpointPath = path.join(request.stateRoot, "sdk", `${request.sessionId}.json`);
 	const removeOwnedSessionEndpoint = async (): Promise<boolean> => {
+		try {
+			await fs.stat(sessionEndpointPath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+			return false;
+		}
 		const endpoint: EndpointFileRead | undefined = await readEndpointFile(sessionEndpointPath);
 		if (!endpoint) return false;
 		let parsed: { pid?: unknown; sessionId?: unknown };
