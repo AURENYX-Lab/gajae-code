@@ -161,6 +161,7 @@ import {
 	type MCPToolCache,
 	resolveMCPToolCache,
 } from "../runtime-mcp";
+import { createMCPFormInputHandler } from "../runtime-mcp/elicitation";
 import type { MCPLoadResult } from "../runtime-mcp/manager";
 import { MCP_STARTUP_WAIT_GRACE_MS } from "../runtime-mcp/startup-policy";
 import type { MCPServerConfig } from "../runtime-mcp/types";
@@ -2653,7 +2654,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		let ownedMcpManagerTools: readonly CustomTool[] = [];
 		let publishOwnedMcpTools = false;
 		const notificationDebounceTimers = new Map<string, Timer>();
+		const installMcpInputHandler = (manager: MCPManager): void => {
+			manager.setInputRequestHandler(
+				createMCPFormInputHandler({
+					getUi: () => {
+						const context = toolContextStore.getContext();
+						return { ui: context.ui, hasUI: context.hasUI === true };
+					},
+					getAskAnswerSource: () => session.getAskAnswerSource(),
+				}),
+			);
+		};
 		const wireMcpManagerCallbacks = (manager: MCPManager): void => {
+			installMcpInputHandler(manager);
 			manager.setOnPromptsChanged(serverName => {
 				const promptCommands = buildMCPPromptCommands(manager);
 				session.setMCPPromptCommands(promptCommands);
@@ -3685,6 +3698,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					: {}),
 			});
 			owned.setAuthStorage(authStorage);
+			installMcpInputHandler(owned);
 			mcpManager = owned;
 			ownsMcpManager = true;
 			registerOwnedMcpManagerCleanup(owned);
