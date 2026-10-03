@@ -179,6 +179,7 @@ export interface FirstEventTimeoutFacts {
 	requestBytes?: number;
 	firstEventElapsedMs?: number;
 	firstEventTimeoutMs?: number;
+	firstEventTimeoutSource?: "stream-option" | "env" | "idle-timeout" | "provider-fallback" | "default";
 	endpointClass?: "canonical" | "custom";
 	retryMaxAttempts?: number;
 }
@@ -188,6 +189,7 @@ export class FirstEventTimeoutError extends Error {
 	readonly requestBytes?: number;
 	readonly firstEventElapsedMs?: number;
 	readonly firstEventTimeoutMs?: number;
+	readonly firstEventTimeoutSource?: FirstEventTimeoutFacts["firstEventTimeoutSource"];
 	readonly endpointClass?: "canonical" | "custom";
 	readonly retryMaxAttempts?: number;
 
@@ -197,6 +199,7 @@ export class FirstEventTimeoutError extends Error {
 		this.requestBytes = facts.requestBytes;
 		this.firstEventElapsedMs = facts.firstEventElapsedMs;
 		this.firstEventTimeoutMs = facts.firstEventTimeoutMs;
+		this.firstEventTimeoutSource = facts.firstEventTimeoutSource;
 		this.endpointClass = facts.endpointClass;
 		this.retryMaxAttempts = facts.retryMaxAttempts;
 	}
