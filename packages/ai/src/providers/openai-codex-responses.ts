@@ -367,13 +367,13 @@ type CodexOutputBlock =
 	| CodexThinkingBlock
 	| TextContent
 	| (ToolCall & {
-		partialJson: string;
-		doneInput?: string;
-		argumentsComplete?: boolean;
-		argumentsAuthoritative?: boolean;
-		sourceItemId?: string;
-		sourceCallId?: string;
-	});
+			partialJson: string;
+			doneInput?: string;
+			argumentsComplete?: boolean;
+			argumentsAuthoritative?: boolean;
+			sourceItemId?: string;
+			sourceCallId?: string;
+	  });
 export interface OpenAICodexWebSocketDebugStats {
 	fullContextRequests: number;
 	deltaRequests: number;
@@ -1337,12 +1337,12 @@ function trySalvageCodexFinalizedToolCalls(
 				runtime.currentBlock === activeToolCall && runtime.currentItem?.type === "function_call"
 					? runtime.currentItem
 					: {
-						type: "function_call",
-						id: activeToolCall.sourceItemId,
-						call_id: activeToolCall.sourceCallId,
-						name: activeToolCall.name,
-						arguments: activeToolCall.partialJson,
-					};
+							type: "function_call",
+							id: activeToolCall.sourceItemId,
+							call_id: activeToolCall.sourceCallId,
+							name: activeToolCall.name,
+							arguments: activeToolCall.partialJson,
+						};
 			if (typeof item.id !== "string" || typeof item.call_id !== "string") continue;
 			const toolCall: ToolCall = {
 				type: "toolCall",
