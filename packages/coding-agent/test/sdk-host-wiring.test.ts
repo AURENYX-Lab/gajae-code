@@ -2666,14 +2666,17 @@ test.each([
 					() => replayFrames.some(frame => frame.id === "persist-cancel-fresh-key"),
 					"fresh-key uncertain cancellation retry",
 				);
+				// This new key belongs to a different authenticated connection, which
+				// never owned the removed request. It cannot inherit cancellation authority;
+				// only replaying the original durable key preserves the uncertain result.
 				expect(replayFrames.find(frame => frame.id === "persist-cancel-fresh-key")).toMatchObject({
 					ok: true,
-					result: { turn: "uncertain", reason: "worker_unsettled" },
+					result: { turn: "no_active_turn", terminal: "terminal_no_effect" },
 				});
 				expect(
 					frames.some(
 						frame =>
-							(frame.type === "agent_end" || frame.type === "agent_failed") &&
+							frame.type === "agent_end" &&
 							frame.commandId === correlation.commandId &&
 							frame.turnId === correlation.turnId,
 					),
@@ -2841,24 +2844,31 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 	} as unknown as Settings;
 	const abortHandles: string[] = [];
 	let joinedPromotion: ((promotion: { startsOwnRun?: boolean; removed?: boolean }) => void) | undefined;
-	const handlers = start(
-		sessionContext,
-		settings,
-		async (content, options) => {
-			if (typeof content !== "string") throw new Error("The teardown regression must stay text-only.");
+	const predecessorDispatchStarted = Promise.withResolvers<void>();
+	const predecessorDispatchReady = Promise.withResolvers<void>();
+	const pendingSubmissions = new Set<() => void>();
+	const settleSubmissions = () => {
+		for (const resolve of pendingSubmissions) resolve();
+		pendingSubmissions.clear();
+	};
+	const sendText: CapturedSendUserMessage = async (content, options) => {
+		if (typeof content !== "string") throw new Error("The teardown regression must stay text-only.");
+		if (content === "predecessor joined text") {
+			predecessorDispatchStarted.resolve();
+			await predecessorDispatchReady.promise;
 			await firePreflightAccept(options);
-			if (options?.deliverAs === "followUp") {
-				joinedPromotion = options.onQueuedPromoted;
-				options.onDispatchDisposition?.({ startsOwnRun: false });
-				return;
-			}
-			await new Promise<void>(() => {});
-		},
-		true,
-		new Map(),
-		undefined,
-		false,
-	);
+			joinedPromotion = options?.onQueuedPromoted;
+			options?.onDispatchDisposition?.({ startsOwnRun: false });
+			return;
+		}
+		await firePreflightAccept(options);
+		const completion = Promise.withResolvers<void>();
+		pendingSubmissions.add(completion.resolve);
+		await completion.promise;
+		pendingSubmissions.delete(completion.resolve);
+	};
+	let handlers = start(sessionContext, settings, sendText, true, new Map(), undefined, false);
+	const predecessorHandlers = handlers;
 	const openClient = async (): Promise<{
 		socket: WebSocket;
 		frames: Record<string, unknown>[];
@@ -2910,8 +2920,10 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 	try {
 		await handlers.get("session_start")?.({ type: "session_start" }, sessionContext);
 		const predecessor = await openClient();
-		const oldRoot = await predecessor.control("predecessor-root", "turn.prompt", { text: "predecessor root text" });
-		expect(oldRoot).toMatchObject({ ok: true, result: { accepted: true } });
+		const joinedPromise = predecessor.control("predecessor-joined", "turn.prompt", {
+			text: "predecessor joined text",
+		});
+		await predecessorDispatchStarted.promise;
 		live.idle = false;
 		const predecessorStart = { type: "agent_start" as const };
 		setAgentTerminalOwnerContext(predecessorStart, {
@@ -2919,9 +2931,8 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 			domain: predecessorDomain,
 		});
 		await handlers.get("agent_start")?.(predecessorStart, sessionContext);
-		const joined = await predecessor.control("predecessor-joined", "turn.follow_up", {
-			text: "predecessor joined text",
-		});
+		predecessorDispatchReady.resolve();
+		const joined = await joinedPromise;
 		expect(joined).toMatchObject({ ok: true, result: { accepted: true } });
 		const joinedCorrelation = acceptedCorrelation(joined);
 		expect(joinedPromotion).toBeDefined();
@@ -2930,15 +2941,21 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 			await predecessor.query("predecessor-joined-result", { kind: "prompt", ...joinedCorrelation }),
 		).toMatchObject({
 			ok: true,
-			result: { status: "in_flight" },
+			result: { status: "accepted" },
 		});
 
+		// Model submission has finished producing reconciliation before teardown;
+		// no terminal event has retired the joined attribution map yet.
+		settleSubmissions();
 		await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
 		await closeSocket(predecessor.socket);
 		ledger.seal("predecessor-run");
 
 		live.idle = true;
 		live.handle = "successor-deadline-run";
+		// session_shutdown is terminal for an extension instance. A process/session
+		// restart installs a fresh extension for the same logical session identity.
+		handlers = start(sessionContext, settings, sendText, true, new Map(), undefined, false);
 		await handlers.get("session_start")?.({ type: "session_start" }, sessionContext);
 		const successor = await openClient();
 		const successorPrompt = await successor.control("successor-deadline", "turn.prompt", {
@@ -2967,7 +2984,7 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 			resourceRunId: "predecessor-run",
 			domain: predecessorDomain,
 		});
-		await handlers.get("tool_execution_update")?.(latePredecessorProgress, sessionContext);
+		await predecessorHandlers.get("tool_execution_update")?.(latePredecessorProgress, sessionContext);
 		const latePredecessorEnd = {
 			type: "agent_end" as const,
 			messages: [{ role: "assistant", stopReason: "stop", content: "late predecessor end" }],
@@ -2976,7 +2993,7 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 			resourceRunId: "predecessor-run",
 			domain: predecessorDomain,
 		});
-		await handlers.get("agent_end")?.(latePredecessorEnd, sessionContext);
+		await predecessorHandlers.get("agent_end")?.(latePredecessorEnd, sessionContext);
 		expect(
 			await successor.query("successor-still-in-flight", { kind: "prompt", ...successorCorrelation }),
 		).toMatchObject({
@@ -3027,11 +3044,25 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 			ok: true,
 			result: { status: "failed", error: { code: "prompt_deadline_exceeded" } },
 		});
-		expect(abortHandles).toEqual(["successor-deadline-run"]);
+		expect(abortHandles.filter(handle => handle === "successor-deadline-run")).toEqual(["successor-deadline-run"]);
+		expect(abortHandles.every(handle => handle === "predecessor-run" || handle === "successor-deadline-run")).toBe(
+			true,
+		);
 
+		settleSubmissions();
+		const deadlineEnd = { type: "agent_end" as const, messages: [], stopReason: "cancelled" };
+		setAgentTerminalOwnerContext(deadlineEnd, {
+			resourceRunId: "successor-deadline-run",
+			domain: deadlineSuccessorDomain,
+		});
+		await handlers.get("agent_end")?.(deadlineEnd, sessionContext);
+		await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
 		live.idle = true;
 		live.handle = "successor-natural-run";
-		const naturalPrompt = await successor.control("successor-natural", "turn.prompt", {
+		handlers = start(sessionContext, settings, sendText, true, new Map(), undefined, false);
+		await handlers.get("session_start")?.({ type: "session_start" }, sessionContext);
+		const naturalClient = await openClient();
+		const naturalPrompt = await naturalClient.control("successor-natural", "turn.prompt", {
 			text: "successor natural text",
 		});
 		expect(naturalPrompt).toMatchObject({ ok: true, result: { accepted: true } });
@@ -3069,18 +3100,20 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 		});
 		await handlers.get("agent_end")?.(naturalEnd, sessionContext);
 		expect(
-			await successor.query("successor-natural-result", { kind: "prompt", ...naturalCorrelation }),
+			await naturalClient.query("successor-natural-result", { kind: "prompt", ...naturalCorrelation }),
 		).toMatchObject({
 			ok: true,
 			result: { status: "terminal_ok" },
 		});
 		expect(
-			await successor.query("successor-deadline-stays-failed", { kind: "prompt", ...successorCorrelation }),
+			await naturalClient.query("successor-deadline-stays-failed", { kind: "prompt", ...successorCorrelation }),
 		).toMatchObject({
 			ok: true,
 			result: { status: "failed", error: { code: "prompt_deadline_exceeded" } },
 		});
 	} finally {
+		predecessorDispatchReady.resolve();
+		settleSubmissions();
 		await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
 	}
 });
