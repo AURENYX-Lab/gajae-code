@@ -25,6 +25,74 @@ afterEach(async () => {
 });
 
 describe("OpenCodex discovery", () => {
+	test("accepts the ocx 2.75 health contract", async () => {
+		const calls: string[] = [];
+		spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async (input: string | Request | URL) => {
+					const url = String(input);
+					calls.push(url);
+					if (url.endsWith("/healthz"))
+						return Response.json({ status: "ok", service: "opencodex", version: "2.75.0", port: 10100 });
+					return Response.json([{ id: "provider/model" }]);
+				},
+				{ preconnect: originalFetch.preconnect },
+			),
+		);
+
+		const models = await fetchOpenCodexModels();
+		expect(models).toHaveLength(1);
+		expect(calls).toEqual(["http://127.0.0.1:10100/healthz", "http://127.0.0.1:10100/v1/models"]);
+	});
+
+	test("rejects a health response with a foreign service", async () => {
+		const calls: string[] = [];
+		spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async (input: string | Request | URL) => {
+					calls.push(String(input));
+					return Response.json({ status: "ok", service: "other", port: 10100 });
+				},
+				{ preconnect: originalFetch.preconnect },
+			),
+		);
+
+		expect(await resolveOpenCodexEndpoint()).toBeUndefined();
+		expect(calls).toEqual(["http://127.0.0.1:10100/healthz"]);
+	});
+
+	test("rejects the ocx 2.75 health contract with a mismatched port", async () => {
+		const calls: string[] = [];
+		spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async (input: string | Request | URL) => {
+					calls.push(String(input));
+					return Response.json({ status: "ok", service: "opencodex", version: "2.75.0", port: 10201 });
+				},
+				{ preconnect: originalFetch.preconnect },
+			),
+		);
+
+		expect(await resolveOpenCodexEndpoint()).toBeUndefined();
+		expect(calls).toEqual(["http://127.0.0.1:10100/healthz"]);
+	});
+
+	test("rejects the status health contract without a service", async () => {
+		const calls: string[] = [];
+		spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async (input: string | Request | URL) => {
+					calls.push(String(input));
+					return Response.json({ status: "ok", port: 10100 });
+				},
+				{ preconnect: originalFetch.preconnect },
+			),
+		);
+
+		expect(await resolveOpenCodexEndpoint()).toBeUndefined();
+		expect(calls).toEqual(["http://127.0.0.1:10100/healthz"]);
+	});
+
 	test("uses the public catalog without management credentials and retains capabilities", async () => {
 		const calls: string[] = [];
 		spyOn(globalThis, "fetch").mockImplementation(

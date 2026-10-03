@@ -19,6 +19,8 @@ interface HealthPayload {
 	ok?: unknown;
 	pid?: unknown;
 	port?: unknown;
+	status?: unknown;
+	service?: unknown;
 	version?: unknown;
 }
 
@@ -103,7 +105,10 @@ async function fetchJson(url: string, signal?: AbortSignal): Promise<unknown> {
 function isOpenCodexHealth(payload: unknown, expectedPort: number): boolean {
 	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
 	const health = payload as HealthPayload;
-	return health.ok === true && health.version === "opencodex" && health.port === expectedPort;
+	const identityOk =
+		(health.ok === true && health.version === "opencodex") ||
+		(health.status === "ok" && health.service === "opencodex");
+	return identityOk && health.port === expectedPort;
 }
 
 export async function resolveOpenCodexEndpoint(signal?: AbortSignal): Promise<OpenCodexEndpoint | undefined> {
