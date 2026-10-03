@@ -3594,7 +3594,7 @@ export function convertOpenAICodexResponsesTools(
 			name: codexToolWireName(tool.name),
 			description: tool.description || "",
 			parameters,
-			...(effectiveStrict && { strict: true }),
+			strict: effectiveStrict,
 		};
 	});
 	// Tool definitions bypass the `input`/`instructions` sanitizers, so a
