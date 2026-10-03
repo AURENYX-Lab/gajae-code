@@ -1282,10 +1282,14 @@ function trySalvageCodexFinalizedToolCalls(
 		const block = toolCall as ToolCall & {
 			argumentsComplete?: boolean;
 			argumentsAuthoritative?: boolean;
+			sourceItemId?: string;
+			sourceCallId?: string;
 		};
 		return (
 			!runtime.finalizedToolCallIds.has(toolCall.id) &&
 			block.argumentsComplete === true &&
+			typeof block.sourceItemId === "string" &&
+			typeof block.sourceCallId === "string" &&
 			(block.argumentsAuthoritative === true || Object.keys(block.arguments).length > 0)
 		);
 	});
