@@ -716,7 +716,7 @@ describe("ACP builtin slash commands", () => {
 			configNotified++;
 		};
 		const setModelSpy = spyOn(session, "setModel").mockImplementation(async model => {
-			session.model = model;
+			session.model = model as typeof session.model;
 		});
 
 		const result = await executeAcpBuiltinSlashCommand("/model claude-3-5-sonnet", runtime);
@@ -829,7 +829,7 @@ describe("ACP builtin slash commands", () => {
 		};
 		session.getAvailableModels = () => [reasoningModel];
 		const setModelSpy = spyOn(session, "setModel").mockImplementation(async model => {
-			session.model = model;
+			session.model = model as typeof session.model;
 		});
 
 		const result = await executeAcpBuiltinSlashCommand("/model anthropic/claude-fable-5:xhigh", runtime);
@@ -875,7 +875,7 @@ describe("ACP builtin slash commands", () => {
 		};
 		session.getAvailableModels = () => [grok];
 		const setModelSpy = spyOn(session, "setModel").mockImplementation(async model => {
-			session.model = model;
+			session.model = model as typeof session.model;
 		});
 
 		const result = await executeAcpBuiltinSlashCommand("/model xai/grok-4.6:xhigh", runtime);
