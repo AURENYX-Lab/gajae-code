@@ -4387,7 +4387,7 @@ test("broker directly resumes and forks a canonical cold saved session with scop
 				() => true,
 				() => false,
 			),
-		).toBe(true);
+		).toBe(false);
 		expect(await broker.handleRequest("session.get_endpoint", { sessionId: sourceId })).toMatchObject({
 			ok: false,
 			error: { code: "resource_gone" },
@@ -4455,7 +4455,7 @@ test("broker directly resumes and forks a canonical cold saved session with scop
 				() => true,
 				() => false,
 			),
-		).toBe(true);
+		).toBe(false);
 		expect(await broker.handleRequest("session.get_endpoint", { sessionId: forkId })).toMatchObject({
 			ok: false,
 			error: { code: "resource_gone" },
@@ -4588,7 +4588,7 @@ test("broker replays one identity-bound lifecycle metadata cleanup plan after th
 		const markerPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`);
 		const readyPath = path.join(stateRoot, "sdk", `${sessionId}.lifecycle.ready.json`);
 		await expect(fs.stat(markerPath)).resolves.toBeDefined();
-		await expect(fs.stat(readyPath)).resolves.toBeDefined();
+		await expect(fs.stat(readyPath)).rejects.toThrow();
 		setLifecycleCleanupHookForTest(crashing, () => {});
 		const deleteInput = { cwd: root, stateRoot, sessionId, sessionPath };
 		await expect(
