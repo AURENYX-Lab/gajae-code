@@ -1271,6 +1271,13 @@ async function processCodexResponseStream(
 				});
 				if (runtime.sawTerminalEvent) break;
 			}
+			if (!runtime.sawTerminalEvent) {
+				trySalvageCodexFinalizedToolCalls(
+					context,
+					runtime,
+					new Error("Codex stream ended before terminal completion event"),
+				);
+			}
 			return { firstTokenTime };
 		} catch (error) {
 			if (trySalvageCodexFinalizedToolCalls(context, runtime, error)) {
@@ -1316,8 +1323,11 @@ function trySalvageCodexFinalizedToolCalls(
 		runtime.currentItem.content.every(content =>
 			content.type === "output_text" ? content.text === "" : content.refusal === "",
 		);
+	// EOF proves a closed stream, but only finalized calls are safe without a timeout event.
+	const isUnexpectedStreamEnd =
+		error instanceof Error && error.message === "Codex stream ended before terminal completion event";
 	const canSalvageFinalizedCall =
-		isCodexTransientStreamClose(error) &&
+		(isCodexTransientStreamClose(error) || isUnexpectedStreamEnd) &&
 		!runtime.toolArgumentCorrelationFailed &&
 		toolCalls.length > 0 &&
 		(runtime.currentBlock === null ||
