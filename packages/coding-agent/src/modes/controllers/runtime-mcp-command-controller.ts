@@ -44,6 +44,7 @@ import { parseCommandArgs } from "../shared";
 import { buildOAuthLoginAnchor, createOAuthUrlCopyLease } from "../shared/oauth-url-copy";
 import { theme } from "../theme/theme";
 import type { InteractiveModeContext } from "../types";
+import { focusedUiOwnsInterrupt } from "../utils/interrupt-ownership";
 import { matchesAppInterrupt } from "../utils/keybinding-matchers";
 import { groupBySource, parseRemoveArgs, readScopeFlag, showCommandMessage } from "./command-controller-shared";
 
@@ -646,6 +647,7 @@ export class MCPCommandController {
 			signal === undefined && typeof this.ctx.ui.addInputListener === "function"
 				? this.ctx.ui.addInputListener(data => {
 						if (data !== "\x03" && !matchesAppInterrupt(data)) return;
+						if (data !== "\x03" && focusedUiOwnsInterrupt(this.ctx)) return;
 						userController.abort(new Error("OAuth flow cancelled"));
 						return { consume: true };
 					})
@@ -1840,6 +1842,7 @@ export class MCPCommandController {
 		const abortController = new AbortController();
 		const interruptUnsubscribe = this.ctx.ui.addInputListener?.(data => {
 			if (data !== "\x03" && !matchesAppInterrupt(data)) return;
+			if (data !== "\x03" && focusedUiOwnsInterrupt(this.ctx)) return;
 			abortController.abort(new Error("Smithery authorization cancelled."));
 			return { consume: true };
 		});
