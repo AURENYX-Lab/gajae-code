@@ -1315,8 +1315,7 @@ function trySalvageCodexFinalizedToolCalls(
 	const hasCompleteArguments = toolCalls.every(
 		toolCall => runtime.finalizedToolCallIds.has(toolCall.id) || completeToolCalls.includes(toolCall),
 	);
-	const isIdleStall =
-		error instanceof Error && error.message === "OpenAI Codex SSE stream stalled while waiting for the next event";
+	const isIdleStall = isCodexIdleStall(error);
 	const hasEmptyActiveMessage =
 		runtime.currentItem?.type === "message" &&
 		runtime.currentBlock?.type === "text" &&
@@ -1467,7 +1466,15 @@ function isCodexTransientStreamClose(error: unknown): boolean {
 		message.includes("stream disconnected before completion") ||
 		message.includes("stream closed before response.completed") ||
 		message.includes("websocket closed before response completion");
-	return hasRequestTimeout && hasClosedStreamMessage;
+	return (hasRequestTimeout && hasClosedStreamMessage) || isCodexIdleStall(error);
+}
+
+function isCodexIdleStall(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	return (
+		error.message === "OpenAI Codex SSE stream stalled while waiting for the next event" ||
+		error.message === `${CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX}: idle timeout waiting for websocket`
+	);
 }
 
 function handleCodexStreamEvent(args: {

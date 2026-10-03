@@ -85,6 +85,61 @@ function createCodexErrorSse(events: Record<string, unknown>[]): string {
 	return `${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`;
 }
 
+function createProductionCodexToolCallEvents(nestedError: boolean): Record<string, unknown>[] {
+	const argumentsValue = JSON.stringify({ ops: [{ op: "init", phases: [] }] });
+	const error = {
+		code: "request_timeout",
+		message:
+			"stream error: stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+	};
+	return [
+		{ type: "response.created", response: { id: "resp_production", status: "in_progress" } },
+		{
+			type: "response.output_item.added",
+			item: {
+				type: "reasoning",
+				id: "rs_production",
+				content: [],
+				summary: [],
+				encrypted_content: "encrypted-reasoning",
+			},
+		},
+		{
+			type: "response.output_item.done",
+			item: {
+				type: "reasoning",
+				id: "rs_production",
+				content: [],
+				summary: [],
+				encrypted_content: "encrypted-reasoning",
+			},
+		},
+		{
+			type: "response.output_item.added",
+			item: {
+				type: "function_call",
+				id: "fc_production",
+				call_id: "call_production",
+				name: "todo_write",
+				arguments: "",
+			},
+		},
+		{ type: "response.function_call_arguments.delta", item_id: "fc_production", delta: argumentsValue },
+		{ type: "response.function_call_arguments.done", item_id: "fc_production", arguments: argumentsValue },
+		{
+			type: "response.output_item.done",
+			item: {
+				type: "function_call",
+				id: "fc_production",
+				call_id: "call_production",
+				name: "todo_write",
+				arguments: argumentsValue,
+			},
+		},
+		nestedError ? { type: "error", error } : { type: "error", ...error },
+	];
+}
+
 function getRequestSignal(input: string | URL | Request, init: RequestInit | undefined): AbortSignal | undefined {
 	if (init?.signal) return init.signal;
 	if (input instanceof Request) return input.signal;
@@ -407,6 +462,70 @@ describe("openai-codex streaming", () => {
 		expect(result.content).toEqual([
 			{ type: "toolCall", id: "call_1|fc_1", name: "todo_write", arguments: { ops: [] } },
 		]);
+	});
+
+	it.each([
+		false,
+		true,
+	])("salvages the production request_timeout replay over SSE (nested error: %s)", async nestedError => {
+		global.fetch = vi.fn(
+			async () =>
+				new Response(createCodexErrorSse(createProductionCodexToolCallEvents(nestedError)), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toContainEqual({
+			type: "toolCall",
+			id: "call_production|fc_production",
+			name: "todo_write",
+			arguments: { ops: [{ op: "init", phases: [] }] },
+		});
+	});
+
+	it.each([
+		false,
+		true,
+	])("salvages the production request_timeout replay over websocket (nested error: %s)", async nestedError => {
+		class ProductionReplayWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			send(): void {
+				for (const event of createProductionCodexToolCallEvents(nestedError)) this.sendJson(event);
+			}
+		}
+		global.WebSocket = ProductionReplayWebSocket as unknown as typeof WebSocket;
+		global.fetch = vi.fn() as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			createCodexTestModel("https://chatgpt.com/backend-api"),
+			createCodexTestContext(),
+			{
+				apiKey: createCodexTestToken(),
+				sessionId: `production-replay-${nestedError}`,
+				streamIdleTimeoutMs: 100,
+				providerSessionState: new Map<string, ProviderSessionState>(),
+			},
+		).result();
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toContainEqual({
+			type: "toolCall",
+			id: "call_production|fc_production",
+			name: "todo_write",
+			arguments: { ops: [{ op: "init", phases: [] }] },
+		});
 	});
 
 	it("salvages a complete todo_write snapshot after a later reasoning item opens", async () => {
@@ -6739,8 +6858,12 @@ describe("openai-codex streaming", () => {
 					providerSessionState: new Map<string, ProviderSessionState>(),
 				},
 			).result();
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toContain("idle timeout waiting for websocket");
+			expect(result.stopReason).toBe("toolUse");
+			expect(result.errorCode).toBe(
+				finalized
+					? "codex_stream_closed_after_finalized_tool_calls"
+					: "codex_stream_closed_after_complete_tool_arguments",
+			);
 			expect(result.usage.totalTokens).toBe(0);
 			expect(result.content).toContainEqual(
 				expect.objectContaining({ type: "toolCall", name: "todo_write", arguments: args }),
@@ -6748,6 +6871,62 @@ describe("openai-codex streaming", () => {
 			expect(fetchSpy).not.toHaveBeenCalled();
 		} finally {
 			fetchSpy.mockRestore();
+		}
+	});
+
+	it("salvages a complete websocket tool call when the idle watchdog fires", async () => {
+		vi.useFakeTimers();
+		class SilentCompleteWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			send(): void {
+				const item = {
+					type: "function_call",
+					id: "fc_fake_timer",
+					call_id: "call_fake_timer",
+					name: "todo_write",
+					arguments: JSON.stringify({ ops: [] }),
+				};
+				this.sendJson({ type: "response.output_item.added", item });
+				this.sendJson({ type: "response.function_call_arguments.delta", item_id: item.id, delta: item.arguments });
+				this.sendJson({
+					type: "response.function_call_arguments.done",
+					item_id: item.id,
+					arguments: item.arguments,
+				});
+				this.sendJson({ type: "response.output_item.done", item });
+			}
+		}
+		global.WebSocket = SilentCompleteWebSocket as unknown as typeof WebSocket;
+		try {
+			const resultPromise = streamOpenAICodexResponses(
+				createCodexTestModel("https://chatgpt.com/backend-api"),
+				createCodexTestContext(),
+				{
+					apiKey: createCodexTestToken(),
+					sessionId: "fake-timer-idle-salvage",
+					streamIdleTimeoutMs: 25,
+					streamFirstEventTimeoutMs: 50,
+					providerSessionState: new Map<string, ProviderSessionState>(),
+				},
+			).result();
+			for (let index = 0; index < 100; index += 1) await Promise.resolve();
+			vi.advanceTimersByTime(0);
+			for (let index = 0; index < 100; index += 1) await Promise.resolve();
+			vi.advanceTimersByTime(25);
+			for (let index = 0; index < 100; index += 1) await Promise.resolve();
+			const result = await resultPromise;
+
+			expect(result.stopReason).toBe("toolUse");
+			expect(result.errorCode).toBe("codex_stream_closed_after_finalized_tool_calls");
+			expect(result.content).toContainEqual(
+				expect.objectContaining({ type: "toolCall", id: "call_fake_timer|fc_fake_timer", name: "todo_write" }),
+			);
+		} finally {
+			vi.useRealTimers();
 		}
 	});
 
