@@ -1390,7 +1390,6 @@ export async function runSessionHost(
 		const failure = capability.normalizeFailure("startup", "failed", "SDK lifecycle host terminated.");
 		interruptStartup(failure);
 	};
-	const onReadySignal = (): void => stop();
 	const registerHostPostmortem = (): void => {
 		if (unregisterHostPostmortem) return;
 		unregisterHostPostmortem = postmortem.register("sdk-session-host:exit", async reason => {
@@ -1402,6 +1401,7 @@ export async function runSessionHost(
 			process.exit(0);
 		});
 	};
+	registerHostPostmortem();
 
 	try {
 		const startupThinkingLevel = request.modelId ? parseModelString(request.modelId)?.thinkingLevel : undefined;
@@ -1458,7 +1458,6 @@ export async function runSessionHost(
 						},
 						() => {
 							readinessPublished = true;
-							registerHostPostmortem();
 						},
 					);
 					return { published: true } as const;
@@ -1485,8 +1484,6 @@ export async function runSessionHost(
 		revokePendingReadinessMarker = undefined;
 		readinessRevocation = undefined;
 		removeStartupSignalHandlers();
-		process.once("SIGTERM", onReadySignal);
-		process.once("SIGINT", onReadySignal);
 	} catch (error) {
 		if (error instanceof LifecycleReadinessCleanupError) constructionCleanupComplete = false;
 		const failure =
@@ -1499,8 +1496,6 @@ export async function runSessionHost(
 			await failAfterRollback(durableFailure);
 		} finally {
 			removeStartupSignalHandlers();
-			process.removeListener("SIGTERM", onReadySignal);
-			process.removeListener("SIGINT", onReadySignal);
 		}
 		throw error;
 	}
