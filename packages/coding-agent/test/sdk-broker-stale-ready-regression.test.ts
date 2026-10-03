@@ -5,6 +5,110 @@ import { Broker } from "../src/sdk/broker/broker";
 import * as lifecycle from "../src/sdk/broker/lifecycle";
 import { SessionManager } from "../src/session/session-manager";
 
+async function makePair(label: string) {
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", `gjc-${label}-`));
+	const sdk = path.join(root, "sdk");
+	await fs.mkdir(sdk, { recursive: true });
+	const id = "race-resume";
+	return {
+		root,
+		sdk,
+		id,
+		markerPath: path.join(sdk, `${id}.lifecycle.json`),
+		readyPath: path.join(sdk, `${id}.lifecycle.ready.json`),
+	};
+}
+
+const deadMarker = { pid: 999_999_999, effectMarker: "dead", incarnation: "dead" };
+
+test("retire binds cleanup to the observed marker when a live pair is republished", async () => {
+	const pair = await makePair("retire-live-race");
+	try {
+		await fs.writeFile(pair.markerPath, JSON.stringify(deadMarker));
+		await fs.writeFile(pair.readyPath, JSON.stringify(deadMarker));
+		const incarnation = lifecycle.processIncarnation(process.pid);
+		const live = { pid: process.pid, effectMarker: "live", incarnation };
+		const result = await lifecycle.retireExitedLifecycleMarkerPairForTest(pair.root, pair.id, async () => {
+			await fs.writeFile(pair.markerPath, JSON.stringify(live));
+			await fs.writeFile(pair.readyPath, JSON.stringify(live));
+		});
+		expect(result).toBe(false);
+		expect(await fs.readFile(pair.markerPath, "utf8")).toBe(JSON.stringify(live));
+		expect(await fs.readFile(pair.readyPath, "utf8")).toBe(JSON.stringify(live));
+	} finally {
+		await fs.rm(pair.root, { recursive: true, force: true });
+	}
+});
+
+test("retire keeps a ready marker replaced after observation", async () => {
+	const pair = await makePair("retire-ready-race");
+	try {
+		await fs.writeFile(pair.markerPath, JSON.stringify(deadMarker));
+		await fs.writeFile(pair.readyPath, JSON.stringify(deadMarker));
+		const live = {
+			pid: process.pid,
+			effectMarker: "ready-live",
+			incarnation: lifecycle.processIncarnation(process.pid),
+		};
+		let calls = 0;
+		const result = await lifecycle.retireExitedLifecycleMarkerPairForTest(pair.root, pair.id, async () => {
+			calls += 1;
+			if (calls === 2) await fs.writeFile(pair.readyPath, JSON.stringify(live));
+		});
+		expect(result).toBe(false);
+		expect(await fs.readFile(pair.markerPath, "utf8")).toBe(JSON.stringify(deadMarker));
+		expect(await fs.readFile(pair.readyPath, "utf8")).toBe(JSON.stringify(live));
+	} finally {
+		await fs.rm(pair.root, { recursive: true, force: true });
+	}
+});
+
+test("retire does not remove a different exited owner", async () => {
+	const pair = await makePair("retire-other-dead");
+	try {
+		await fs.writeFile(pair.markerPath, JSON.stringify(deadMarker));
+		await fs.writeFile(pair.readyPath, JSON.stringify(deadMarker));
+		const other = { pid: 999_999_998, effectMarker: "other", incarnation: "other" };
+		const result = await lifecycle.retireExitedLifecycleMarkerPairForTest(pair.root, pair.id, async () => {
+			await fs.writeFile(pair.markerPath, JSON.stringify(other));
+		});
+		expect(result).toBe(false);
+		expect(await fs.readFile(pair.markerPath, "utf8")).toBe(JSON.stringify(other));
+	} finally {
+		await fs.rm(pair.root, { recursive: true, force: true });
+	}
+});
+
+test("retire tolerates primary removal during observation race", async () => {
+	const pair = await makePair("retire-removed");
+	try {
+		await fs.writeFile(pair.markerPath, JSON.stringify(deadMarker));
+		await fs.writeFile(pair.readyPath, JSON.stringify(deadMarker));
+		const result = await lifecycle.retireExitedLifecycleMarkerPairForTest(pair.root, pair.id, async () => {
+			await fs.rm(pair.markerPath);
+		});
+		expect(result).toBe(false);
+		expect(await fs.readFile(pair.readyPath, "utf8")).toBe(JSON.stringify(deadMarker));
+	} finally {
+		await fs.rm(pair.root, { recursive: true, force: true });
+	}
+});
+
+test("retire tolerates malformed primary during observation race", async () => {
+	const pair = await makePair("retire-malformed");
+	try {
+		await fs.writeFile(pair.markerPath, JSON.stringify(deadMarker));
+		await fs.writeFile(pair.readyPath, JSON.stringify(deadMarker));
+		const result = await lifecycle.retireExitedLifecycleMarkerPairForTest(pair.root, pair.id, async () => {
+			await fs.writeFile(pair.markerPath, "{}");
+		});
+		expect(result).toBe(false);
+		expect(await fs.readFile(pair.markerPath, "utf8")).toBe("{}");
+	} finally {
+		await fs.rm(pair.root, { recursive: true, force: true });
+	}
+});
+
 test("launch cleanup retires an exited id pair regardless of age or ready marker contents", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-stale-ready-launch-"));
 	const sdk = path.join(root, "sdk");

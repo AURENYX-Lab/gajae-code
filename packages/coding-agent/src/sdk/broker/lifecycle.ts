@@ -1747,7 +1747,13 @@ export async function reapDeadLifecycleMarkers(
  * not age-gated and does not require the ready sibling to contain the same
  * effect marker: the primary marker is the owner authority for this id.
  */
-export async function retireExitedLifecycleMarkerPair(root: string, id: string): Promise<boolean> {
+type RetireExitedLifecycleMarkerPairHook = () => void | Promise<void>;
+
+async function retireExitedLifecycleMarkerPairImpl(
+	root: string,
+	id: string,
+	afterObservation?: RetireExitedLifecycleMarkerPairHook,
+): Promise<boolean> {
 	if (!isCanonicalSessionId(id)) return false;
 	let directory: string;
 	let directoryIdentity: { dev: bigint; ino: bigint };
@@ -1772,6 +1778,7 @@ export async function retireExitedLifecycleMarkerPair(root: string, id: string):
 		return false;
 	}
 	if (observeProcess(marker.pid, marker.incarnation) !== "exited") return false;
+	await afterObservation?.();
 	const readyPath = lifecycleReadyPath(path.dirname(directory), id);
 	const ready = captureLifecycleFile(readyPath, true, true);
 	try {
@@ -1783,6 +1790,7 @@ export async function retireExitedLifecycleMarkerPair(root: string, id: string):
 		)
 			return false;
 		const currentPrimary = captureLifecycleFile(markerPath, true, true);
+		await afterObservation?.();
 		if (
 			!currentPrimary ||
 			!sameLifecycleCleanupIdentity(
@@ -1821,6 +1829,18 @@ export async function retireExitedLifecycleMarkerPair(root: string, id: string):
 	} catch {
 		return false;
 	}
+}
+
+export async function retireExitedLifecycleMarkerPair(root: string, id: string): Promise<boolean> {
+	return retireExitedLifecycleMarkerPairImpl(root, id);
+}
+
+export async function retireExitedLifecycleMarkerPairForTest(
+	root: string,
+	id: string,
+	afterObservation: RetireExitedLifecycleMarkerPairHook,
+): Promise<boolean> {
+	return retireExitedLifecycleMarkerPairImpl(root, id, afterObservation);
 }
 
 export async function writeEffectMarker(root: string, id: string, marker: EffectMarker): Promise<void> {
