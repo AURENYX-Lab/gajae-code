@@ -127,6 +127,7 @@ import {
 	streamSimple,
 } from "@gajae-code/ai/core";
 import { normalizeAnthropicBaseUrl } from "@gajae-code/ai/providers/anthropic";
+import { isExplicitCodexTerminalVeto } from "@gajae-code/ai/providers/openai-codex-responses";
 import {
 	type AuthDisposition,
 	beginAttempt,
@@ -1426,6 +1427,8 @@ const PROVIDER_FIRST_EVENT_TIMEOUT_WITHOUT_ARTICLE_ERROR = "Provider stream time
 const BARE_DEFAULT_CODEX_RETRYABLE_ERROR =
 	/^Codex error event(?:: .*)? \(code=(?:server_is_overloaded|server_error|internal_error)(?:, [^)]+)*\)$/;
 const BARE_DEFAULT_CODEX_RETRYABLE_CODES = new Set(["server_is_overloaded", "server_error", "internal_error"]);
+const BARE_DEFAULT_CODEX_OVERLOAD_ERROR =
+	/^Codex error event(?:: .*)? \(code=server_is_overloaded(?:, [^)]+)*\)$/;
 const BARE_DEFAULT_OVERLOAD_CODES = new Set([SERVER_OVERLOADED_PROVIDER_CODE]);
 /** Anthropic's typed capacity-overload `error.type`, the only Anthropic overload code admitted below. */
 const ANTHROPIC_OVERLOADED_ERROR_TYPE = "overloaded_error";
@@ -1555,9 +1558,38 @@ function isStatuslessTypedOverloadFacts(facts: TransportFailureFacts | undefined
 	);
 }
 
+// Deterministic auth/request/model diagnostics must surface even when a provider
+// labels the failure with a transient code.
+const TERMINAL_ERROR_MESSAGE =
+	/unauthorized|forbidden|authentication_error|permission_error|permission denied|invalid api key|invalid_request_error|invalid request|bad request|bad_request|validation_error|unprocessable|payload too large|payment required|insufficient_quota|insufficient credits|missing required (parameter|field)|invalid schema|invalid tool_choice|unsupported (parameter|value|model)|model_not_found|no such model|unknown model|does not (exist|support)|request was aborted|request aborted|the user aborted/i;
+
+function isTerminalCodexProviderFailure(message: AssistantMessage): boolean {
+	if (message.api !== "openai-codex-responses") return false;
+	if (isExplicitCodexTerminalVeto(message.transportFailure?.providerCode, message.errorMessage)) return true;
+	return (
+		(BARE_DEFAULT_CODEX_RETRYABLE_CODES.has(message.transportFailure?.providerCode ?? "") ||
+			BARE_DEFAULT_CODEX_RETRYABLE_ERROR.test(message.errorMessage ?? "")) &&
+		TERMINAL_ERROR_MESSAGE.test(message.errorMessage ?? "")
+	);
+}
+
 function isBareDefaultCodexOverload(message: AssistantMessage): boolean {
 	return (
 		message.api === "openai-codex-responses" &&
+		!TERMINAL_ERROR_MESSAGE.test(message.errorMessage ?? "") &&
+		!isExplicitCodexTerminalVeto(undefined, message.errorMessage) &&
+		(isExactTypedOverloadFacts(message, BARE_DEFAULT_OVERLOAD_CODES) ||
+			(BARE_DEFAULT_CODEX_OVERLOAD_ERROR.test(message.errorMessage ?? "") &&
+				!hasBareDefaultRetryDisqualifyingFacts(message))) &&
+		!assistantMessageHasVisibleOrToolContent(message)
+	);
+}
+
+function isBareDefaultCodexProviderFailure(message: AssistantMessage): boolean {
+	return (
+		message.api === "openai-codex-responses" &&
+		!TERMINAL_ERROR_MESSAGE.test(message.errorMessage ?? "") &&
+		!isExplicitCodexTerminalVeto(message.transportFailure?.providerCode, message.errorMessage) &&
 		(isExactTypedOverloadFacts(message, BARE_DEFAULT_CODEX_RETRYABLE_CODES) ||
 			(BARE_DEFAULT_CODEX_RETRYABLE_ERROR.test(message.errorMessage ?? "") &&
 				!hasBareDefaultRetryDisqualifyingFacts(message))) &&
@@ -22994,6 +23026,7 @@ export class AgentSession {
 	}
 
 	#isRetryableError(message: AssistantMessage): boolean {
+		if (isTerminalCodexProviderFailure(message)) return false;
 		if (this.#isTerminalProviderFirstEventTimeout(message)) return false;
 		if (message.errorMessage?.startsWith("Model fallback chain exhausted;")) return false;
 		if (message.errorMessage?.startsWith("Managed fallback retried the escaped non-ASCII")) return false;
@@ -23004,7 +23037,11 @@ export class AgentSession {
 			return false;
 		const contextWindow = this.model?.contextWindow ?? 0;
 		if (classifyContextOverflow(message, transportFailure, contextWindow)) return false;
-		if (isBareDefaultCodexOverload(message) && this.settings.get("retry.enabled") !== false) return true;
+		if (
+			(isBareDefaultCodexOverload(message) || isBareDefaultCodexProviderFailure(message)) &&
+			this.settings.get("retry.enabled") !== false
+		)
+			return true;
 		const managedFallback = this.#defaultFallbackChain().chain.entries.length > 1;
 		// An account-specific model rejection that cannot rotate to another
 		// credential stays terminal only on the session's own retry path; managed
@@ -23117,9 +23154,7 @@ export class AgentSession {
 		// Errors that will never succeed on retry (auth/permission, malformed
 		// request, unknown/unsupported model). These surface immediately rather
 		// than retry forever.
-		return /unauthorized|forbidden|authentication_error|permission_error|permission denied|invalid api key|invalid_request_error|invalid request|bad request|bad_request|validation_error|unprocessable|payload too large|payment required|insufficient_quota|insufficient credits|missing required (parameter|field)|invalid schema|invalid tool_choice|unsupported (parameter|value|model)|model_not_found|no such model|unknown model|does not (exist|support)|request was aborted|request aborted|the user aborted/i.test(
-			errorMessage,
-		);
+		return TERMINAL_ERROR_MESSAGE.test(errorMessage);
 	}
 
 	#extractExplicitHttpStatusFromErrorMessage(errorMessage: string): number | undefined {
@@ -24308,6 +24343,13 @@ export class AgentSession {
 		const classification = this.#classifyErrorForRetry(message);
 		const localSnapshot = classification === "local_snapshot";
 		const localBufferOverflow = classification === "local_buffer_overflow";
+		// Managed outcomes can reach retry handling without the ordinary admission
+		// check. Do not let retained transport facts bypass the same terminal veto.
+		if (isTerminalCodexProviderFailure(message)) {
+			return managedOutcome
+				? { type: "terminal", terminal: { stopReason: "error", messages: [message] } }
+				: false;
+		}
 		if (retryCancelled()) {
 			return managedOutcome ? { type: "terminal", terminal: { stopReason: "cancelled" } } : false;
 		}
@@ -24369,6 +24411,8 @@ export class AgentSession {
 			isBareDefaultCodexOverload(message) ||
 			isBareDefaultAnthropicOverload(message) ||
 			isBareDefaultOpenAIResponsesOverload(message);
+		const canReplayBareDefaultCodexFailure = isBareDefaultCodexProviderFailure(message);
+		const boundBareDefaultCodexFailure = canReplayBareDefaultCodexFailure && !legacyRetryConfigured;
 		const canReplayCodexProviderOverload = isBareDefaultCodexOverload(message);
 		const reportedRetryMaxAttempts = transportFailure?.retryMaxAttempts;
 		if (reportedRetryMaxAttempts !== undefined) {
@@ -24412,7 +24456,9 @@ export class AgentSession {
 		const fallbackTrigger = this.#fallbackTriggerFor(message, !managedFallback, transportFailure);
 		const trigger:
 			| { class: FallbackTriggerClass; retryAfterMs?: number; authDisposition?: AuthDisposition }
-			| undefined = canReplayCodexProviderOverload ? { class: "server" } : fallbackTrigger;
+			| undefined = canReplayCodexProviderOverload || canReplayBareDefaultCodexFailure
+				? { class: "server" }
+				: fallbackTrigger;
 		// OpenAI's typed statusless capacity-overload code (issue #5018) must not
 		// gain managed-chain retry/advance authority from its new facts. Before
 		// the code survived transport, this failure reached the session as an
@@ -24516,6 +24562,7 @@ export class AgentSession {
 		if (!managedFallback && !legacyRetryConfigured && !canReplayRotatedCredential && !canReplayEmptyResponse) {
 			if (
 				(!canReplayProviderOverload &&
+					!canReplayBareDefaultCodexFailure &&
 					!canReplayUnexpectedSocketClose &&
 					!this.#isTypedFirstEventTimeout(message) &&
 					!messageOnlyWatchdogTimeout &&
@@ -24534,6 +24581,7 @@ export class AgentSession {
 			!managedFallback &&
 			classification === "transient" &&
 			!canReplayProviderOverload &&
+			!boundBareDefaultCodexFailure &&
 			!canReplayUnexpectedSocketClose &&
 			!this.#isIdleStreamStallErrorMessage(message.errorMessage ?? "");
 
