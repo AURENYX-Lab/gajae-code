@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "bun:test";
-import { getBundledModel } from "@gajae-code/ai";
+import { Effort, getBundledModel } from "@gajae-code/ai";
 import { KeybindingsManager } from "@gajae-code/coding-agent/config/keybindings";
 import type { ModelRegistry } from "@gajae-code/coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@gajae-code/coding-agent/config/settings";
@@ -378,7 +378,11 @@ describe("focused menus own interrupt before background work", () => {
 	test("real model selector and palette cancel callbacks receive TUI input during compaction", async () => {
 		const h = createHarness();
 		try {
-			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const model = {
+				...getBundledModel("anthropic", "claude-sonnet-4-5"),
+				reasoning: true,
+				thinking: { minLevel: Effort.Low, maxLevel: Effort.XHigh, mode: "anthropic-adaptive" as const },
+			};
 			const registry = {
 				getAll: () => [model],
 				hasConfiguredProviderAuth: () => false,
@@ -405,6 +409,16 @@ describe("focused menus own interrupt before background work", () => {
 				return { component: selector, focus: selector };
 			});
 			await Bun.sleep(0);
+			const focused = h.ui.getFocusedComponent();
+			if (!(focused instanceof ModelSelectorComponent)) throw new Error("Expected focused model selector");
+			h.terminal.sendInput("\r");
+			expect(focused.render(100).join("\n")).toContain("Action for:");
+			h.terminal.sendInput("\r");
+			expect(focused.render(100).join("\n")).toContain("Reasoning for Default");
+			h.terminal.sendInput("\x1b");
+			expect(focused.render(100).join("\n")).toContain("Action for:");
+			h.terminal.sendInput("\x1b");
+			expect(cancelled).not.toHaveBeenCalled();
 			h.terminal.sendInput("\x1b");
 			expect(cancelled).toHaveBeenCalledTimes(1);
 			const paletteCancelled = vi.fn();
@@ -457,6 +471,47 @@ describe("focused menus own interrupt before background work", () => {
 			h.close();
 		}
 	});
+
+	test("auto compaction cleanup while a menu is open preserves local cancellation", async () => {
+		const h = createHarness();
+		try {
+			h.ctx.flushCompactionQueue = async () => {};
+			h.session.isCompacting = true;
+			await h.events.handleEvent({ type: "auto_compaction_start", reason: "overflow", action: "context-full" });
+			const m = mountMenu(h);
+			h.session.isCompacting = false;
+			await h.events.handleEvent({
+				type: "auto_compaction_end",
+				action: "context-full",
+				result: undefined,
+				aborted: true,
+				willRetry: false,
+			});
+			h.terminal.sendInput("\x1b");
+			expect(m.cancel).toHaveBeenCalledTimes(1);
+			expect(h.spies.abortCompaction).not.toHaveBeenCalled();
+		} finally {
+			h.close();
+		}
+	});
+
+	for (const kind of ["hookInput", "hookEditor"] as const) {
+		test(`focused ${kind} retains workflow interrupt rather than ordinary menu priority`, () => {
+			const h = createHarness();
+			try {
+				const local = vi.fn();
+				const hook = { invalidate() {}, render: () => ["Workflow input"], handleInput: local };
+				Object.assign(h.ctx, { [kind]: hook });
+				h.ui.setFocus(hook);
+				h.session.isStreaming = true;
+				h.terminal.sendInput("\x1b");
+				expect(h.spies.abort).toHaveBeenCalledTimes(1);
+				expect(local).not.toHaveBeenCalled();
+			} finally {
+				h.close();
+			}
+		});
+	}
 
 	test("finished work does not change local menu cancellation or clear the draft", () => {
 		const h = createHarness();
