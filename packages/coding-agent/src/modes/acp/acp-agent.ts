@@ -4466,6 +4466,10 @@ export class AcpAgent implements Agent {
 		if (!record) return;
 		const waiter = record.activePrompt;
 		if (!waiter || waiter.settled || waiter.terminalReserved) return;
+		if (record.cancelRequested && waiter.cancelAcknowledged) {
+			void this.#settleCancelledPrompt(id, record, waiter);
+			return;
+		}
 		// An accepted mutation without its acknowledgement remains uncertain. Keep the
 		// existing reconciliation path so a host exit never turns an ambiguous prompt
 		// into a retryable failure.
@@ -4480,7 +4484,7 @@ export class AcpAgent implements Agent {
 			new AcpPromptAbandonedError(
 				"prompt_abandoned",
 				`ACP prompt was abandoned because the SDK session host closed (${reason}). The turn was settled so the ` +
-					`client stops waiting; the session still accepts the next prompt.`,
+					`client stops waiting; a new prompt requires a valid or re-established session attachment.`,
 				waiter.planSnapshot,
 			),
 		);
@@ -4536,7 +4540,7 @@ export class AcpAgent implements Agent {
 				"prompt_abandoned",
 				`ACP prompt was abandoned after ${Math.round(silenceMs / 1_000)}s of silence: ${cause}. Last frame was ` +
 					`"${waiter.lastFrameType}" (${describeCorrelation(waiter.correlation)}). The turn was settled so the ` +
-					`client stops waiting; the session still accepts the next prompt.`,
+					`client stops waiting; a new prompt requires a valid or re-established session attachment.`,
 				plan,
 			),
 		);
