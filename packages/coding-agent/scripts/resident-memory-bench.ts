@@ -30,11 +30,12 @@
  * RSS mode reports append-phase and fresh-process reopen measurements with the full
  * `process.memoryUsage()` breakdown, plus repeated forced-GC idle-turn reclaim samples.
  * AC-1 passes only when all three ceilings hold: the append steady-state RSS delta stays
- * within 100 MiB, the read-path residual (post-read forced-GC delta) stays within
- * `max(READ_PATH_RESIDUAL_FLOOR_BYTES, READ_PATH_RESIDUAL_TRANSCRIPT_RATIO_LIMIT` x the
- * fixture's persisted transcript), and
- * the reclaim contract holds (`RECLAIM_ALLOCATOR_FLOOR_BYTES`, post-reclaim delta inside
- * the append limit). A post-reclaim result inside the append limit is separately labeled
+ * within 100 MiB; the read-path residual (post-read forced-GC delta) stays within
+ * max(READ_PATH_RESIDUAL_FLOOR_BYTES, READ_PATH_RESIDUAL_TRANSCRIPT_RATIO_LIMIT x the
+ * fixture's persisted transcript); and the reclaim contract holds
+ * (RECLAIM_ALLOCATOR_FLOOR_BYTES, post-reclaim delta inside the append limit). A reclaim
+ * proof only excuses a steady-state miss: the read-path ceiling and the reclaim contract
+ * are hard gates, so a failed read path exits non-zero instead of being relabeled
  * documented evidence. The harness always runs against its own throwaway agent dir, so
  * nothing has to be pre-set, an ambient `GJC_CODING_AGENT_DIR` is ignored, and the
  * operator's `~/.gjc` is never read; `GJC_RESIDENT_MEMORY_BENCH_AGENT_DIR` pins it.
@@ -1251,6 +1252,10 @@ function summarizeAc1(runs: readonly RssWorkerResult[]): {
 	const postReclaimWithinLimit = postReclaimDelta.median <= AC1_APPEND_PHASE_RSS_LIMIT_BYTES;
 	const passesReclaimFloorGate = reclaimedBytes.median >= RECLAIM_ALLOCATOR_FLOOR_BYTES && postReclaimWithinLimit;
 	const hasReclaimProof = postReclaimWithinLimit && reclaimedBytes.median > 0;
+	// The reclaim proof excuses the steady-state ceiling only. The read-path ceiling and
+	// the reclaim contract are hard gates, so a proof must not relabel a failed read path
+	// as documented evidence and let the process exit zero.
+	const reclaimProofExcusesOnlySteadyState = hasReclaimProof && passesReadPathGate && passesReclaimFloorGate;
 	return {
 		appendSteadyDelta: appendSteadyDelta.median,
 		postReclaimDelta: postReclaimDelta.median,
@@ -1285,7 +1290,7 @@ function summarizeAc1(runs: readonly RssWorkerResult[]): {
 		verdict:
 			passesSteadyStateGate && passesReadPathGate && passesReclaimFloorGate
 				? "pass"
-				: hasReclaimProof
+				: reclaimProofExcusesOnlySteadyState
 					? "documented-evidence-with-reclaim-proof"
 					: "fail",
 	};
