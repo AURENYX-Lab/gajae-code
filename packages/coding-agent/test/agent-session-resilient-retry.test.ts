@@ -30,6 +30,26 @@ const REAL_DATE_NOW = Date.now;
 const ORIGINAL_COORDINATOR_STATE_FILE = process.env[GJC_COORDINATOR_SESSION_STATE_FILE_ENV];
 const ORIGINAL_BEFORE_PERSIST_FROM_EVENT = __sessionStateSidecarTestHooks.beforePersistFromEvent;
 
+type CodexFetchInput = Parameters<typeof fetch>[0];
+type CodexFetchInit = Parameters<typeof fetch>[1];
+type CodexFetchHandler = (input: CodexFetchInput, init?: CodexFetchInit) => Response | Promise<Response>;
+
+function isCodexResponsesRequest(input: CodexFetchInput): boolean {
+	const url = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
+	try {
+		return new URL(url).pathname.endsWith("/codex/responses");
+	} catch {
+		return false;
+	}
+}
+
+function mockCodexFetch(handler: CodexFetchHandler) {
+	return vi.spyOn(globalThis, "fetch").mockImplementation((async (input: CodexFetchInput, init: CodexFetchInit) => {
+		if (!isCodexResponsesRequest(input)) return new Response(null, { status: 404 });
+		return handler(input, init);
+	}) as unknown as typeof fetch);
+}
+
 setDefaultTimeout(120_000);
 
 /**
@@ -146,7 +166,6 @@ describe.serial("AgentSession resilient retry", () => {
 	afterEach(async () => {
 		// Teardown uses real timer/deadline state. Restore test clocks and scheduler
 		// hooks before disposing so a mocked Date.now cannot wedge cleanup.
-		vi.restoreAllMocks();
 		Date.now = REAL_DATE_NOW;
 		__sessionStateSidecarTestHooks.beforePersistFromEvent = ORIGINAL_BEFORE_PERSIST_FROM_EVENT;
 		const currentSession = session;
@@ -154,10 +173,14 @@ describe.serial("AgentSession resilient retry", () => {
 		const currentTempDir = tempDir;
 		session = undefined;
 		if (currentSession) {
+			await currentSession.waitForIdle().catch(() => {});
+			vi.restoreAllMocks();
 			// Keep teardown failures from masking the case result. The explicit loop
 			// disposals below propagate persistence failures after their assertions.
 			await currentSession.awaitCoordinatorRuntimeStatePersistenceForTests().catch(() => {});
 			await currentSession.dispose();
+		} else {
+			vi.restoreAllMocks();
 		}
 		currentAuthStorage.close();
 		currentTempDir.removeSync();
@@ -1454,7 +1477,7 @@ describe.serial("AgentSession resilient retry", () => {
 		);
 		let requests = 0;
 		const providerFailures = 6;
-		vi.spyOn(globalThis, "fetch").mockImplementation((async () => {
+		mockCodexFetch(async () => {
 			requests++;
 			const events =
 				requests <= providerFailures
@@ -1493,7 +1516,7 @@ describe.serial("AgentSession resilient retry", () => {
 			return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
 				headers: { "content-type": "text/event-stream" },
 			});
-		}) as unknown as typeof fetch);
+		});
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const { retryStartEvents, retryEndEvents } = track(session);
 
@@ -1558,10 +1581,10 @@ describe.serial("AgentSession resilient retry", () => {
 		]
 			.map(event => `data: ${JSON.stringify(event)}\n\n`)
 			.join("");
-		vi.spyOn(globalThis, "fetch").mockImplementation((async () => {
+		mockCodexFetch(async () => {
 			requests++;
 			return new Response(requests <= 3 ? failure : success, { headers: { "content-type": "text/event-stream" } });
-		}) as unknown as typeof fetch);
+		});
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const { retryStartEvents, retryEndEvents } = track(session);
 
@@ -1606,10 +1629,10 @@ describe.serial("AgentSession resilient retry", () => {
 		);
 		let requests = 0;
 		const failure = `data: ${JSON.stringify({ type: "error", code, message: "persistent upstream failure" })}\n\n`;
-		vi.spyOn(globalThis, "fetch").mockImplementation((async () => {
+		mockCodexFetch(async () => {
 			requests++;
 			return new Response(failure, { headers: { "content-type": "text/event-stream" } });
-		}) as unknown as typeof fetch);
+		});
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const { retryStartEvents, retryEndEvents } = track(session);
 
@@ -1690,19 +1713,16 @@ describe.serial("AgentSession resilient retry", () => {
 			code,
 			message,
 		})}\n\n`;
-		const fetchSpy = vi
-			.spyOn(globalThis, "fetch")
-			.mockImplementation(
-				(async () =>
-					new Response(errorSse, { headers: { "content-type": "text/event-stream" } })) as unknown as typeof fetch,
-			);
+		const fetchSpy = mockCodexFetch(
+			async () => new Response(errorSse, { headers: { "content-type": "text/event-stream" } }),
+		);
 		const { retryStartEvents } = track(session);
 
 		await session.prompt(`reject unsupported Codex parameter (${mode})`);
 		await session.waitForIdle();
 
 		expect(retryStartEvents).toHaveLength(0);
-		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy.mock.calls.filter(([input]) => isCodexResponsesRequest(input)).length).toBe(1);
 		expect(streamCalls.get(primary.id)).toBe(1);
 		expect(streamCalls.get(fallback.id)).toBeUndefined();
 		expect(lastAssistant(session)).toMatchObject({ stopReason: "error" });
@@ -1833,12 +1853,12 @@ describe.serial("AgentSession resilient retry", () => {
 		]
 			.map(event => `data: ${JSON.stringify(event)}\n\n`)
 			.join("");
-		vi.spyOn(globalThis, "fetch").mockImplementation((async () => {
+		mockCodexFetch(async () => {
 			requests++;
 			return new Response(requests === 1 ? overload : success, {
 				headers: { "content-type": "text/event-stream" },
 			});
-		}) as unknown as typeof fetch);
+		});
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 
 		await session.prompt("recover code-only Codex overload");
@@ -1891,11 +1911,11 @@ describe.serial("AgentSession resilient retry", () => {
 			message:
 				"Invalid schema for function 'computer': schema must have type 'object' and not have 'oneOf' at the top level. (code=invalid_function_parameters)",
 		})}\n\n`;
-		vi.spyOn(globalThis, "fetch").mockImplementation(
-			(async () =>
+		mockCodexFetch(
+			async () =>
 				new Response(errorSse, {
 					headers: { "content-type": "text/event-stream" },
-				})) as unknown as typeof fetch,
+				}),
 		);
 
 		await session.prompt(`surface managed Codex ${code} schema veto`);
@@ -1942,12 +1962,12 @@ describe.serial("AgentSession resilient retry", () => {
 					"Invalid schema for function 'computer': schema must have type 'object' and not have 'oneOf' at the top level. (code=invalid_function_parameters)",
 			},
 		];
-		vi.spyOn(globalThis, "fetch").mockImplementation((async () => {
+		mockCodexFetch(async () => {
 			requests++;
 			return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
 				headers: { "content-type": "text/event-stream" },
 			});
-		}) as unknown as typeof fetch);
+		});
 		const { retryStartEvents } = track(session);
 
 		await session.prompt(`surface Codex ${code} schema validation`);
@@ -1990,10 +2010,10 @@ describe.serial("AgentSession resilient retry", () => {
 			message:
 				"Invalid schema for function 'computer': schema must have type 'object'. (code=invalid_function_parameters)",
 		})}\n\n`;
-		vi.spyOn(globalThis, "fetch").mockImplementation((async () => {
+		mockCodexFetch(async () => {
 			requests++;
 			return new Response(veto, { headers: { "content-type": "text/event-stream" } });
-		}) as unknown as typeof fetch);
+		});
 		const { retryStartEvents } = track(session);
 
 		await session.prompt(`surface configured Codex ${code} schema veto`);
@@ -2010,7 +2030,11 @@ describe.serial("AgentSession resilient retry", () => {
 	])("does not retry configured Codex explicit terminal veto %s", async vetoCode => {
 		const bundled = getBundledModel("openai-codex", "gpt-5.5");
 		if (!bundled) throw new Error("Expected bundled Codex test model to exist");
-		const model: Model<"openai-codex-responses"> = { ...bundled, api: "openai-codex-responses" };
+		const model: Model<"openai-codex-responses"> = {
+			...bundled,
+			api: "openai-codex-responses",
+			preferWebsockets: false,
+		};
 		authStorage.setRuntimeApiKey(model.provider, "fake-key");
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -2036,10 +2060,10 @@ describe.serial("AgentSession resilient retry", () => {
 			code: "server_error",
 			message: `Request blocked (code=${vetoCode})`,
 		})}\n\n`;
-		vi.spyOn(globalThis, "fetch").mockImplementation((async () => {
+		mockCodexFetch(async () => {
 			requests++;
 			return new Response(veto, { headers: { "content-type": "text/event-stream" } });
-		}) as unknown as typeof fetch);
+		});
 		const { retryStartEvents } = track(testSession);
 
 		await testSession.prompt(`surface configured Codex ${vetoCode} veto`);
@@ -2056,7 +2080,11 @@ describe.serial("AgentSession resilient retry", () => {
 	])("preserves configured legacy retries for content-free Codex %s", async code => {
 		const bundled = getBundledModel("openai-codex", "gpt-5.5");
 		if (!bundled) throw new Error("Expected bundled Codex test model to exist");
-		const model: Model<"openai-codex-responses"> = { ...bundled, api: "openai-codex-responses" };
+		const model: Model<"openai-codex-responses"> = {
+			...bundled,
+			api: "openai-codex-responses",
+			preferWebsockets: false,
+		};
 		authStorage.setRuntimeApiKey(model.provider, "fake-key");
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
@@ -2094,12 +2122,12 @@ describe.serial("AgentSession resilient retry", () => {
 		]
 			.map(event => `data: ${JSON.stringify(event)}\n\n`)
 			.join("");
-		vi.spyOn(globalThis, "fetch").mockImplementation((async () => {
+		mockCodexFetch(async () => {
 			requests++;
 			return new Response(requests <= 2 ? failure : success, {
 				headers: { "content-type": "text/event-stream" },
 			});
-		}) as unknown as typeof fetch);
+		});
 		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 		const { retryStartEvents } = track(session);
 
