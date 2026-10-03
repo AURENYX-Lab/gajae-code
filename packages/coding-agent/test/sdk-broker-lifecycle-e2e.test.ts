@@ -555,6 +555,66 @@ async function liveLifecycleSession(root: string, agentDir: string, sessionId: s
 	}
 }
 
+test("readiness polling avoids repeated heartbeat checkpoints and full index refreshes", async () => {
+	if (process.platform !== "linux") return;
+	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-sdk-ready-poll-cost-"));
+	const agentDir = path.join(root, "agent");
+	const fixture = path.join(root, "ready-poll-cost.ts");
+	const pollingStartedPath = path.join(root, "polling-started");
+	const broker = new Broker({ agentDir });
+	let nowMs = 1_000;
+	await fs.writeFile(
+		fixture,
+		`const request = JSON.parse(process.env.GJC_SDK_LIFECYCLE_REQUEST ?? "{}");
+const stateRoot = request.stateRoot;
+const sessionId = request.sessionId;
+const readyPath = stateRoot + "/sdk/" + sessionId + ".lifecycle.ready.json";
+const endpointPath = stateRoot + "/sdk/" + sessionId + ".json";
+await Bun.write(readyPath, JSON.stringify({ pid: process.pid, effectMarker: request.effectMarker }));
+await Bun.write(endpointPath, "{}");
+await Bun.write(${JSON.stringify(pollingStartedPath)}, "ready");
+setInterval(() => {}, 1_000_000);
+`,
+	);
+	const checkpointSpy = vi.spyOn(SessionIndex.prototype, "checkpointLiveHeartbeats");
+	const refreshSpy = vi.spyOn(SessionIndex.prototype, "refresh");
+	const pollingStarted = Promise.withResolvers<void>();
+	const watcher = syncFs.watch(root, (_event, filename) => {
+		if (filename?.toString() === path.basename(pollingStartedPath)) pollingStarted.resolve();
+	});
+	setLifecycleCommandResolverForTest(broker, () => ({ file: process.execPath, args: ["run", fixture] }));
+	setLifecycleTimingForTest(broker, {
+		now: () => nowMs,
+		sleep: async ms => {
+			nowMs += Math.max(ms, 1);
+			await Bun.sleep(0);
+		},
+	});
+	try {
+		await broker.start();
+		const responsePromise = broker.handleRequest(
+			"session.create",
+			{ cwd: root, readinessTimeoutMs: 4_000 },
+			"ready-poll-cost",
+		);
+		await pollingStarted.promise;
+		checkpointSpy.mockClear();
+		refreshSpy.mockClear();
+		const response = await responsePromise;
+		expect(response).toMatchObject({ ok: false });
+		expect(checkpointSpy.mock.calls.length).toBeLessThanOrEqual(1);
+		expect(refreshSpy.mock.calls.length).toBeLessThanOrEqual(2);
+	} finally {
+		watcher.close();
+		setLifecycleTimingForTest(broker, undefined);
+		setLifecycleCommandResolverForTest(broker, undefined);
+		checkpointSpy.mockRestore();
+		refreshSpy.mockRestore();
+		await broker.stop();
+		await fs.rm(root, { recursive: true, force: true });
+	}
+}, 20_000);
+
 test("lifecycle child ignores a stale marker until its current effect marker replaces it", async () => {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-stale-marker-"));
 	const agentDir = path.join(root, "agent");
