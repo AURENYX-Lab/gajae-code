@@ -1525,6 +1525,7 @@ export class Broker {
 	#publishedAt: bigint | null = null;
 	#startedAt: bigint | null = null;
 	#watchInFlight = false;
+	#checkpointInFlight = false;
 	#stopping = false;
 	#transport: BrokerTransport | null = null;
 	#heartbeatTimer: NodeJS.Timeout | null = null;
@@ -3786,6 +3787,7 @@ export class Broker {
 		this.#publishedAt = null;
 		this.#startedAt = process.hrtime.bigint();
 		this.#watchInFlight = false;
+		this.#checkpointInFlight = false;
 		this.#throwIfStartupAborted();
 		await Promise.all([this.ledger.assertSupportedStateVersions(), readBrokerDiscovery(this.settings.agentDir)]);
 		this.#throwIfStartupAborted();
@@ -4192,7 +4194,7 @@ export class Broker {
 					return;
 			}
 			this.#startupAdmissions.reopen();
-			if (this.#publicationState === "healthy-owned") await this.#checkpointSessionHeartbeats();
+			if (this.#publicationState === "healthy-owned") void this.#checkpointSessionHeartbeats();
 			return;
 		}
 		this.#fence(observation === "ambiguous" ? "observation-ambiguous" : "suspect-unpublished");
@@ -4233,10 +4235,14 @@ export class Broker {
 		return await this.index.checkpointLiveHeartbeats(now);
 	}
 	async #checkpointSessionHeartbeats(): Promise<void> {
+		if (this.#checkpointInFlight || this.#stopping) return;
+		this.#checkpointInFlight = true;
 		try {
 			await this.heartbeatSessions();
 		} catch (error) {
 			logger.warn(`sdk broker: session heartbeat checkpoint failed: ${String(error)}`);
+		} finally {
+			this.#checkpointInFlight = false;
 		}
 	}
 	async #complete(
@@ -4260,6 +4266,7 @@ export class Broker {
 		};
 		(mode === "lost-root" ? logger.warn : logger.info)("sdk broker: exiting", exitRecord);
 		this.#stopping = true;
+		this.#checkpointInFlight = false;
 		this.#publicationState = "stopping";
 		// A lost-root broker has been fenced: it no longer owns the published root, and
 		// its settlement is bounded, so any startup still queued behind it would be
