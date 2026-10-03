@@ -373,6 +373,8 @@ type CodexOutputBlock =
 			argumentsAuthoritative?: boolean;
 			sourceItemId?: string;
 			sourceCallId?: string;
+			sourceName?: string;
+			sourceOutputIndex?: number;
 	  });
 export interface OpenAICodexWebSocketDebugStats {
 	fullContextRequests: number;
@@ -472,6 +474,7 @@ interface CodexStreamRuntime {
 	currentItemOutputIndex?: number;
 	currentBlock: CodexOutputBlock | null;
 	nativeOutputItems: Array<Record<string, unknown>>;
+	nativeOutputItemOutputIndexes: Array<number | undefined>;
 	websocketStreamRetries: number;
 	providerRetryAttempt: number;
 	toolChoiceFallbackAttempted: boolean;
@@ -822,6 +825,8 @@ function removeTransientBlockIndices(output: AssistantMessage): void {
 			delete (block as { argumentsAuthoritative?: boolean }).argumentsAuthoritative;
 			delete (block as { sourceItemId?: string }).sourceItemId;
 			delete (block as { sourceCallId?: string }).sourceCallId;
+			delete (block as { sourceName?: string }).sourceName;
+			delete (block as { sourceOutputIndex?: number }).sourceOutputIndex;
 		}
 	}
 }
@@ -1224,6 +1229,7 @@ function createCodexStreamRuntime(initial: {
 		currentItemOutputIndex: undefined,
 		currentBlock: null,
 		nativeOutputItems: [],
+		nativeOutputItemOutputIndexes: [],
 		websocketStreamRetries: 0,
 		providerRetryAttempt: 0,
 		toolChoiceFallbackAttempted: initial.toolChoiceFallbackApplied === true,
@@ -1336,6 +1342,8 @@ function trySalvageCodexFinalizedToolCalls(
 				argumentsAuthoritative?: boolean;
 				sourceItemId?: string;
 				sourceCallId?: string;
+				sourceName?: string;
+				sourceOutputIndex?: number;
 			};
 			const item =
 				runtime.currentBlock === activeToolCall && runtime.currentItem?.type === "function_call"
@@ -1344,7 +1352,7 @@ function trySalvageCodexFinalizedToolCalls(
 							type: "function_call",
 							id: activeToolCall.sourceItemId,
 							call_id: activeToolCall.sourceCallId,
-							name: activeToolCall.name,
+							name: activeToolCall.sourceName ?? codexToolWireName(activeToolCall.name),
 							arguments: activeToolCall.partialJson,
 						};
 			if (typeof item.id !== "string" || typeof item.call_id !== "string") continue;
@@ -1355,6 +1363,7 @@ function trySalvageCodexFinalizedToolCalls(
 				arguments: activeToolCall.arguments,
 			};
 			const rawPartialJson = activeToolCall.partialJson;
+			const sourceOutputIndex = activeToolCall.sourceOutputIndex;
 			captureUnicodeEscapeEvidence(toolCall, rawPartialJson);
 			Object.assign(activeToolCall, toolCall);
 			captureUnicodeEscapeEvidence(activeToolCall, rawPartialJson);
@@ -1363,12 +1372,27 @@ function trySalvageCodexFinalizedToolCalls(
 			delete (activeToolCall as { argumentsAuthoritative?: boolean }).argumentsAuthoritative;
 			delete (activeToolCall as { sourceItemId?: string }).sourceItemId;
 			delete (activeToolCall as { sourceCallId?: string }).sourceCallId;
+			delete (activeToolCall as { sourceName?: string }).sourceName;
+			delete (activeToolCall as { sourceOutputIndex?: number }).sourceOutputIndex;
 			runtime.finalizedToolCallIds.add(toolCall.id);
-			runtime.nativeOutputItems.push({
+			const nativeOutputItem = {
 				...item,
+				name:
+					typeof item.name === "string"
+						? item.name
+						: (activeToolCall.sourceName ?? codexToolWireName(activeToolCall.name)),
 				arguments: JSON.stringify(toolCall.arguments),
 				status: "completed",
-			} as Record<string, unknown>);
+			} as Record<string, unknown>;
+			const insertionIndex =
+				typeof sourceOutputIndex === "number"
+					? runtime.nativeOutputItemOutputIndexes.findIndex(
+							outputIndex => typeof outputIndex === "number" && outputIndex > sourceOutputIndex,
+						)
+					: -1;
+			const resolvedInsertionIndex = insertionIndex === -1 ? runtime.nativeOutputItems.length : insertionIndex;
+			runtime.nativeOutputItems.splice(resolvedInsertionIndex, 0, nativeOutputItem);
+			runtime.nativeOutputItemOutputIndexes.splice(resolvedInsertionIndex, 0, sourceOutputIndex);
 			context.stream.push({
 				type: "toolcall_end",
 				contentIndex: context.output.content.indexOf(activeToolCall),
@@ -1435,6 +1459,9 @@ function handleCodexStreamEvent(args: {
 		runtime.currentItemOutputIndex = typeof rawEvent.output_index === "number" ? rawEvent.output_index : undefined;
 		runtime.currentBlock = createOutputBlockForItem(item);
 		if (!runtime.currentBlock) return firstTokenTime;
+		if (runtime.currentBlock.type === "toolCall" && typeof runtime.currentItemOutputIndex === "number") {
+			runtime.currentBlock.sourceOutputIndex = runtime.currentItemOutputIndex;
+		}
 		const currentBlock = runtime.currentBlock;
 		if (
 			currentBlock.type === "toolCall" &&
@@ -1590,9 +1617,11 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 		const block: ToolCall & {
 			partialJson: string;
 			argumentsComplete: boolean;
-			argumentsAuthoritative: boolean;
+			argumentsAuthoritative?: boolean;
 			sourceItemId?: string;
 			sourceCallId?: string;
+			sourceName?: string;
+			sourceOutputIndex?: number;
 		} = {
 			type: "toolCall",
 			id: encodeResponsesToolCallId(item.call_id, item.id),
@@ -1603,6 +1632,7 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 			argumentsAuthoritative: false,
 			sourceItemId: item.id,
 			sourceCallId: item.call_id,
+			sourceName: item.name,
 		};
 		captureUnicodeEscapeEvidence(block, initialArguments);
 		return block;
@@ -1857,6 +1887,9 @@ function handleOutputItemDone(
 ): void {
 	const item = structuredCloneJSON(rawEvent.item) as CodexEventItem;
 	runtime.nativeOutputItems.push(item as unknown as Record<string, unknown>);
+	runtime.nativeOutputItemOutputIndexes.push(
+		typeof rawEvent.output_index === "number" ? rawEvent.output_index : undefined,
+	);
 
 	if (item.type === "reasoning" && runtime.currentBlock?.type === "thinking") {
 		const block = runtime.currentBlock;
@@ -1958,6 +1991,8 @@ function handleOutputItemDone(
 		delete (runtime.currentBlock as { doneInput?: string }).doneInput;
 		delete (runtime.currentBlock as { sourceItemId?: string }).sourceItemId;
 		delete (runtime.currentBlock as { sourceCallId?: string }).sourceCallId;
+		delete (runtime.currentBlock as { sourceName?: string }).sourceName;
+		delete (runtime.currentBlock as { sourceOutputIndex?: number }).sourceOutputIndex;
 		runtime.canSafelyReplayWebsocketOverSse = false;
 		stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
 		runtime.currentItem = null;
@@ -2164,6 +2199,7 @@ async function tryRetryWithoutForcedToolChoice(
 	runtime.currentBlock = null;
 	runtime.sawTerminalEvent = false;
 	runtime.nativeOutputItems.length = 0;
+	runtime.nativeOutputItemOutputIndexes.length = 0;
 	runtime.finalizedToolCallIds.clear();
 	runtime.toolArgumentCorrelationFailed = false;
 	resetOutputState(context.output);
@@ -2263,6 +2299,7 @@ async function tryReconnectCodexWebSocketOnConnectionLimit(
 		runtime.currentItem = null;
 		runtime.currentBlock = null;
 		runtime.nativeOutputItems.length = 0;
+		runtime.nativeOutputItemOutputIndexes.length = 0;
 		runtime.finalizedToolCallIds.clear();
 		runtime.toolArgumentCorrelationFailed = false;
 		resetOutputState(context.output);
@@ -2322,6 +2359,7 @@ async function tryRecoverCodexPreviousResponseNotFound(
 	runtime.currentBlock = null;
 	runtime.sawTerminalEvent = false;
 	runtime.nativeOutputItems.length = 0;
+	runtime.nativeOutputItemOutputIndexes.length = 0;
 	runtime.finalizedToolCallIds.clear();
 	runtime.toolArgumentCorrelationFailed = false;
 	resetOutputState(context.output);
@@ -2383,6 +2421,7 @@ async function tryReplayWebsocketFailureOverSse(
 		runtime.currentItem = null;
 		runtime.currentBlock = null;
 		runtime.nativeOutputItems.length = 0;
+		runtime.nativeOutputItemOutputIndexes.length = 0;
 		runtime.finalizedToolCallIds.clear();
 		runtime.toolArgumentCorrelationFailed = false;
 		resetOutputState(context.output);
@@ -2427,6 +2466,7 @@ async function tryRetryCodexProviderError(
 	runtime.currentBlock = null;
 	runtime.sawTerminalEvent = false;
 	runtime.nativeOutputItems.length = 0;
+	runtime.nativeOutputItemOutputIndexes.length = 0;
 	runtime.finalizedToolCallIds.clear();
 	runtime.toolArgumentCorrelationFailed = false;
 	resetOutputState(context.output);
