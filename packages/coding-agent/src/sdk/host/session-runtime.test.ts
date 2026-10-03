@@ -3,12 +3,18 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { markNonDispatchedToolEvent, ThinkingLevel } from "@gajae-code/agent-core";
+import { Agent, markNonDispatchedToolEvent, ThinkingLevel } from "@gajae-code/agent-core";
+import type { UserMessage } from "@gajae-code/ai/core";
+import { createMockModel } from "@gajae-code/ai/providers/mock";
 import { logger } from "@gajae-code/utils";
 import { createTestSession } from "../../../test/utilities";
 import { AsyncJobManager } from "../../async";
-import type { Settings } from "../../config/settings";
+import { ModelRegistry } from "../../config/model-registry";
+import { Settings } from "../../config/settings";
 import type { ExtensionAPI, ExtensionContext, ExtensionTranscriptEntry } from "../../extensibility/extensions";
+import { AgentSession } from "../../session/agent-session";
+import { AuthStorage } from "../../session/auth-storage";
+import { SessionManager } from "../../session/session-manager";
 import {
 	registerOwnedRegistration,
 	resetTerminalAbortRegistriesForTests,
@@ -4181,9 +4187,12 @@ describe("SessionSdkSessionRuntime", () => {
 	});
 });
 interface PreflightHooks {
+	onDispatchDisposition?: (promotion: { startsOwnRun: boolean }) => void;
 	onPreflightAccepted?: () => void;
 	onPreflightAcceptCommit?: () => void | Promise<void>;
 	expectedSdkRunToken?: string;
+	preflightSignal?: AbortSignal;
+	onQueuedPromoted?: (promotion: { startsOwnRun?: boolean; removed?: boolean }) => void;
 }
 
 interface ResponseFrame {
@@ -4191,11 +4200,22 @@ interface ResponseFrame {
 	ok?: boolean;
 	code?: string;
 	error?: { code: string; message: string };
-	result?: { status?: string; commandId?: string; turnId?: string; error?: { code: string; message: string } };
+	result?: {
+		status?: string;
+		commandId?: string;
+		turnId?: string;
+		error?: { code: string; message: string };
+	};
 }
 
 interface InvocationHarness {
 	control(operation: string, input: Record<string, unknown>): Promise<ResponseFrame>;
+	controlAs(
+		connectionId: string,
+		operation: string,
+		input: Record<string, unknown>,
+		idempotencyKey?: string,
+	): Promise<ResponseFrame>;
 	query(name: string, input: Record<string, unknown>): Promise<ResponseFrame>;
 	emit(event: string, payload?: unknown): Promise<void>;
 	switchSession(sessionId: string): Promise<void>;
@@ -4333,16 +4353,26 @@ async function invocationHarness(
 		},
 	};
 	await handlers.get("session_start")?.({}, ctx);
-	const request = (frame: Record<string, unknown>): Promise<ResponseFrame> => {
+	const request = (frame: Record<string, unknown>, connectionId = "client"): Promise<ResponseFrame> => {
 		const id = `frame-${nextId}`;
 		nextId += 1;
 		const { promise, resolve } = Promise.withResolvers<ResponseFrame>();
 		waiters.set(id, resolve);
-		deliver?.("client", { ...frame, id } as SdkFrame);
+		deliver?.(connectionId, { ...frame, id } as SdkFrame);
 		return promise;
 	};
 	return {
 		control: (operation, input) => request({ type: "control_request", operation, input }),
+		controlAs: (connectionId, operation, input, idempotencyKey) =>
+			request(
+				{
+					type: "control_request",
+					operation,
+					input,
+					...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+				},
+				connectionId,
+			),
 		query: (name, input) => request({ type: "query_request", query: name, input }),
 		broadcasts,
 		emit: async (event, payload) => {
@@ -4391,6 +4421,241 @@ async function invocationHarness(
 		sent: sessionId => sentFrames.get(sessionId) ?? [],
 	};
 }
+
+test.each(["natural", "removed"] as const)("SDK-only text follow-up has a durable terminal (%s)", async mode => {
+	const cwd = await mkdtemp(path.join(os.tmpdir(), `gjc-sdk-only-text-followup-${mode}-`));
+	let harness: InvocationHarness | undefined;
+	let promotion: PreflightHooks["onQueuedPromoted"];
+	try {
+		harness = await invocationHarness(`sdk-only-text-followup-${mode}`, cwd, {
+			sendUserMessage: async (content, options) => {
+				await options?.onPreflightAcceptCommit?.();
+				if (options?.deliverAs === "followUp") {
+					expect(content).toBe("queued generic follow-up");
+					options.onDispatchDisposition?.({ startsOwnRun: false });
+					promotion = options.onQueuedPromoted;
+					return;
+				}
+				await neverSettlingPromise();
+			},
+		});
+		const root = await harness.controlAs("connection-root", "turn.prompt", { text: "root text" });
+		expect(root).toMatchObject({ ok: true, result: { accepted: true } });
+		await harness.emit("agent_start");
+		const followUp = await harness.controlAs("connection-followup", "turn.follow_up", {
+			text: "queued generic follow-up",
+		});
+		expect(followUp).toMatchObject({ ok: true, result: { accepted: true } });
+		const correlation = { commandId: followUp.result?.commandId, turnId: followUp.result?.turnId };
+		expect(await harness.query("turn.result", { kind: "prompt", ...correlation })).toMatchObject({
+			result: { status: "accepted" },
+		});
+		expect(promotion).toBeDefined();
+		promotion?.({ startsOwnRun: false, ...(mode === "removed" ? { removed: true } : {}) });
+		if (mode === "natural")
+			await harness.emit("agent_end", {
+				messages: [{ role: "assistant", stopReason: "stop", content: "root complete" }],
+			});
+		expect(await settledStatus(harness, "turn.result", { kind: "prompt", ...correlation })).toMatchObject(
+			mode === "natural" ? { status: "terminal_ok" } : { status: "failed", error: { code: "cancelled" } },
+		);
+		await harness.emit("agent_start");
+		await harness.emit("agent_end", { messages: [{ role: "assistant", stopReason: "stop", content: "unrelated" }] });
+		expect(
+			harness.broadcasts.filter(
+				frame =>
+					frame.type === "event" &&
+					(frame.kind === "agent_end" || frame.kind === "agent_failed") &&
+					(frame.payload as { commandId?: string; turnId?: string } | undefined)?.commandId ===
+						correlation.commandId &&
+					(frame.payload as { commandId?: string; turnId?: string } | undefined)?.turnId === correlation.turnId,
+			),
+		).toHaveLength(1);
+	} finally {
+		await harness?.stop();
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test.each([
+	"ordinary",
+	"terminal",
+] as const)("SDK-only %s abort cancels only its generic queued owner behind a real active AgentSession run", async mode => {
+	const cwd = await mkdtemp(path.join(os.tmpdir(), `gjc-sdk-queued-text-${mode}-`));
+	const rootGate = Promise.withResolvers<void>();
+	const rootStarted = Promise.withResolvers<void>();
+	const failedRemovalWrite = Promise.withResolvers<void>();
+	const modelCalls: number[] = [];
+	let rootAbortCalls = 0;
+	let queuedPreflightSignal: AbortSignal | undefined;
+	let harness: InvocationHarness | undefined;
+	let session: AgentSession | undefined;
+	let authStorage: AuthStorage | undefined;
+	try {
+		authStorage = await AuthStorage.create(path.join(cwd, "testauth.db"));
+		const mock = createMockModel({
+			responses: [
+				async () => {
+					modelCalls.push(Date.now());
+					rootStarted.resolve();
+					await rootGate.promise;
+					return { content: ["root completed"] };
+				},
+				() => {
+					modelCalls.push(Date.now());
+					return { content: ["unrelated follow-up completed"] };
+				},
+			],
+		});
+		authStorage.setRuntimeApiKey(mock.model.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(cwd),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+		const hooks: Parameters<typeof invocationHarness>[2] = {
+			isIdle: () => !session!.isStreaming,
+			abort: () => {
+				rootAbortCalls += 1;
+			},
+			sendUserMessage: (content, options) => {
+				if (content === "cancel only this queued text") queuedPreflightSignal = options?.preflightSignal;
+				return session!.sendUserMessage(content as never, options as never);
+			},
+			...(mode === "ordinary"
+				? {
+						persistInterceptor: transition => {
+							if (transition.type === "agent_failed") failedRemovalWrite.resolve();
+						},
+						agentFailedWriteFailures: 1,
+						onDurableAttempt: attempt => {
+							if (attempt.type === "agent_failed" && attempt.outcome === "rejected")
+								failedRemovalWrite.resolve();
+						},
+					}
+				: {
+						terminalAbortSeams: {
+							getTerminalTurnEpoch: () => (session?.isStreaming ? 17 : undefined),
+							getActivePromptHandle: () => (session?.isStreaming ? "root-run-handle" : undefined),
+							getActivePromptOwnerConnectionId: () => (session?.isStreaming ? "connection-root" : undefined),
+							cancelPendingPreflightForTerminalAbort: () => {},
+							abortPromptAndWaitWithTerminal: async () => {
+								rootAbortCalls += 1;
+								return { status: "settled", terminalScope: {} };
+							},
+						},
+					}),
+		};
+		harness = await invocationHarness(`queued-text-${mode}`, cwd, hooks);
+		session.subscribe(async event => {
+			await harness?.emit(event.type, event);
+		});
+
+		const root = await harness.controlAs("connection-root", "turn.prompt", { text: "root owned by B" });
+		expect(root).toMatchObject({ ok: true, result: { accepted: true } });
+		await rootStarted.promise;
+		const unrelated = await harness.controlAs("connection-other", "turn.prompt", {
+			text: "keep unrelated queued text",
+		});
+		expect(unrelated).toMatchObject({ ok: true, result: { accepted: true } });
+		const queued = await harness.controlAs("connection-requester", "turn.prompt", {
+			text: "cancel only this queued text",
+		});
+		expect(queued).toMatchObject({ ok: true, result: { accepted: true } });
+		const correlation = { commandId: queued.result?.commandId, turnId: queued.result?.turnId };
+		expect(queuedPreflightSignal).toBeInstanceOf(AbortSignal);
+		expect(queuedPreflightSignal?.aborted).toBe(false);
+		expect(session.getQueuedMessages().steering).toEqual([
+			"keep unrelated queued text",
+			"cancel only this queued text",
+		]);
+
+		let abortCompleted = false;
+		const abortRequest =
+			mode === "ordinary"
+				? harness.controlAs("connection-requester", "turn.abort", { mode: "turn" })
+				: harness.controlAs("connection-requester", "turn.abort", { mode: "terminal" }, "queued-text-terminal");
+		const observedAbort = abortRequest.then(response => {
+			abortCompleted = true;
+			return response;
+		});
+		if (mode === "ordinary") {
+			await failedRemovalWrite.promise;
+			await Bun.sleep(0);
+			expect(abortCompleted).toBe(false);
+		}
+		const abortResponse = await observedAbort;
+		if (mode === "ordinary") expect(abortResponse).toMatchObject({ ok: true, result: { aborted: true } });
+		else
+			expect(abortResponse).toMatchObject({
+				ok: true,
+				result: { turn: "no_active_turn", terminal: "terminal_no_effect" },
+			});
+		expect(queuedPreflightSignal?.aborted).toBe(true);
+		expect(rootAbortCalls).toBe(0);
+		expect(session.isStreaming).toBe(true);
+		expect(session.getQueuedMessages().steering).toEqual(["keep unrelated queued text"]);
+		expect(await settledStatus(harness, "turn.result", { kind: "prompt", ...correlation })).toMatchObject({
+			status: "failed",
+			error: { code: "cancelled" },
+		});
+		const repeatedAbort = await harness.controlAs(
+			"connection-requester",
+			"turn.abort",
+			mode === "ordinary" ? { mode: "turn" } : { mode: "terminal" },
+			mode === "terminal" ? "queued-text-terminal-retry" : undefined,
+		);
+		if (mode === "ordinary")
+			expect(repeatedAbort).toMatchObject({ ok: true, result: { aborted: false, turn: "no_active_turn" } });
+		else
+			expect(repeatedAbort).toMatchObject({
+				ok: true,
+				result: { turn: "no_active_turn", terminal: "terminal_no_effect" },
+			});
+		expect(rootAbortCalls).toBe(0);
+		expect(session.isStreaming).toBe(true);
+		expect(session.getQueuedMessages().steering).toEqual(["keep unrelated queued text"]);
+
+		rootGate.resolve();
+		await session.waitForIdle();
+		const userMessages = session.agent.state.messages.filter(
+			(message): message is UserMessage => message.role === "user",
+		);
+		const userText = (message: (typeof userMessages)[number]): string =>
+			typeof message.content === "string"
+				? message.content
+				: message.content
+						.filter(block => block.type === "text")
+						.map(block => block.text)
+						.join("");
+		expect(userMessages.map(userText)).toEqual(["root owned by B", "keep unrelated queued text"]);
+		expect(modelCalls).toHaveLength(2);
+		expect(
+			harness.broadcasts.filter(
+				frame =>
+					frame.type === "event" &&
+					(frame.kind === "agent_end" || frame.kind === "agent_failed") &&
+					(frame.payload as { commandId?: string; turnId?: string } | undefined)?.commandId ===
+						correlation.commandId &&
+					(frame.payload as { commandId?: string; turnId?: string } | undefined)?.turnId === correlation.turnId,
+			),
+		).toHaveLength(1);
+	} finally {
+		rootGate.resolve();
+		await session?.waitForIdle().catch(() => undefined);
+		await harness?.stop();
+		await session?.dispose();
+		authStorage?.close();
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
 
 /** Reconciliation store used to inject durable-write failures from tests: wraps a
  * session-file-backed store and fails the write whenever the staged records contain
@@ -6928,10 +7193,16 @@ describe("accepted-control zero-execution bound (#4668)", () => {
 			promptDeadlineMs = 100;
 			const queued = await harness.control("turn.follow_up", { text: "queued prompt" });
 			expect(queued.ok).toBe(true);
-			promoted?.({ startsOwnRun: true });
-			promptDeadlineMs = 600_000;
 			const activeIds = { commandId: active.result?.commandId, turnId: active.result?.turnId };
 			const queuedIds = { commandId: queued.result?.commandId, turnId: queued.result?.turnId };
+			// The short lease belongs to an unconsumed queue entry, not to the root
+			// run: it stays accepted past two lease periods without borrowing root abort.
+			await Bun.sleep(250);
+			expect(await harness.query("turn.prompt_status", queuedIds)).toMatchObject({ result: { status: "accepted" } });
+			expect(abortCalls).toBe(0);
+			expect(correlatedFrames(harness, queuedIds).filter(frame => frame.kind === "agent_failed")).toHaveLength(0);
+			promoted?.({ startsOwnRun: true });
+			promptDeadlineMs = 600_000;
 			await Bun.sleep(150);
 			expect((await harness.query("turn.prompt_status", queuedIds)).result?.status).toMatch(/accepted|in_flight/);
 			expect(await harness.query("turn.prompt_status", activeIds)).toMatchObject({

@@ -5,7 +5,15 @@ import * as fsPromises from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentSideConnection } from "@agentclientprotocol/sdk";
-import { Agent, type AgentTool, type RunSettlementProof } from "@gajae-code/agent-core";
+import {
+	Agent,
+	type AgentTerminalOwnerContext,
+	type AgentTool,
+	createRunResourceLedger,
+	getAgentTerminalOwnerContext,
+	type RunSettlementProof,
+	setAgentTerminalOwnerContext,
+} from "@gajae-code/agent-core";
 import { type AssistantMessage, closeModelCache, getBundledModel } from "@gajae-code/ai";
 import { createMockModel } from "@gajae-code/ai/providers/mock";
 import { NotificationServer } from "@gajae-code/natives";
@@ -72,7 +80,7 @@ import { sessionHostAttachedClients, sessionHostWorkLeaseActive } from "../src/s
 import { SessionIndex } from "../src/sdk/broker/session-index";
 import { formatPromptSettlementDiagnostic, PresentationArbiter } from "../src/sdk/bus";
 import { getTelegramFileSink } from "../src/sdk/bus/attachment-registry";
-import { reconciliationStorePath } from "../src/sdk/bus/reconciliation-store";
+import { type ReconciliationStoreDocument, reconciliationStorePath } from "../src/sdk/bus/reconciliation-store";
 import type { NotificationSessionController } from "../src/sdk/bus/session-control";
 import { SdkClient } from "../src/sdk/client";
 import { SESSION_HOST_OBSERVER_CAPABILITY, SessionSdkHost } from "../src/sdk/host";
@@ -159,6 +167,7 @@ async function waitFor(predicate: () => boolean, label: string): Promise<void> {
 function pauseNextReconciliationCommit(
 	sessionFile: string,
 	sessionId: string,
+	terminalOnly = false,
 ): {
 	started: Promise<void>;
 	release: () => void;
@@ -173,6 +182,14 @@ function pauseNextReconciliationCommit(
 	let paused = false;
 	const rename = spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
 		if (armed && !paused && String(to) === target) {
+			const document = terminalOnly
+				? ((await Bun.file(String(from)).json()) as ReconciliationStoreDocument)
+				: undefined;
+			if (
+				terminalOnly &&
+				!document?.records.some(record => record.kind === "prompt" && record.terminalAt !== undefined)
+			)
+				return realRename(from, to);
 			paused = true;
 			started.resolve();
 			await release.promise;
@@ -199,6 +216,7 @@ function pauseNextReconciliationCommit(
 function failNextReconciliationCommit(
 	sessionFile: string,
 	sessionId: string,
+	terminalOnly = false,
 ): { failed: Promise<void>; restore: () => void; arm: () => void } {
 	const target = reconciliationStorePath(sessionFile, sessionId);
 	const failed = Promise.withResolvers<void>();
@@ -207,6 +225,14 @@ function failNextReconciliationCommit(
 	let thrown = false;
 	const rename = spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
 		if (armed && !thrown && String(to) === target) {
+			const document = terminalOnly
+				? ((await Bun.file(String(from)).json()) as ReconciliationStoreDocument)
+				: undefined;
+			if (
+				terminalOnly &&
+				!document?.records.some(record => record.kind === "prompt" && record.terminalAt !== undefined)
+			)
+				return realRename(from, to);
 			thrown = true;
 			failed.resolve();
 			throw Object.assign(new Error("injected reconciliation rename failure"), { code: "EACCES" });
@@ -315,6 +341,18 @@ function start(
 					ensureProviderDaemon,
 					controller,
 					terminalAbortSeams: {
+						getTerminalRunOwnerForEvent: event =>
+							(
+								ctx as {
+									getTerminalRunOwnerForEvent?: (event: object) => AgentTerminalOwnerContext | undefined;
+								}
+							).getTerminalRunOwnerForEvent?.(event),
+						getRunOwnerDomain: handle =>
+							(
+								ctx as {
+									getRunOwnerDomain?: (handle: string) => AgentTerminalOwnerContext["domain"] | undefined;
+								}
+							).getRunOwnerDomain?.(handle),
 						getTerminalTurnEpoch: () =>
 							(ctx as { getTerminalTurnEpoch?: () => number | undefined }).getTerminalTurnEpoch?.(),
 						cancelPendingPreflightForTerminalAbort: () =>
@@ -2366,6 +2404,685 @@ test("SDK host preserves ordered prompt image blocks in the host payload", async
 			},
 		],
 	]);
+});
+
+test.each([
+	"fatal",
+	"natural",
+	"removed",
+	"ordinary-abort",
+	"terminal-abort",
+	"queued-deadline",
+	"busy-at-dispatch",
+	"joined-progress",
+	"held-terminal",
+	"claim-failure",
+	"finalize-failure",
+] as const)("a diverted text-only prompt keeps exact lifecycle ownership (%s)", async mode => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-steered-text-owner-"));
+	dirs.push(cwd);
+	const sessionId = `sdk-steered-text-owner-${Date.now()}`;
+	const live = { idle: true, handle: "original-run" };
+	const base = context(cwd, sessionId, "main", live);
+	const ledger = createRunResourceLedger();
+	const originalDomain = ledger.open("original-run");
+	const successorDomain = ledger.open("successor-run");
+	if (!originalDomain || !successorDomain) throw new Error("Test run domains could not open.");
+	const trustedOwners = new WeakMap<object, AgentTerminalOwnerContext>();
+	const sessionContext = {
+		...base,
+		sessionManager: {
+			...(base.sessionManager as Record<string, unknown>),
+			getSessionFile: () => path.join(cwd, "session.jsonl"),
+		},
+		getActivePromptHandle: () => live.handle,
+		getRunOwnerDomain: (handle: string) => ledger.lookupDomain(handle),
+		getTerminalRunOwnerForEvent: (event: object) => trustedOwners.get(event),
+		getTerminalTurnEpoch: () => 1,
+		abortPromptAndWait: async () => {
+			throw new Error("consuming text run remains unsettled");
+		},
+	};
+	const accepted = Promise.withResolvers<void>();
+	const preflight = Promise.withResolvers<void>();
+	let queued = false;
+	let promote: ((promotion: { startsOwnRun?: boolean; removed?: boolean }) => void) | undefined;
+	let releaseQueueAbort: (() => void) | undefined;
+	const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
+	const heldCommit =
+		mode === "held-terminal"
+			? pauseNextReconciliationCommit(path.join(cwd, "session.jsonl"), sessionId, true)
+			: undefined;
+	const failedCommit =
+		mode === "claim-failure" || mode === "finalize-failure"
+			? failNextReconciliationCommit(path.join(cwd, "session.jsonl"), sessionId, mode === "finalize-failure")
+			: undefined;
+	try {
+		const handlers = start(
+			sessionContext,
+			{
+				get: (key: string) =>
+					mode === "queued-deadline" || mode === "joined-progress"
+						? key === "sdk.promptDeadlineMs"
+							? 100
+							: key === "sdk.promptMaxRuntimeMs"
+								? 1_000
+								: undefined
+						: undefined,
+				getAgentDir: () => cwd,
+			} as unknown as Settings,
+			async (content, options) => {
+				expect(content).toBe("Text diverted during preflight");
+				accepted.resolve();
+				await preflight.promise;
+				await firePreflightAccept(options);
+				queued = true;
+				promote = options?.onQueuedPromoted;
+				const remove = () => {
+					if (!queued) return;
+					queued = false;
+					heldCommit?.arm();
+					failedCommit?.arm();
+					promote?.({ startsOwnRun: false, removed: true });
+				};
+				options?.preflightSignal?.addEventListener("abort", remove, { once: true });
+				releaseQueueAbort = () => options?.preflightSignal?.removeEventListener("abort", remove);
+				options?.onDispatchDisposition?.({ startsOwnRun: false });
+			},
+			true,
+		);
+		const endpointFile = path.join(cwd, ".gjc", "state", "sdk", `${sessionId}.json`);
+		await waitFor(() => fs.existsSync(endpointFile), "SDK endpoint");
+		const endpoint = JSON.parse(fs.readFileSync(endpointFile, "utf8")) as { url: string; token: string };
+		const frames: Record<string, unknown>[] = [];
+		const socket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
+		sockets.push(socket);
+		socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
+		await new Promise<void>((resolve, reject) => {
+			socket.addEventListener("open", () => resolve(), { once: true });
+			socket.addEventListener("error", () => reject(new Error("WS error")), { once: true });
+		});
+		const control = async (
+			id: string,
+			operation: string,
+			input: Record<string, unknown>,
+			idempotencyKey?: string,
+		) => {
+			socket.send(
+				JSON.stringify({
+					type: "control_request",
+					id,
+					operation,
+					input,
+					...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+				}),
+			);
+			await waitFor(
+				() => frames.some(frame => frame.type === "control_response" && frame.id === id),
+				`${id} response`,
+			);
+			return frames.find(frame => frame.type === "control_response" && frame.id === id)!;
+		};
+		if (mode === "busy-at-dispatch") {
+			live.idle = false;
+			await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+			expect(
+				await control("steered-prompt", "turn.prompt", { text: "Text diverted during preflight" }),
+			).toMatchObject({
+				ok: false,
+				error: { code: "busy" },
+			});
+			expect(queued).toBe(false);
+			await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+			return;
+		}
+
+		socket.send(
+			JSON.stringify({
+				type: "control_request",
+				id: "steered-prompt",
+				operation: "turn.prompt",
+				input: { text: "Text diverted during preflight" },
+			}),
+		);
+		await accepted.promise;
+		// The prompt is admitted under the idle snapshot, then another run becomes
+		// active before the user-message dispatch; this is the implicit text queue.
+		live.idle = false;
+		await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+		preflight.resolve();
+		await waitFor(() => frames.some(frame => frame.id === "steered-prompt"), "text prompt admission");
+		const ack = frames.find(frame => frame.id === "steered-prompt")!;
+		expect(ack).toMatchObject({ ok: true, result: { accepted: true } });
+		const correlation = acceptedCorrelation(ack);
+		await waitFor(() => promote !== undefined, "exact queued owner");
+		const queryResult = async () => {
+			const id = `result-${frames.length}`;
+			socket.send(
+				JSON.stringify({
+					type: "query_request",
+					id,
+					query: "turn.result",
+					input: { kind: "prompt", ...correlation },
+				}),
+			);
+			await waitFor(() => frames.some(frame => frame.id === id), "durable diverted result");
+			return frames.find(frame => frame.id === id)!;
+		};
+		if (heldCommit || failedCommit) {
+			socket.send(
+				JSON.stringify({
+					type: "control_request",
+					id: "persist-cancel",
+					operation: "turn.abort",
+					input: { mode: "terminal" },
+					idempotencyKey: "persist-cancel",
+				}),
+			);
+			if (heldCommit) {
+				await heldCommit.started;
+				expect(frames.some(frame => frame.id === "persist-cancel" && frame.type === "control_response")).toBe(
+					false,
+				);
+				const before = (await Bun.file(
+					reconciliationStorePath(path.join(cwd, "session.jsonl"), sessionId),
+				).json()) as ReconciliationStoreDocument;
+				expect(
+					before.records.find(record => record.commandId === correlation.commandId)?.terminalAt,
+				).toBeUndefined();
+				heldCommit.release();
+				await waitFor(
+					() => frames.some(frame => frame.id === "persist-cancel" && frame.type === "control_response"),
+					"joined durable cancellation reply",
+				);
+				expect(
+					frames.find(frame => frame.id === "persist-cancel" && frame.type === "control_response"),
+				).toMatchObject({
+					ok: true,
+				});
+				expect(await queryResult()).toMatchObject({
+					ok: true,
+					result: { status: "terminal_ok", outcome: { reason: "cancelled" } },
+				});
+				await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+			} else if (failedCommit) {
+				await failedCommit.failed;
+				await waitFor(
+					() => warnSpy.mock.calls.some(args => String(args[0]).includes("persistence failed")),
+					"failed durable removal",
+				);
+				await waitFor(
+					() => frames.some(frame => frame.id === "persist-cancel" && frame.type === "control_response"),
+					"uncertain cancellation reply",
+				);
+				const durable = (await Bun.file(
+					reconciliationStorePath(path.join(cwd, "session.jsonl"), sessionId),
+				).json()) as ReconciliationStoreDocument;
+				expect(
+					durable.records.find(record => record.commandId === correlation.commandId)?.terminalAt,
+				).toBeUndefined();
+				expect(durable.terminalScopes?.at(-1)?.turnDisposition).toBe("no_effect_reserved");
+				expect(
+					frames.find(frame => frame.id === "persist-cancel" && frame.type === "control_response"),
+				).toMatchObject({
+					ok: true,
+					result: { turn: "uncertain", reason: "worker_unsettled" },
+				});
+				expect(frames.some(frame => frame.type === "agent_end" && frame.commandId === correlation.commandId)).toBe(
+					false,
+				);
+				const replayFrames: Record<string, unknown>[] = [];
+				const replaySocket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
+				sockets.push(replaySocket);
+				replaySocket.addEventListener("message", event => replayFrames.push(JSON.parse(String(event.data))));
+				await waitFor(() => replaySocket.readyState === WebSocket.OPEN, "fresh cancellation replay client");
+				replaySocket.send(
+					JSON.stringify({
+						type: "control_request",
+						id: "persist-cancel-replay",
+						operation: "turn.abort",
+						input: { mode: "terminal" },
+						idempotencyKey: "persist-cancel",
+					}),
+				);
+				await waitFor(
+					() => replayFrames.some(frame => frame.id === "persist-cancel-replay"),
+					"uncertain cancellation replay",
+				);
+				expect(replayFrames.find(frame => frame.id === "persist-cancel-replay")).toMatchObject({
+					ok: true,
+					result: { turn: "uncertain" },
+				});
+				replaySocket.send(
+					JSON.stringify({
+						type: "control_request",
+						id: "persist-cancel-fresh-key",
+						operation: "turn.abort",
+						input: { mode: "terminal" },
+						idempotencyKey: "persist-cancel-fresh-key",
+					}),
+				);
+				await waitFor(
+					() => replayFrames.some(frame => frame.id === "persist-cancel-fresh-key"),
+					"fresh-key uncertain cancellation retry",
+				);
+				expect(replayFrames.find(frame => frame.id === "persist-cancel-fresh-key")).toMatchObject({
+					ok: true,
+					result: { turn: "uncertain", reason: "worker_unsettled" },
+				});
+				expect(
+					frames.some(
+						frame =>
+							(frame.type === "agent_end" || frame.type === "agent_failed") &&
+							frame.commandId === correlation.commandId &&
+							frame.turnId === correlation.turnId,
+					),
+				).toBe(false);
+				expect(live.handle).toBe("original-run");
+				const shutdownFailure = await Promise.resolve(
+					handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext),
+				).then(
+					() => undefined,
+					(error: unknown) => error,
+				);
+				expect((shutdownFailure as { code?: string } | undefined)?.code).toBe("sdk_reconciliation_teardown_failed");
+			}
+			expect(queued).toBe(false);
+			return;
+		}
+		if (mode === "queued-deadline") {
+			await Bun.sleep(350);
+			expect(await queryResult()).toMatchObject({ ok: true, result: { status: "accepted" } });
+			expect(queued).toBe(true);
+		}
+		if (mode === "removed" || mode === "ordinary-abort" || mode === "terminal-abort") {
+			if (mode === "removed") {
+				queued = false;
+				promote?.({ startsOwnRun: false, removed: true });
+			} else if (mode === "terminal-abort") {
+				expect(
+					await control(
+						"cancel-before-consumption",
+						"turn.abort",
+						{ mode: "terminal" },
+						"cancel-before-consumption",
+					),
+				).toMatchObject({ ok: true });
+			} else expect(await control("cancel-before-consumption", "turn.abort", {})).toMatchObject({ ok: true });
+			await waitFor(
+				() => frames.some(frame => frame.type === "agent_end" && frame.commandId === correlation.commandId),
+				"removed text terminal",
+			);
+			expect(queued).toBe(false);
+			expect(await queryResult()).toMatchObject({
+				ok: true,
+				result: { status: "terminal_ok", outcome: { kind: "stopped", reason: "cancelled" } },
+			});
+			expect(live.handle).toBe("original-run");
+			await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+			return;
+		}
+
+		const originalEnd = { type: "agent_end" as const, messages: [] };
+		trustedOwners.set(originalEnd, { resourceRunId: "original-run", domain: originalDomain });
+		await handlers.get("agent_end")?.(originalEnd, sessionContext);
+		live.handle = "successor-run";
+		await handlers.get("agent_start")?.({ type: "agent_start" }, sessionContext);
+		expect(frames.some(frame => frame.type === "agent_start" && frame.commandId === correlation.commandId)).toBe(
+			false,
+		);
+		queued = false;
+		releaseQueueAbort?.();
+		promote?.({ startsOwnRun: false });
+		if (mode === "joined-progress") {
+			await handlers.get("tool_execution_start")?.(
+				{ type: "tool_execution_start", toolCallId: "joined-tool", toolName: "read", args: {} },
+				sessionContext,
+			);
+			for (let tick = 0; tick < 5; tick++) {
+				await Bun.sleep(60);
+				await handlers.get("tool_execution_update")?.(
+					{
+						type: "tool_execution_update",
+						toolCallId: "joined-tool",
+						toolName: "read",
+						args: {},
+						partialResult: { content: [{ type: "text", text: "progress" }] },
+					},
+					sessionContext,
+				);
+				expect(await queryResult()).toMatchObject({ ok: true, result: { status: "accepted" } });
+			}
+			await handlers.get("tool_execution_end")?.(
+				{
+					type: "tool_execution_end",
+					toolCallId: "joined-tool",
+					toolName: "read",
+					result: { content: [{ type: "text", text: "done" }] },
+					isError: false,
+				},
+				sessionContext,
+			);
+		}
+		if (mode === "fatal") {
+			socket.send(
+				JSON.stringify({
+					type: "control_request",
+					id: "steered-abort",
+					operation: "turn.abort",
+					input: { mode: "terminal" },
+					idempotencyKey: "steered-abort",
+				}),
+			);
+			await waitFor(
+				() => frames.some(frame => frame.type === "agent_failed" && frame.commandId === correlation.commandId),
+				"steered fatal closure",
+			);
+		}
+		const successorEnd = {
+			type: "agent_end" as const,
+			messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Text completed" }] }],
+		};
+		trustedOwners.set(successorEnd, { resourceRunId: "successor-run", domain: successorDomain });
+		await handlers.get("agent_end")?.(successorEnd, sessionContext);
+		if (mode === "natural" || mode === "queued-deadline" || mode === "joined-progress") {
+			expect(await queryResult()).toMatchObject({
+				ok: true,
+				result: { status: "terminal_ok", outcome: { kind: "stopped", reason: "end_turn" } },
+			});
+			await handlers.get("agent_end")?.(successorEnd, sessionContext);
+			expect(
+				frames.filter(frame => frame.type === "agent_end" && frame.commandId === correlation.commandId),
+			).toHaveLength(1);
+		}
+		await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+	} finally {
+		preflight.resolve();
+		releaseQueueAbort?.();
+		heldCommit?.release();
+		heldCommit?.restore();
+		failedCommit?.restore();
+		warnSpy.mockRestore();
+	}
+}, 60_000);
+
+test("SDK host text-only stop/restart isolates late predecessor progress and terminal ownership", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-text-owner-restart-"));
+	dirs.push(cwd);
+	const sessionId = `sdk-text-owner-restart-${Date.now()}`;
+	const live: { idle?: boolean; handle: string } = { idle: true, handle: "predecessor-run" };
+	const base = context(cwd, sessionId, "main", live);
+	const ledger = createRunResourceLedger();
+	const predecessorDomain = ledger.open("predecessor-run");
+	const deadlineSuccessorDomain = ledger.open("successor-deadline-run");
+	const naturalSuccessorDomain = ledger.open("successor-natural-run");
+	if (!predecessorDomain || !deadlineSuccessorDomain || !naturalSuccessorDomain)
+		throw new Error("Test run domains could not open.");
+	const sessionContext = {
+		...base,
+		sessionManager: {
+			...(base.sessionManager as Record<string, unknown>),
+			getSessionFile: () => path.join(cwd, "session.jsonl"),
+		},
+		getActivePromptHandle: () => live.handle,
+		getRunOwnerDomain: (handle: string) => ledger.lookupDomain(handle),
+		getTerminalRunOwnerForEvent: getAgentTerminalOwnerContext,
+		getTerminalTurnEpoch: () => 41,
+		abortPromptAndWait: async (handle: string) => {
+			abortHandles.push(handle);
+			return { status: "settled", terminalScope: {} };
+		},
+	};
+	const deadlineMs = 500;
+	const settings = {
+		get: (key: string) =>
+			key === "sdk.promptDeadlineMs" ? deadlineMs : key === "sdk.promptMaxRuntimeMs" ? 5_000 : undefined,
+		getAgentDir: () => cwd,
+	} as unknown as Settings;
+	const abortHandles: string[] = [];
+	let joinedPromotion: ((promotion: { startsOwnRun?: boolean; removed?: boolean }) => void) | undefined;
+	const handlers = start(
+		sessionContext,
+		settings,
+		async (content, options) => {
+			if (typeof content !== "string") throw new Error("The teardown regression must stay text-only.");
+			await firePreflightAccept(options);
+			if (options?.deliverAs === "followUp") {
+				joinedPromotion = options.onQueuedPromoted;
+				options.onDispatchDisposition?.({ startsOwnRun: false });
+				return;
+			}
+			await new Promise<void>(() => {});
+		},
+		true,
+		new Map(),
+		undefined,
+		false,
+	);
+	const openClient = async (): Promise<{
+		socket: WebSocket;
+		frames: Record<string, unknown>[];
+		control: (
+			id: string,
+			operation: string,
+			input: Record<string, unknown>,
+			idempotencyKey?: string,
+		) => Promise<Record<string, unknown>>;
+		query: (id: string, input: Record<string, unknown>) => Promise<Record<string, unknown>>;
+	}> => {
+		const endpointFile = path.join(cwd, ".gjc", "state", "sdk", `${sessionId}.json`);
+		await waitFor(() => fs.existsSync(endpointFile), "SDK endpoint");
+		const endpoint = JSON.parse(fs.readFileSync(endpointFile, "utf8")) as { url: string; token: string };
+		const frames: Record<string, unknown>[] = [];
+		const socket = new WebSocket(`${endpoint.url}/?token=${encodeURIComponent(endpoint.token)}`);
+		sockets.push(socket);
+		socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
+		await new Promise<void>((resolve, reject) => {
+			socket.addEventListener("open", () => resolve(), { once: true });
+			socket.addEventListener("error", () => reject(new Error("WS error")), { once: true });
+		});
+		const sendAndWait = async (
+			id: string,
+			frame: Record<string, unknown>,
+			label: string,
+		): Promise<Record<string, unknown>> => {
+			socket.send(JSON.stringify({ ...frame, id }));
+			await waitFor(() => frames.some(candidate => candidate.id === id), label);
+			return frames.find(candidate => candidate.id === id)!;
+		};
+		return {
+			socket,
+			frames,
+			control: (id, operation, input, idempotencyKey) =>
+				sendAndWait(
+					id,
+					{
+						type: "control_request",
+						operation,
+						input,
+						...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+					},
+					`${id} response`,
+				),
+			query: (id, input) => sendAndWait(id, { type: "query_request", query: "turn.result", input }, `${id} result`),
+		};
+	};
+	try {
+		await handlers.get("session_start")?.({ type: "session_start" }, sessionContext);
+		const predecessor = await openClient();
+		const oldRoot = await predecessor.control("predecessor-root", "turn.prompt", { text: "predecessor root text" });
+		expect(oldRoot).toMatchObject({ ok: true, result: { accepted: true } });
+		live.idle = false;
+		const predecessorStart = { type: "agent_start" as const };
+		setAgentTerminalOwnerContext(predecessorStart, {
+			resourceRunId: "predecessor-run",
+			domain: predecessorDomain,
+		});
+		await handlers.get("agent_start")?.(predecessorStart, sessionContext);
+		const joined = await predecessor.control("predecessor-joined", "turn.follow_up", {
+			text: "predecessor joined text",
+		});
+		expect(joined).toMatchObject({ ok: true, result: { accepted: true } });
+		const joinedCorrelation = acceptedCorrelation(joined);
+		expect(joinedPromotion).toBeDefined();
+		joinedPromotion?.({ startsOwnRun: false });
+		expect(
+			await predecessor.query("predecessor-joined-result", { kind: "prompt", ...joinedCorrelation }),
+		).toMatchObject({
+			ok: true,
+			result: { status: "in_flight" },
+		});
+
+		await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+		await closeSocket(predecessor.socket);
+		ledger.seal("predecessor-run");
+
+		live.idle = true;
+		live.handle = "successor-deadline-run";
+		await handlers.get("session_start")?.({ type: "session_start" }, sessionContext);
+		const successor = await openClient();
+		const successorPrompt = await successor.control("successor-deadline", "turn.prompt", {
+			text: "successor deadline text",
+		});
+		expect(successorPrompt).toMatchObject({ ok: true, result: { accepted: true } });
+		const successorCorrelation = acceptedCorrelation(successorPrompt);
+		live.idle = false;
+		const successorStart = { type: "agent_start" as const };
+		setAgentTerminalOwnerContext(successorStart, {
+			resourceRunId: "successor-deadline-run",
+			domain: deadlineSuccessorDomain,
+		});
+		await handlers.get("agent_start")?.(successorStart, sessionContext);
+		const acceptedAt = Date.now();
+		await Bun.sleep(350);
+
+		const latePredecessorProgress = {
+			type: "tool_execution_update" as const,
+			toolCallId: "late-predecessor-tool",
+			toolName: "read",
+			args: {},
+			partialResult: { content: [{ type: "text" as const, text: "late predecessor progress" }] },
+		};
+		setAgentTerminalOwnerContext(latePredecessorProgress, {
+			resourceRunId: "predecessor-run",
+			domain: predecessorDomain,
+		});
+		await handlers.get("tool_execution_update")?.(latePredecessorProgress, sessionContext);
+		const latePredecessorEnd = {
+			type: "agent_end" as const,
+			messages: [{ role: "assistant", stopReason: "stop", content: "late predecessor end" }],
+		};
+		setAgentTerminalOwnerContext(latePredecessorEnd, {
+			resourceRunId: "predecessor-run",
+			domain: predecessorDomain,
+		});
+		await handlers.get("agent_end")?.(latePredecessorEnd, sessionContext);
+		expect(
+			await successor.query("successor-still-in-flight", { kind: "prompt", ...successorCorrelation }),
+		).toMatchObject({
+			ok: true,
+			result: { status: "in_flight" },
+		});
+		expect(live.handle).toBe("successor-deadline-run");
+		expect(await successor.control("successor-busy-check", "turn.prompt", { text: "stay busy" })).toMatchObject({
+			ok: false,
+			error: { code: "busy" },
+		});
+		const outsider = await openClient();
+		expect(
+			await outsider.control(
+				"successor-nonowner-abort",
+				"turn.abort",
+				{ mode: "terminal" },
+				"successor-nonowner-abort",
+			),
+		).toMatchObject({
+			ok: true,
+			result: { turn: "no_active_turn", terminal: "terminal_no_effect" },
+		});
+		expect(abortHandles).toEqual([]);
+		await closeSocket(outsider.socket);
+		expect(
+			successor.frames.some(
+				frame =>
+					(frame.type === "agent_end" || frame.type === "agent_failed") &&
+					frame.commandId === successorCorrelation.commandId &&
+					frame.turnId === successorCorrelation.turnId,
+			),
+		).toBe(false);
+		await waitFor(
+			() =>
+				successor.frames.some(
+					frame =>
+						(frame.type === "agent_end" || frame.type === "agent_failed") &&
+						frame.commandId === successorCorrelation.commandId &&
+						frame.turnId === successorCorrelation.turnId,
+				),
+			"successor-owned deadline terminal",
+		);
+		expect(Date.now() - acceptedAt).toBeLessThan(deadlineMs + 250);
+		expect(
+			await successor.query("successor-deadline-result", { kind: "prompt", ...successorCorrelation }),
+		).toMatchObject({
+			ok: true,
+			result: { status: "failed", error: { code: "prompt_deadline_exceeded" } },
+		});
+		expect(abortHandles).toEqual(["successor-deadline-run"]);
+
+		live.idle = true;
+		live.handle = "successor-natural-run";
+		const naturalPrompt = await successor.control("successor-natural", "turn.prompt", {
+			text: "successor natural text",
+		});
+		expect(naturalPrompt).toMatchObject({ ok: true, result: { accepted: true } });
+		const naturalCorrelation = acceptedCorrelation(naturalPrompt);
+		live.idle = false;
+		const naturalStart = { type: "agent_start" as const };
+		setAgentTerminalOwnerContext(naturalStart, {
+			resourceRunId: "successor-natural-run",
+			domain: naturalSuccessorDomain,
+		});
+		await handlers.get("agent_start")?.(naturalStart, sessionContext);
+		const successorProgress = {
+			type: "tool_execution_update" as const,
+			toolCallId: "successor-tool",
+			toolName: "read",
+			args: {},
+			partialResult: { content: [{ type: "text" as const, text: "successor text progress" }] },
+		};
+		setAgentTerminalOwnerContext(successorProgress, {
+			resourceRunId: "successor-natural-run",
+			domain: naturalSuccessorDomain,
+		});
+		await handlers.get("tool_execution_start")?.(
+			{ ...successorProgress, type: "tool_execution_start" },
+			sessionContext,
+		);
+		await handlers.get("tool_execution_update")?.(successorProgress, sessionContext);
+		const naturalEnd = {
+			type: "agent_end" as const,
+			messages: [{ role: "assistant", stopReason: "stop", content: "successor natural completion" }],
+		};
+		setAgentTerminalOwnerContext(naturalEnd, {
+			resourceRunId: "successor-natural-run",
+			domain: naturalSuccessorDomain,
+		});
+		await handlers.get("agent_end")?.(naturalEnd, sessionContext);
+		expect(
+			await successor.query("successor-natural-result", { kind: "prompt", ...naturalCorrelation }),
+		).toMatchObject({
+			ok: true,
+			result: { status: "terminal_ok" },
+		});
+		expect(
+			await successor.query("successor-deadline-stays-failed", { kind: "prompt", ...successorCorrelation }),
+		).toMatchObject({
+			ok: true,
+			result: { status: "failed", error: { code: "prompt_deadline_exceeded" } },
+		});
+	} finally {
+		await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+	}
 });
 
 test("SDK host correlates follow-up acknowledgements with the later agent start", async () => {
