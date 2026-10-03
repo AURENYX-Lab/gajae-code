@@ -28,9 +28,42 @@ test("retire binds cleanup to the observed marker when a live pair is republishe
 		await fs.writeFile(pair.readyPath, JSON.stringify(deadMarker));
 		const incarnation = lifecycle.processIncarnation(process.pid);
 		const live = { pid: process.pid, effectMarker: "live", incarnation };
+		let calls = 0;
 		const result = await lifecycle.retireExitedLifecycleMarkerPairForTest(pair.root, pair.id, async () => {
-			await fs.writeFile(pair.markerPath, JSON.stringify(live));
-			await fs.writeFile(pair.readyPath, JSON.stringify(live));
+			calls += 1;
+			if (calls === 1) {
+				await fs.writeFile(pair.markerPath, JSON.stringify(live));
+				await fs.writeFile(pair.readyPath, JSON.stringify(live));
+			}
+		});
+		expect(result).toBe(false);
+		expect(await fs.readFile(pair.markerPath, "utf8")).toBe(JSON.stringify(live));
+		expect(await fs.readFile(pair.readyPath, "utf8")).toBe(JSON.stringify(live));
+	} finally {
+		await fs.rm(pair.root, { recursive: true, force: true });
+	}
+});
+
+test("retire binds cleanup to an atomically republished live pair", async () => {
+	const pair = await makePair("retire-live-atomic-race");
+	try {
+		await fs.writeFile(pair.markerPath, JSON.stringify(deadMarker));
+		await fs.writeFile(pair.readyPath, JSON.stringify(deadMarker));
+		const incarnation = lifecycle.processIncarnation(process.pid);
+		const live = { pid: process.pid, effectMarker: "atomic-live", incarnation };
+		let calls = 0;
+		const result = await lifecycle.retireExitedLifecycleMarkerPairForTest(pair.root, pair.id, async () => {
+			calls += 1;
+			if (calls !== 1) return;
+			for (const [target, suffix] of [
+				[pair.markerPath, "marker"],
+				[pair.readyPath, "ready"],
+			] as const) {
+				await fs.rm(target, { force: true });
+				const temporary = path.join(pair.root, `${suffix}.tmp`);
+				await fs.writeFile(temporary, JSON.stringify(live));
+				await fs.rename(temporary, target);
+			}
 		});
 		expect(result).toBe(false);
 		expect(await fs.readFile(pair.markerPath, "utf8")).toBe(JSON.stringify(live));
