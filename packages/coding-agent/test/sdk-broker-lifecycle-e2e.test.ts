@@ -813,14 +813,13 @@ test("shipped session host exits promptly after publishing a cutoff receipt", as
 		});
 		if (!child.pid) throw new Error("session host has no pid");
 		const childIncarnation = await incarnation(child.pid);
+		const cutoffStartedAt = performance.now();
 		await fs.writeFile(
 			path.join(stateRoot, "sdk", `${sessionId}.lifecycle.json`),
 			JSON.stringify({ pid: child.pid, effectMarker, incarnation: childIncarnation }),
 		);
-		await waitFor(async () => ((await Bun.file(failurePath).exists()) ? true : undefined), "cutoff receipt");
-		const receiptPublishedAt = performance.now();
 		const outcome = await Promise.race([
-			child.exited.then(code => ({ code, latencyMs: performance.now() - receiptPublishedAt })),
+			child.exited.then(code => ({ code, latencyMs: performance.now() - cutoffStartedAt })),
 			Bun.sleep(1_500).then(() => undefined),
 		]);
 		expect(outcome).toBeDefined();
