@@ -549,20 +549,21 @@ export class InputController {
 			}
 			// Listeners run before focused handleInput. Yield interrupt/back to the
 			// focused UI before touching BTW, maintenance, retries or workflow state.
-			// The separate clear action (Ctrl+C by default) remains a global abort.
-			if (isInterruptKey && focusedUiOwnsInterrupt(this.ctx)) {
+			// Clear (Ctrl+C by default) remains a global abort, even if the same
+			// key is also configured as interrupt.
+			if (isInterruptKey && !isClearKey && focusedUiOwnsInterrupt(this.ctx)) {
 				this.#resetEscapeGestures();
 				return undefined;
 			}
-			if (isClearKey && !isInterruptKey && this.ctx.hasActiveBtw() && this.ctx.handleBtwEscape()) {
+			if (isClearKey && this.ctx.hasActiveBtw() && this.ctx.handleBtwEscape()) {
 				this.#resetEscapeGestures();
 				return { consume: true };
 			}
-			if (isClearKey && !isInterruptKey && this.ctx.hookSelector?.hasActiveInlineInput?.() === true) {
+			if (isClearKey && this.ctx.hookSelector?.hasActiveInlineInput?.() === true) {
 				this.#resetEscapeGestures();
 				return undefined;
 			}
-			if (isClearKey && !isInterruptKey) {
+			if (isClearKey) {
 				if (this.#handlePendingSteerInterrupt()) return { consume: true };
 				if (
 					this.#handleCancellableWorkEscape({

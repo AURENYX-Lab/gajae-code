@@ -32,10 +32,10 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-function createHarness(interrupt: KeyId = "escape") {
+function createHarness(interrupt: KeyId | KeyId[] = "escape", clear: KeyId | KeyId[] = "ctrl+c") {
 	const terminal = new VirtualTerminal(100, 40);
 	const ui = new TUI(terminal);
-	const keybindings = KeybindingsManager.inMemory({ "app.interrupt": interrupt });
+	const keybindings = KeybindingsManager.inMemory({ "app.interrupt": interrupt, "app.clear": clear });
 	setKeybindings(keybindings);
 	const editor = new CustomEditor(defaultEditorTheme);
 	const editorContainer = new Container();
@@ -317,6 +317,72 @@ describe("focused menus own interrupt before background work", () => {
 		}
 	});
 
+	for (const binding of [
+		{ interrupt: ["escape", "ctrl+c"] as KeyId[], clear: "ctrl+c" as KeyId, key: "ctrl+c" as KeyId, data: "\x03" },
+		{
+			interrupt: ["escape", "ctrl+x"] as KeyId[],
+			clear: ["ctrl+c", "ctrl+x"] as KeyId[],
+			key: "ctrl+x" as KeyId,
+			data: "\x18",
+		},
+	]) {
+		for (const state of ["compaction", "handoff", "retry"] as const) {
+			test(`overlapping ${binding.key} remains global clear during ${state}`, () => {
+				const h = createHarness(binding.interrupt, binding.clear);
+				try {
+					h.session.isCompacting = state === "compaction";
+					h.session.isGeneratingHandoff = state === "handoff";
+					h.session.isRetrying = state === "retry";
+					const m = mountMenu(h, true, binding.key);
+					h.terminal.sendInput(binding.data);
+					expect(m.cancel).not.toHaveBeenCalled();
+					if (state === "compaction") expect(h.spies.abortCompaction).toHaveBeenCalledTimes(1);
+					else if (state === "handoff") expect(h.spies.abortHandoff).toHaveBeenCalledTimes(1);
+					else {
+						expect(h.spies.abortRetry).toHaveBeenCalledTimes(1);
+						expect(h.spies.retryNow).not.toHaveBeenCalled();
+					}
+				} finally {
+					h.close();
+				}
+			});
+		}
+	}
+
+	test("hidden overlay restores work interrupt ownership", () => {
+		const h = createHarness();
+		try {
+			h.session.isCompacting = true;
+			const local = vi.fn();
+			const handle = h.ui.showOverlay({ invalidate() {}, render: () => ["Hidden menu"], handleInput: local });
+			handle.setHidden(true);
+			expect(h.ui.getFocusedComponent()).toBe(h.editor);
+			h.terminal.sendInput("\x1b");
+			expect(local).not.toHaveBeenCalled();
+			expect(h.spies.abortCompaction).toHaveBeenCalledTimes(1);
+		} finally {
+			h.close();
+		}
+	});
+
+	test("a menu does not clear or consume an already-primed retry gesture", () => {
+		const h = createHarness();
+		try {
+			h.session.isRetrying = true;
+			h.terminal.sendInput("\x1b");
+			expect(h.spies.retryNow).toHaveBeenCalledTimes(1);
+			const m = mountMenu(h, true);
+			h.terminal.sendInput("\x1b");
+			expect(m.cancel).toHaveBeenCalledTimes(1);
+			expect(h.ctx.retryEscapePrimed).toBe(true);
+			expect(h.spies.abortRetry).not.toHaveBeenCalled();
+			h.terminal.sendInput("\x1b");
+			expect(h.spies.abortRetry).toHaveBeenCalledTimes(1);
+		} finally {
+			h.close();
+		}
+	});
+
 	test("Ctrl+C retains global abort semantics while a menu is focused", () => {
 		const h = createHarness();
 		try {
@@ -529,95 +595,107 @@ describe("focused menus own interrupt before background work", () => {
 		}
 	});
 
-	test("Smithery authorization survives menu Esc and still cancels after menu closure", async () => {
-		const h = createHarness();
-		const started = Promise.withResolvers<AbortSignal>();
-		vi.spyOn(openUtils, "openPath").mockImplementation(() => {});
-		vi.spyOn(smitheryAuth, "createSmitheryCliAuthSession").mockResolvedValue({
-			sessionId: "test-session",
-			authUrl: "https://smithery.example.test/login",
+	for (const clearOverlap of [false, true]) {
+		test(`Smithery authorization respects menu Esc and ${clearOverlap ? "overlapping clear" : "composer interrupt"}`, async () => {
+			const h = clearOverlap ? createHarness(["escape", "ctrl+x"], ["ctrl+c", "ctrl+x"]) : createHarness();
+			const started = Promise.withResolvers<AbortSignal>();
+			vi.spyOn(openUtils, "openPath").mockImplementation(() => {});
+			vi.spyOn(smitheryAuth, "createSmitheryCliAuthSession").mockResolvedValue({
+				sessionId: "test-session",
+				authUrl: "https://smithery.example.test/login",
+			});
+			vi.spyOn(smitheryAuth, "pollSmitheryCliAuthSession").mockImplementation(async (_id, signal) => {
+				if (!signal) throw new Error("missing signal");
+				const pending = Promise.withResolvers<{ status: "pending" }>();
+				signal.addEventListener("abort", () => pending.reject(signal.reason), { once: true });
+				started.resolve(signal);
+				return pending.promise;
+			});
+			const fallback = vi.fn(async () => undefined);
+			h.ctx.showHookInput = fallback;
+			let warning = "";
+			h.ctx.showWarning = text => {
+				warning = text;
+			};
+			const operation = new MCPCommandController(h.ctx).handle("/mcp smithery-login");
+			try {
+				const signal = await Promise.race([
+					started.promise,
+					operation.then(() => {
+						throw new Error(`Authorization never started: ${warning}`);
+					}),
+				]);
+				const m = mountMenu(h, true);
+				h.terminal.sendInput("\x1b");
+				expect(m.cancel).toHaveBeenCalledTimes(1);
+				expect(signal.aborted).toBe(false);
+				if (clearOverlap) {
+					const secondMenu = mountMenu(h, true, "ctrl+x");
+					h.terminal.sendInput("\x18");
+					expect(secondMenu.cancel).not.toHaveBeenCalled();
+				} else h.terminal.sendInput("\x1b");
+				expect(signal.aborted).toBe(true);
+				await operation;
+				expect(fallback).toHaveBeenCalledTimes(1);
+			} finally {
+				h.terminal.sendInput("\x03");
+				await operation;
+				h.close();
+			}
 		});
-		vi.spyOn(smitheryAuth, "pollSmitheryCliAuthSession").mockImplementation(async (_id, signal) => {
-			if (!signal) throw new Error("missing signal");
-			const pending = Promise.withResolvers<{ status: "pending" }>();
-			signal.addEventListener("abort", () => pending.reject(signal.reason), { once: true });
-			started.resolve(signal);
-			return pending.promise;
-		});
-		const fallback = vi.fn(async () => undefined);
-		h.ctx.showHookInput = fallback;
-		let warning = "";
-		h.ctx.showWarning = text => {
-			warning = text;
-		};
-		const operation = new MCPCommandController(h.ctx).handle("/mcp smithery-login");
-		try {
-			const signal = await Promise.race([
-				started.promise,
-				operation.then(() => {
-					throw new Error(`Authorization never started: ${warning}`);
-				}),
-			]);
-			const m = mountMenu(h, true);
-			h.terminal.sendInput("\x1b");
-			expect(m.cancel).toHaveBeenCalledTimes(1);
-			expect(signal.aborted).toBe(false);
-			h.terminal.sendInput("\x1b");
-			expect(signal.aborted).toBe(true);
-			await operation;
-			expect(fallback).toHaveBeenCalledTimes(1);
-		} finally {
-			h.terminal.sendInput("\x03");
-			await operation;
-			h.close();
-		}
-	});
+	}
 
-	test("non-wizard OAuth listener lets a menu close before cancelling authorization", async () => {
-		const h = createHarness();
-		const controller = new MCPCommandController(h.ctx);
-		const started = Promise.withResolvers<AbortSignal>();
-		const operation = controller.handleOAuthFlow(
-			"https://mcp.example.test",
-			"https://auth.example.test/authorize",
-			"https://auth.example.test/token",
-			"test-client",
-			"",
-			"",
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			(config, callbacks) => ({
-				resolvedClientId: config.clientId,
-				registeredClientSecret: undefined,
-				login: async () => {
-					const signal = callbacks.signal;
-					if (!signal) throw new Error("missing signal");
-					const pending = Promise.withResolvers<never>();
-					signal.addEventListener("abort", () => pending.reject(signal.reason), { once: true });
-					started.resolve(signal);
-					return pending.promise;
-				},
-			}),
-			() => {},
-		);
-		const outcome = operation.then(
-			() => "unexpected success",
-			error => String(error),
-		);
-		try {
-			const signal = await started.promise;
-			const m = mountMenu(h, true);
-			h.terminal.sendInput("\x1b");
-			expect(m.cancel).toHaveBeenCalledTimes(1);
-			expect(signal.aborted).toBe(false);
-			h.terminal.sendInput("\x1b");
-			expect(signal.aborted).toBe(true);
-		} finally {
-			h.terminal.sendInput("\x03");
-			expect(await outcome).toContain("OAuth flow cancelled");
-			h.close();
-		}
-	});
+	for (const clearOverlap of [false, true]) {
+		test(`non-wizard OAuth respects menu interrupt and ${clearOverlap ? "overlapping remapped clear" : "composer interrupt"}`, async () => {
+			const h = clearOverlap ? createHarness(["escape", "ctrl+x"], ["ctrl+c", "ctrl+x"]) : createHarness();
+			const controller = new MCPCommandController(h.ctx);
+			const started = Promise.withResolvers<AbortSignal>();
+			const operation = controller.handleOAuthFlow(
+				"https://mcp.example.test",
+				"https://auth.example.test/authorize",
+				"https://auth.example.test/token",
+				"test-client",
+				"",
+				"",
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				(config, callbacks) => ({
+					resolvedClientId: config.clientId,
+					registeredClientSecret: undefined,
+					login: async () => {
+						const signal = callbacks.signal;
+						if (!signal) throw new Error("missing signal");
+						const pending = Promise.withResolvers<never>();
+						signal.addEventListener("abort", () => pending.reject(signal.reason), { once: true });
+						started.resolve(signal);
+						return pending.promise;
+					},
+				}),
+				() => {},
+			);
+			const outcome = operation.then(
+				() => "unexpected success",
+				error => String(error),
+			);
+			try {
+				const signal = await started.promise;
+				const m = mountMenu(h, true);
+				h.terminal.sendInput("\x1b");
+				expect(m.cancel).toHaveBeenCalledTimes(1);
+				expect(signal.aborted).toBe(false);
+				if (clearOverlap) {
+					const secondMenu = mountMenu(h, true, "ctrl+x");
+					h.terminal.sendInput("\x18");
+					expect(secondMenu.cancel).not.toHaveBeenCalled();
+				} else h.terminal.sendInput("\x1b");
+				expect(signal.aborted).toBe(true);
+			} finally {
+				h.terminal.sendInput("\x03");
+				expect(await outcome).toContain("OAuth flow cancelled");
+				h.close();
+			}
+		});
+	}
 });
