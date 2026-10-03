@@ -90,6 +90,7 @@ type Fixture = {
 	sendStopped(reason: StoppedReason): void;
 	sendToolStart(toolCallId: string): void;
 	sendToolEnd(toolCallId: string): void;
+	sendSessionClosed(): void;
 	acknowledgePrompt(): void;
 	dispose(): void;
 };
@@ -262,6 +263,18 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
 			},
 		});
 	};
+	const sendSessionClosed = (): void => {
+		send({
+			type: "event",
+			kind: "session_closed",
+			sessionId,
+			payload: {
+				type: "session_closed",
+				sessionId,
+				reason: "host_exit",
+			},
+		});
+	};
 
 	server = Bun.serve({
 		hostname: "127.0.0.1",
@@ -417,6 +430,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
 		sendStopped,
 		sendToolStart,
 		sendToolEnd,
+		sendSessionClosed,
 		acknowledgePrompt,
 		dispose: () => {
 			abort.abort();
@@ -742,6 +756,30 @@ test("a prompt stalled in provider preflight is rejected at the bound instead of
 		releasePreflight.resolve();
 		ensureProviders.mockRestore();
 		diagnostic.mockRestore();
+		fixture.dispose();
+	}
+});
+
+test("a session host close settles an active prompt immediately", async () => {
+	const fixture = await createFixture();
+	try {
+		const { pending } = await startTurn(fixture);
+		fixture.sendToolStart("host-exit-tool");
+		await waitFor(() => toolCalls(fixture.updates) > 0, "tool start");
+		fixture.sendSessionClosed();
+		const error = await Promise.race([
+			pending.then(
+				() => undefined,
+				reason => reason,
+			),
+			Bun.sleep(3_000).then(() => {
+				throw new Error("prompt did not settle after the session host closed");
+			}),
+		]);
+		expect(error).toBeInstanceOf(Error);
+		expect(error).toMatchObject({ code: "prompt_abandoned" });
+		expect((error as { message: string }).message).toContain("host_exit");
+	} finally {
 		fixture.dispose();
 	}
 });
