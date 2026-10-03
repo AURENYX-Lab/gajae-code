@@ -459,6 +459,96 @@ describe("openai-codex streaming", () => {
 		});
 	});
 
+	it.each([
+		["empty message item", []],
+		["non-empty message item", [{ type: "output_text", text: "visible text" }]],
+	])("handles a later %s after a finalized todo_write call", async (_label, content) => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				output_index: 0,
+				item: {
+					type: "reasoning",
+					id: "rs_0d4a2e17e5cd3232016ac0dd08c6a487d0bb045aa97bfa8b58",
+					summary: [],
+					encrypted_content: "encrypted",
+				},
+			},
+			{
+				type: "response.output_item.done",
+				output_index: 0,
+				item: {
+					type: "reasoning",
+					id: "rs_0d4a2e17e5cd3232016ac0dd08c6a487d0bb045aa97bfa8b58",
+					summary: [],
+					encrypted_content: "encrypted",
+				},
+			},
+			{
+				type: "response.output_item.added",
+				output_index: 1,
+				item: {
+					type: "function_call",
+					id: "fc_0d4a2e17e5cd3232016ac0dd08c6a487d0bb045aa97bfa8b58",
+					call_id: "call_1Oy7wVQBglbUc9rgt73OWP8l",
+					name: "todo_write",
+					arguments: '{"ops":[]}',
+				},
+			},
+			{
+				type: "response.output_item.done",
+				output_index: 1,
+				item: {
+					type: "function_call",
+					id: "fc_0d4a2e17e5cd3232016ac0dd08c6a487d0bb045aa97bfa8b58",
+					call_id: "call_1Oy7wVQBglbUc9rgt73OWP8l",
+					name: "todo_write",
+					arguments: '{"ops":[]}',
+				},
+			},
+			{
+				type: "response.output_item.added",
+				output_index: 2,
+				item: {
+					type: "message",
+					id: "msg_after_call",
+					role: "assistant",
+					content,
+				},
+			},
+			{
+				type: "error",
+				error: {
+					type: "request_timeout",
+					code: "request_timeout",
+					message:
+						"stream error: stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+				},
+			},
+		]);
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		if (content.length === 0) {
+			expect(result.stopReason).toBe("toolUse");
+			expect(result.content).toContainEqual({
+				type: "toolCall",
+				id: "call_1Oy7wVQBglbUc9rgt73OWP8l|fc_0d4a2e17e5cd3232016ac0dd08c6a487d0bb045aa97bfa8b58",
+				name: "todo_write",
+				arguments: { ops: [] },
+			});
+		} else {
+			expect(result.stopReason).toBe("error");
+		}
+	});
+
 	it("fails closed when a complete tool call has no source item id", async () => {
 		const sse = createCodexErrorSse([
 			{
