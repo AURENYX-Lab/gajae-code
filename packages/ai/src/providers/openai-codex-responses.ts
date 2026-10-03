@@ -1310,19 +1310,37 @@ function trySalvageCodexFinalizedToolCalls(
 	);
 	const isIdleStall =
 		error instanceof Error && error.message === "OpenAI Codex SSE stream stalled while waiting for the next event";
+	const hasEmptyActiveMessage =
+		runtime.currentItem?.type === "message" &&
+		runtime.currentBlock?.type === "text" &&
+		runtime.currentItem.content.every(content =>
+			content.type === "output_text" ? content.text === "" : content.refusal === "",
+		);
 	const canSalvageFinalizedCall =
 		isCodexTransientStreamClose(error) &&
 		!runtime.toolArgumentCorrelationFailed &&
 		toolCalls.length > 0 &&
 		(runtime.currentBlock === null ||
-			(runtime.currentItem?.type === "reasoning" && runtime.currentBlock?.type === "thinking")) &&
-		context.output.content.every(block => block.type === "thinking" || block.type === "toolCall") &&
+			runtime.currentBlock?.type === "toolCall" ||
+			(runtime.currentItem?.type === "reasoning" && runtime.currentBlock?.type === "thinking") ||
+			hasEmptyActiveMessage) &&
+		context.output.content.every(
+			block =>
+				block.type === "thinking" || block.type === "toolCall" || (block.type === "text" && block.text === ""),
+		) &&
 		toolCalls.every(toolCall => runtime.finalizedToolCallIds.has(toolCall.id));
 	const canSalvageCompleteArguments =
 		(isCodexTransientStreamClose(error) || isIdleStall) &&
 		!runtime.toolArgumentCorrelationFailed &&
 		toolCalls.length > 0 &&
-		context.output.content.every(block => block.type === "thinking" || block.type === "toolCall") &&
+		(runtime.currentBlock === null ||
+			runtime.currentBlock?.type === "toolCall" ||
+			(runtime.currentItem?.type === "reasoning" && runtime.currentBlock?.type === "thinking") ||
+			hasEmptyActiveMessage) &&
+		context.output.content.every(
+			block =>
+				block.type === "thinking" || block.type === "toolCall" || (block.type === "text" && block.text === ""),
+		) &&
 		hasCompleteArguments;
 	if (!canSalvageFinalizedCall && !canSalvageCompleteArguments) {
 		return false;
