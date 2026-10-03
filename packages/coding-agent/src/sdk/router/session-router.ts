@@ -287,6 +287,8 @@ export interface SessionRouterOptions {
 	agentDir: string;
 	/** Limits attachment to exact ids selected by a Broker-scoped operation. */
 	sessionIds?: readonly string[];
+	/** Dynamically limits attachment to sessions currently owned by the caller. */
+	attachFilter?: (sessionId: string) => boolean;
 	/** Marks default SDK clients as notification-only observers; demanding by default. */
 	observer?: boolean;
 	deps?: SessionRouterDeps;
@@ -615,6 +617,7 @@ type AdoptedSession = {
 export class SessionRouter {
 	readonly #agentDir: string;
 	readonly #sessionIds: ReadonlySet<string> | undefined;
+	readonly #attachFilter: ((sessionId: string) => boolean) | undefined;
 	readonly #observer: boolean;
 	readonly #deps: SessionRouterDeps;
 	readonly #correlateFrame: SessionRouterFrameCorrelator;
@@ -657,6 +660,7 @@ export class SessionRouter {
 	constructor(options: SessionRouterOptions) {
 		this.#agentDir = options.agentDir;
 		this.#sessionIds = options.sessionIds === undefined ? undefined : new Set(options.sessionIds);
+		this.#attachFilter = options.attachFilter;
 		this.#observer = options.observer === true;
 		this.#deps = options.deps ?? {};
 		this.#correlateFrame = options.correlateFrame ?? fallbackCorrelation;
@@ -797,6 +801,7 @@ export class SessionRouter {
 		if (
 			sessionId !== fallback.sessionId ||
 			(this.#sessionIds !== undefined && !this.#sessionIds.has(sessionId ?? "")) ||
+			(this.#attachFilter !== undefined && !this.#attachFilter(sessionId ?? "")) ||
 			endpointGeneration === undefined ||
 			pid === undefined ||
 			endpointMtimeMs === undefined ||
@@ -1294,7 +1299,8 @@ export class SessionRouter {
 				session.live &&
 				isSessionAuthorityEligible(session) &&
 				!session.terminalUncertain &&
-				(this.#sessionIds === undefined || this.#sessionIds.has(session.sessionId)),
+				(this.#sessionIds === undefined || this.#sessionIds.has(session.sessionId)) &&
+				(this.#attachFilter === undefined || this.#attachFilter(session.sessionId)),
 		);
 		const liveIds = new Set(live.map(session => session.sessionId));
 		const attachedIds = new Set<string>();
