@@ -2,24 +2,25 @@
  * Pinned, child-isolated resident-cache benchmark.
  *
  * Each `--runs` repetition executes in a fresh Bun child. The default fixture is
- * 5,000 deterministic, unique 48 KiB messages; use the small overrides only for
- * local smoke checks, not performance comparisons.
+ * 500 deterministic, unique 48 KiB messages; it stays inside the product's
+ * eager-resume ceiling so a default run completes, and larger scales are explicit
+ * `--entries`/`--bytes-per-entry` overrides that fail closed above that ceiling.
  *
  * Normal measurements (five child runs per command):
- *   TMPDIR="$HOME/tmp-gjc-tests/" GJC_CODING_AGENT_DIR="$(mktemp -d)" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode rss --runs 5
- *   TMPDIR="$HOME/tmp-gjc-tests/" GJC_CODING_AGENT_DIR="$(mktemp -d)" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode put-latency --runs 5
- *   TMPDIR="$HOME/tmp-gjc-tests/" GJC_CODING_AGENT_DIR="$(mktemp -d)" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode read-churn --runs 5
+ *   TMPDIR="$HOME/tmp-gjc-tests/" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode rss --runs 5
+ *   TMPDIR="$HOME/tmp-gjc-tests/" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode put-latency --runs 5
+ *   TMPDIR="$HOME/tmp-gjc-tests/" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode read-churn --runs 5
  *
  * HEAD forced-rebuild baseline (copy this script to the pinned HEAD worktree):
  *   git worktree add /tmp/gjc-bench-head 3649db42e
- *   TMPDIR="$HOME/tmp-gjc-tests/" GJC_CODING_AGENT_DIR="$(mktemp -d)" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode read-churn --baseline forced-rebuild --runs 5
+ *   TMPDIR="$HOME/tmp-gjc-tests/" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode read-churn --baseline forced-rebuild --runs 5
  *
  * Small smoke fixture and deliberate invalid-run demonstration:
- *   TMPDIR="$HOME/tmp-gjc-tests/" GJC_CODING_AGENT_DIR="$(mktemp -d)" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode rss --entries 8 --bytes-per-entry 4096 --runs 1
- *   TMPDIR="$HOME/tmp-gjc-tests/" GJC_CODING_AGENT_DIR="$(mktemp -d)" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode put-latency --puts 64 --runs 1
- *   TMPDIR="$HOME/tmp-gjc-tests/" GJC_CODING_AGENT_DIR="$(mktemp -d)" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode read-churn --entries 8 --bytes-per-entry 4096 --cache-cap-bytes 1024 --runs 1
- *   TMPDIR="$HOME/tmp-gjc-tests/" GJC_CODING_AGENT_DIR="$(mktemp -d)" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode read-churn --entries 8 --bytes-per-entry 4096 --cache-cap-bytes 1024 --skip-gc --runs 1
- *   TMPDIR="$HOME/tmp-gjc-tests/" GJC_CODING_AGENT_DIR="$(mktemp -d)" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode rss --force-memory-only --runs 1
+ *   TMPDIR="$HOME/tmp-gjc-tests/" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode rss --entries 8 --bytes-per-entry 4096 --runs 1
+ *   TMPDIR="$HOME/tmp-gjc-tests/" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode put-latency --puts 64 --runs 1
+ *   TMPDIR="$HOME/tmp-gjc-tests/" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode read-churn --entries 8 --bytes-per-entry 4096 --cache-cap-bytes 1024 --runs 1
+ *   TMPDIR="$HOME/tmp-gjc-tests/" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode read-churn --entries 8 --bytes-per-entry 4096 --cache-cap-bytes 1024 --skip-gc --runs 1
+ *   TMPDIR="$HOME/tmp-gjc-tests/" NO_COLOR=1 bun packages/coding-agent/scripts/resident-memory-bench.ts --mode rss --force-memory-only --runs 1
  *
  * `--skip-gc` deliberately bypasses the required turn boundary and forced GC;
  * the --skip-gc command must exit non-zero with the invalid-run diagnostic. Do not
@@ -30,7 +31,8 @@
  * `process.memoryUsage()` breakdown, plus repeated forced-GC idle-turn reclaim samples.
  * AC-1 passes only when all three ceilings hold: the append steady-state RSS delta stays
  * within 100 MiB, the read-path residual (post-read forced-GC delta) stays within
- * `READ_PATH_RESIDUAL_TRANSCRIPT_RATIO_LIMIT` x the fixture's persisted transcript, and
+ * `max(READ_PATH_RESIDUAL_FLOOR_BYTES, READ_PATH_RESIDUAL_TRANSCRIPT_RATIO_LIMIT` x the
+ * fixture's persisted transcript), and
  * the reclaim contract holds (`RECLAIM_ALLOCATOR_FLOOR_BYTES`, post-reclaim delta inside
  * the append limit). A post-reclaim result inside the append limit is separately labeled
  * documented evidence. The harness always runs against its own throwaway agent dir, so
@@ -85,15 +87,19 @@ const PUT_BYTES = 4 * 1024;
 const BASELINE_MARKER_BYTES = 128;
 const AC1_APPEND_PHASE_RSS_LIMIT_BYTES = 100 * 1024 * 1024;
 /**
- * Read-path residual ceiling, expressed as a multiple of the fixture's persisted
- * transcript bytes so an `--entries` override cannot walk out from under it: after the
- * read plus the forced-GC idle turns the append phase must not still hold more than this
- * multiple above the pre-append baseline. AC-1 only gates the append steady state, so
- * without a second ceiling a retention regression on the read path could keep a large
- * block of RSS and still report pass. The current tree measures about 5x on the default
- * fixture (about 128 MiB retained over a 24 MiB transcript).
+ * Read-path residual ceiling: after the read plus the forced-GC idle turns the append
+ * phase must not still hold more than `max(READ_PATH_RESIDUAL_FLOOR_BYTES, ratio x the
+ * fixture's persisted transcript)` above the pre-append baseline. Expressing the ceiling
+ * against the fixture keeps an `--entries` override from walking out from under it, and
+ * the absolute floor covers the part of the residual that does not scale with the
+ * fixture: on a tiny smoke fixture the forced-GC delta is a few MiB of ordinary runtime
+ * overhead, which a pure ratio would flag as a failure. AC-1 gates only the append steady
+ * state, so without this second ceiling a retention regression on the read path can keep
+ * a large block of RSS and still report pass. The current tree measures about 5x on the
+ * default fixture (about 121 MiB retained over a 24 MiB transcript).
  */
 const READ_PATH_RESIDUAL_TRANSCRIPT_RATIO_LIMIT = 8;
+const READ_PATH_RESIDUAL_FLOOR_BYTES = 32 * 1024 * 1024;
 /**
  * Bun's allocator retains freed pages, so the forced-GC reclaim returns nothing on this
  * runtime. The floor is an explicit contract instead of an unexplained zero: the reclaim
@@ -1212,6 +1218,7 @@ function summarizeAc1(runs: readonly RssWorkerResult[]): {
 	readPathResidual: {
 		postReadGcRssDelta: number;
 		limitBytes: number;
+		floorBytes: number;
 		ratioLimit: number;
 		passes: boolean;
 	};
@@ -1235,9 +1242,11 @@ function summarizeAc1(runs: readonly RssWorkerResult[]): {
 	const freshOpenRssDelta = summarize(runs.map(run => run.freshOpenPhase.steadyStateDelta.rssBytes));
 	const freshOpenPostReclaimRssDelta = summarize(runs.map(run => run.freshOpenPhase.postReclaimDelta.rssBytes));
 	const passesSteadyStateGate = appendSteadyDelta.median <= AC1_APPEND_PHASE_RSS_LIMIT_BYTES;
-	const readPathResidualLimitBytes =
+	const readPathResidualLimitBytes = Math.max(
+		READ_PATH_RESIDUAL_FLOOR_BYTES,
 		estimatedTranscriptBytes(runs[0]?.fixture ?? { seed: SYNTHETIC_SEED, entries: 0, bytesPerEntry: 0 }) *
-		READ_PATH_RESIDUAL_TRANSCRIPT_RATIO_LIMIT;
+			READ_PATH_RESIDUAL_TRANSCRIPT_RATIO_LIMIT,
+	);
 	const passesReadPathGate = readPathResidualDelta.median <= readPathResidualLimitBytes;
 	const postReclaimWithinLimit = postReclaimDelta.median <= AC1_APPEND_PHASE_RSS_LIMIT_BYTES;
 	const passesReclaimFloorGate = reclaimedBytes.median >= RECLAIM_ALLOCATOR_FLOOR_BYTES && postReclaimWithinLimit;
@@ -1264,6 +1273,7 @@ function summarizeAc1(runs: readonly RssWorkerResult[]): {
 		readPathResidual: {
 			postReadGcRssDelta: readPathResidualDelta.median,
 			limitBytes: readPathResidualLimitBytes,
+			floorBytes: READ_PATH_RESIDUAL_FLOOR_BYTES,
 			ratioLimit: READ_PATH_RESIDUAL_TRANSCRIPT_RATIO_LIMIT,
 			passes: passesReadPathGate,
 		},
