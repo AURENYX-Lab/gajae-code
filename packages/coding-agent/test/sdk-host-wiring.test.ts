@@ -75,7 +75,11 @@ import { getTelegramFileSink } from "../src/sdk/bus/attachment-registry";
 import { reconciliationStorePath } from "../src/sdk/bus/reconciliation-store";
 import type { NotificationSessionController } from "../src/sdk/bus/session-control";
 import { SdkClient } from "../src/sdk/client";
-import { SESSION_HOST_OBSERVER_CAPABILITY, SessionSdkHost } from "../src/sdk/host";
+import {
+	POSITIONED_NOTIFICATION_EFFECTS_CAPABILITY,
+	SESSION_HOST_OBSERVER_CAPABILITY,
+	SessionSdkHost,
+} from "../src/sdk/host";
 import { createSdkRunCapability } from "../src/sdk/host/sdk-run-capability";
 import { type SessionAttachment, SessionRouter } from "../src/sdk/router/session-router";
 import { createAgentSession } from "../src/sdk/session";
@@ -1279,6 +1283,53 @@ test("a default ACP-shaped SessionRouter client remains demanding", async () => 
 	} finally {
 		await router.stop();
 		await host.stop();
+	}
+}, 60_000);
+
+test("only a positioned-effects SessionRouter negotiates positioned-only notification delivery", async () => {
+	const negotiations: string[][] = [];
+	const negotiatedImpl = NotificationServer.prototype.onNegotiatedCapabilities;
+	const negotiatedHook = spyOn(NotificationServer.prototype, "onNegotiatedCapabilities").mockImplementation(function (
+		this: NotificationServer,
+		callback,
+	) {
+		return negotiatedImpl.call(this, (error, connectionId, capabilities) => {
+			// The threadsafe callback delivers its tuple as the second argument at runtime.
+			const negotiated = Array.isArray(connectionId) ? (connectionId as unknown[])[1] : capabilities;
+			if (Array.isArray(negotiated)) negotiations.push(negotiated.map(String));
+			return callback(error, connectionId, capabilities);
+		});
+	});
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-sdk-router-positioned-effects-"));
+	dirs.push(cwd);
+	const agentDir = path.join(cwd, ".gjc", "agent");
+	let host: Awaited<ReturnType<typeof startProductionSdkHost>> | undefined;
+	try {
+		host = await startProductionSdkHost(cwd, { acceptPromptPreflightWithoutExecution: true });
+		// A plain observer (e.g. `sdk session tail`) keeps both public surfaces (#4570).
+		const observer = new SessionRouter({ agentDir, observer: true });
+		try {
+			await observer.start();
+			await waitFor(() => negotiations.length === 1, "plain observer hello negotiation");
+		} finally {
+			await observer.stop();
+		}
+		expect(negotiations[0]).toContain(SESSION_HOST_OBSERVER_CAPABILITY);
+		expect(negotiations[0]).not.toContain(POSITIONED_NOTIFICATION_EFFECTS_CAPABILITY);
+
+		const publisher = new SessionRouter({ agentDir, observer: true, positionedNotificationEffects: true });
+		try {
+			await publisher.start();
+			await waitFor(() => negotiations.length === 2, "positioned-effects hello negotiation");
+		} finally {
+			await publisher.stop();
+		}
+		expect(negotiations[1]).toEqual(
+			expect.arrayContaining([SESSION_HOST_OBSERVER_CAPABILITY, POSITIONED_NOTIFICATION_EFFECTS_CAPABILITY]),
+		);
+	} finally {
+		await host?.stop();
+		negotiatedHook.mockRestore();
 	}
 }, 60_000);
 
