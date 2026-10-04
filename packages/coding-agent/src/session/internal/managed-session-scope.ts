@@ -6198,6 +6198,16 @@ export async function prepareManagedSessionScopeForWrite(
 	try {
 		const internal = managedInternalDirectory(scope);
 		const root = scopeRoot(scope);
+		if (!managedDirectoryAuthorities.has(scope)) {
+			const retainedAuthority =
+				authority?.retainedAuthority &&
+				authority.retainedDirectory !== undefined &&
+				path.resolve(authority.retainedDirectory) === path.resolve(scope.directoryPath)
+					? authority.retainedAuthority
+					: retainManagedDirectoryAuthority(root, scope.directoryPath, managedDirectoryIdentityForScope(scope));
+			assertRetainedManagedDirectoryIdentity(scope);
+			managedDirectoryAuthorities.set(scope, retainedAuthority);
+		}
 		ensureManagedDirectory(internal, root, policy);
 		ensureManagedDirectory(path.join(internal, MANAGED_LOCKS_DIRECTORY), root, policy);
 		ensureManagedDirectory(path.join(internal, MANAGED_RECEIPTS_DIRECTORY), root, policy);

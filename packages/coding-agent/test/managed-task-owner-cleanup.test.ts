@@ -20,6 +20,7 @@ import {
 	publishManagedGcSessionRetirementReceipt,
 	readManagedGcSessionRetirementReceipt,
 	reconcileManagedTombstones,
+	resolveManagedScope,
 	resolveManagedScopeForWrite,
 	taskArtifactOwnerStorageContextForScope,
 } from "../src/session/internal/managed-session-scope";
@@ -223,6 +224,57 @@ async function addSiblingTranscript(
 }
 
 describe("managed task-artifact owner cleanup", () => {
+	it("establishes async writer authority for an owner-bearing cold scope", async () => {
+		const fixture = makeFixture();
+		const cold = resolveManagedScope({
+			agentDir: fixture.agentDir,
+			sessionsRoot: fixture.sessionsRoot,
+			cwd: fixture.cwd,
+		});
+		if (cold.kind !== "resolved") throw new Error("Expected the existing cold scope");
+		expect(() => taskArtifactOwnerStorageContextForScope(cold.scope)).toThrow(
+			"managed_gc_scope_authority_unavailable",
+		);
+		const result = await deleteManagedSessionCandidate(cold.scope, candidateFor(cold.scope, fixture.transcriptPath));
+		const receipt = await ownerReceipt(fixture);
+		if (!receipt) throw new Error(`Expected native owner disposition, received ${JSON.stringify(result)}`);
+		expect(receipt.taskArtifactOwnerDeletionEvidence).toEqual(fixture.evidence);
+		if (receipt.state === "owner_retired") {
+			expect(receipt.taskArtifactOwnerRetirementOutcome?.kind).toBe("completed");
+			expect(result.kind).toBe("deleted");
+		} else {
+			expect(receipt.state).toBe("owner_pending");
+			expect(result).toMatchObject({ kind: "cleanup_pending", phase: "artifacts" });
+			expect(receipt.taskArtifactOwnerRetirementOutcome?.kind).toBe("payload_retired");
+		}
+	});
+
+	it("preserves owner-free deletion through a cold async scope", async () => {
+		const fixture = makeFixture();
+		const sessionId = `${fixture.sessionId}-owner-free`;
+		const transcriptPath = path.join(fixture.scope.directoryPath, `${sessionId}.jsonl`);
+		const store = scopeStore(fixture.scope);
+		try {
+			store.publishNoReplaceSync(
+				path.basename(transcriptPath),
+				Buffer.from(`${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: fixture.cwd })}\n`),
+			);
+		} finally {
+			store.close();
+		}
+		const cold = resolveManagedScope({
+			agentDir: fixture.agentDir,
+			sessionsRoot: fixture.sessionsRoot,
+			cwd: fixture.cwd,
+		});
+		if (cold.kind !== "resolved") throw new Error("Expected the existing cold scope");
+		const result = await deleteManagedSessionCandidate(cold.scope, candidateFor(cold.scope, transcriptPath));
+		expect(result.kind).toBe("deleted");
+		expect(fs.existsSync(transcriptPath)).toBe(false);
+		expect(fs.readFileSync(fixture.payloadPath, "utf8")).toBe("owner-payload");
+		expect(fs.existsSync(fixture.transcriptPath)).toBe(true);
+	});
+
 	it("persists owner disposition before transcript deletion and replays a crash at the transcript fence", async () => {
 		const fixture = makeFixture();
 		let interrupted = false;
