@@ -510,6 +510,7 @@ interface CodexStreamRuntime {
 	toolArgumentCorrelationFailed: boolean;
 	/** Bounded event descriptors retained for transient stream-close diagnostics. */
 	recentEvents: CodexRecentEventDescriptor[];
+	recentEventIndex: number;
 }
 
 interface CodexRecentEventDescriptor {
@@ -1261,6 +1262,7 @@ function createCodexStreamRuntime(initial: {
 		degradedIncrementDiagnostics: new Set<string>(),
 		toolArgumentCorrelationFailed: false,
 		recentEvents: [],
+		recentEventIndex: 0,
 	};
 }
 
@@ -1387,7 +1389,10 @@ function trySalvageCodexFinalizedToolCalls(
 			errorCode: error instanceof Error ? ((error as Error & { code?: unknown }).code ?? null) : null,
 			providerCode:
 				error instanceof Error ? ((error as Error & { providerCode?: unknown }).providerCode ?? null) : null,
-			recentEvents: runtime.recentEvents,
+			recentEvents: [
+				...runtime.recentEvents.slice(runtime.recentEventIndex),
+				...runtime.recentEvents.slice(0, runtime.recentEventIndex),
+			],
 		};
 		const isTransientClose = isCodexTransientStreamClose(error) || isCodexIdleStall(error) || isUnexpectedStreamEnd;
 		if (isTransientClose && toolCalls.length > 0) {
@@ -1694,8 +1699,8 @@ function recordCodexRecentEvent(runtime: CodexStreamRuntime, rawEvent: Record<st
 		outputIndex: typeof rawEvent.output_index === "number" ? rawEvent.output_index : null,
 		deltaLength: typeof rawEvent.delta === "string" ? rawEvent.delta.length : 0,
 	};
-	if (runtime.recentEvents.length >= CODEX_RECENT_EVENT_LIMIT) runtime.recentEvents.shift();
-	runtime.recentEvents.push(descriptor);
+	runtime.recentEvents[runtime.recentEventIndex] = descriptor;
+	runtime.recentEventIndex = (runtime.recentEventIndex + 1) % CODEX_RECENT_EVENT_LIMIT;
 }
 
 function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null {

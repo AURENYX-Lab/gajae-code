@@ -562,6 +562,14 @@ describe("openai-codex streaming", () => {
 	it("warns with bounded diagnostics when transient-close salvage is refused", async () => {
 		const warn = vi.spyOn(logger, "warn");
 		const sse = createCodexErrorSse([
+			...Array.from({ length: 20 }, (_, index) => ({
+				type: "diagnostic.replay",
+				output_index: index,
+				content: RAW_SENTINEL,
+				arguments: RAW_SENTINEL,
+				encrypted_content: RAW_SENTINEL,
+				headers: { authorization: RAW_SENTINEL },
+			})),
 			{
 				type: "response.output_item.added",
 				output_index: 2,
@@ -601,6 +609,13 @@ describe("openai-codex streaming", () => {
 			contentBlockTypes: ["toolCall"],
 			errorCode: "request_timeout",
 			recentEvents: [
+				...Array.from({ length: 13 }, (_, index) => ({
+					type: "diagnostic.replay",
+					itemType: null,
+					itemId: null,
+					outputIndex: index + 7,
+					deltaLength: 0,
+				})),
 				{
 					type: "response.output_item.added",
 					itemType: "function_call",
@@ -618,6 +633,8 @@ describe("openai-codex streaming", () => {
 				{ type: "error", itemType: null, itemId: null, outputIndex: null, deltaLength: 0 },
 			],
 		});
+		expect(JSON.stringify(refusal)).not.toContain(RAW_SENTINEL);
+		expect(JSON.stringify(refusal)).not.toContain('{"ops":');
 		expect(
 			warn.mock.calls.filter(([message]) => message === "[codex] codex stream close salvage refused"),
 		).toHaveLength(1);
