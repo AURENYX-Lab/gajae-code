@@ -1247,6 +1247,69 @@ describe("hashline — anchor-stale recovery via read snapshot cache", () => {
 		});
 	});
 
+	it("lands a multi-line range authored against the original read after this session's own edit shifted lines", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const v0Lines = ["function a() {", "  return 1;", "}", "", "function b() {", "  return 2;", "}"];
+			await Bun.write(filePath, `${v0Lines.join("\n")}\n`);
+			const session = makeHashlineSession(tempDir);
+			getFileReadCache(session).recordContiguous(filePath, 1, [...v0Lines, ""]);
+
+			const first = `§a.ts\n»${tag(1, "function a() {")}\n  if (x) {\n    return 0;\n  }\n`;
+			await executeHashlineSingle(hashlineExecuteOptions(tempDir, first, undefined, session));
+
+			// Lines 5..7 of the original read; line 6 is a range interior with no
+			// model-supplied hash, so only the endpoints vouch for the snapshot.
+			const second = `§a.ts\n≔${tag(5, "function b() {")}..${tag(7, "}")}\nfunction b() {\n  return 3;\n}\n`;
+			const result = await executeHashlineSingle(hashlineExecuteOptions(tempDir, second, undefined, session));
+
+			expect(await Bun.file(filePath).text()).toBe(
+				[
+					"function a() {",
+					"  if (x) {",
+					"    return 0;",
+					"  }",
+					"  return 1;",
+					"}",
+					"",
+					"function b() {",
+					"  return 3;",
+					"}",
+					"",
+				].join("\n"),
+			);
+			expect(toolText(result)).toMatch(/Recovered from stale anchors using a previous read snapshot/);
+		});
+	});
+
+	it("refuses multi-line range recovery when a range interior line changed in the live file", () => {
+		const cache = new FileReadCache();
+		const fakePath = "/tmp/__hashline-recovery-interior-changed__.ts";
+		cache.recordFull(fakePath, ["function b() {", "  return 2;", "}", ""]);
+		// Shifted by one line AND the interior line was rewritten out-of-band.
+		const currentText = ["// header", "function b() {", "  return 99;", "}", ""].join("\n");
+		const edits = parseHashline(`≔${tag(1, "function b() {")}..${tag(3, "}")}\nfunction b() {\n  return 3;\n}`);
+
+		expect(
+			tryRecoverHashlineWithCache({ cache, absolutePath: fakePath, currentText, edits, options: {} }),
+		).toBeNull();
+	});
+
+	it("refuses multi-line range recovery when the snapshot never held a range interior line", () => {
+		const cache = new FileReadCache();
+		const fakePath = "/tmp/__hashline-recovery-interior-missing__.ts";
+		cache.recordSparse(fakePath, [
+			[1, "function b() {"],
+			[3, "}"],
+		]);
+		const currentText = ["// header", "function b() {", "  return 2;", "}", ""].join("\n");
+		const edits = parseHashline(`≔${tag(1, "function b() {")}..${tag(3, "}")}\nfunction b() {\n  return 3;\n}`);
+
+		expect(
+			tryRecoverHashlineWithCache({ cache, absolutePath: fakePath, currentText, edits, options: {} }),
+		).toBeNull();
+	});
+
 	it("refuses recovery when the replayed hunk would match more than one live location", () => {
 		const cache = new FileReadCache();
 		const fakePath = "/tmp/__hashline-recovery-ambiguous__.ts";

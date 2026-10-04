@@ -4,6 +4,7 @@ import type { FileReadCache, FileReadSnapshot } from "../edit/file-read-cache";
 import { getNativeDiffBindings } from "../internal/native-diff";
 import { HashlineMismatchError } from "./anchors";
 import { applyHashlineEdits, type HashlineApplyResult } from "./apply";
+import { RANGE_INTERIOR_HASH } from "./constants";
 import { computeLineHash } from "./hash";
 import type { Anchor, HashlineApplyOptions, HashlineEdit } from "./types";
 
@@ -146,10 +147,13 @@ function tryRecoverFromSnapshot(
 	// Precondition: the model's anchors must be vouched-for by the snapshot. If
 	// even one anchored line is missing from it, or its content hashes to a
 	// different value than the model supplied, refuse — any merge from here is
-	// a guess.
+	// a guess. Range interiors carry no model-supplied hash (the endpoints vouch
+	// for the range), so they only need to be present; the replayed hunk still
+	// has to match those snapshot lines exactly in the live file.
 	for (const anchor of anchors) {
 		const cachedLine = snapshot.lines.get(anchor.line);
 		if (cachedLine === undefined) return null;
+		if (anchor.hash === RANGE_INTERIOR_HASH) continue;
 		if (computeLineHash(anchor.line, cachedLine) !== anchor.hash) return null;
 	}
 
