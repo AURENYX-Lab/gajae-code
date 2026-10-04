@@ -107,7 +107,7 @@ The table maps entrypoint × transport × lifecycle outcome to the existing cove
 
 The Worker arm adds two behaviors that no existing test covered. Phase A adds characterization tests for both:
 - **Session fidelity under a Worker isolate:** normalized evidence equality, in `test/bench-multisession-runner.test.ts` and `test/bench-multisession-normalize.test.ts`.
-- **Closing one session while a sibling in the same host keeps streaming:** `test/bench-multisession-preflight.test.ts` covers the decision logic, and `preflight.ts` exercises it live.
+- **Closing one session while a sibling in the same host has an in-flight model turn** (request issued, mock response delayed 4 s, interval spanning session 0's `disposing` through its confirmed Worker termination `closedAt`; delta streaming during closure is not measured): `test/bench-multisession-preflight.test.ts` covers the decision logic, and `preflight.ts` exercises it live.
 
 ## Worker policy exception (decision C5)
 
@@ -141,7 +141,7 @@ bun packages/coding-agent/bench/multisession/run.ts --characterize
 bun packages/coding-agent/bench/multisession/run.ts --report artifacts/multisession
 ```
 
-Raw samples, environment pins (git SHA, Bun version, macOS build, CPU), and `preflight.json` are written under the gitignored `artifacts/multisession/`. Arguments and admission are checked before anything is written. A refused or malformed invocation exits 1 with one `multisession:` error line and creates no run directory.
+Raw samples, environment pins (git SHA, Bun version, macOS build, CPU), and `preflight.json` are written under the gitignored `artifacts/multisession/`. Arguments and admission are checked before anything is written. A malformed argument or refused admission exits 1 with one `multisession:` line and creates no run directory.
 
 ## Rollback
 
