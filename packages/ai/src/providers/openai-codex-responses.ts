@@ -124,6 +124,7 @@ const CODEX_WEBSOCKET_RETRY_BUDGET = CODEX_MAX_RETRIES;
 const CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX = "Codex websocket transport error";
 const CODEX_SALVAGED_STREAM_CLOSE_ERROR_CODE = "codex_stream_closed_after_finalized_tool_calls";
 const CODEX_SALVAGED_COMPLETE_TOOL_ARGUMENTS_ERROR_CODE = "codex_stream_closed_after_complete_tool_arguments";
+const CODEX_RECENT_EVENT_LIMIT = 16;
 const CODEX_PREVIOUS_RESPONSE_STALE_CODES = new Set(["previous_response_not_found", "codex_previous_response_stale"]);
 // Some Codex deployments reject a stale continuation anchor with a generic
 // `invalid_request_error` code and name the anchor only in the message
@@ -507,6 +508,16 @@ interface CodexStreamRuntime {
 	degradedIncrementDiagnostics: Set<string>;
 	/** An argument event identified a different active item; never salvage this response. */
 	toolArgumentCorrelationFailed: boolean;
+	/** Bounded event descriptors retained for transient stream-close diagnostics. */
+	recentEvents: CodexRecentEventDescriptor[];
+}
+
+interface CodexRecentEventDescriptor {
+	type: string | null;
+	itemType: string | null;
+	itemId: string | null;
+	outputIndex: number | null;
+	deltaLength: number;
 }
 
 interface CodexStreamProcessingContext {
@@ -1249,6 +1260,7 @@ function createCodexStreamRuntime(initial: {
 		finalizedToolCallIds: new Set<string>(),
 		degradedIncrementDiagnostics: new Set<string>(),
 		toolArgumentCorrelationFailed: false,
+		recentEvents: [],
 	};
 }
 
@@ -1352,7 +1364,7 @@ function trySalvageCodexFinalizedToolCalls(
 		) &&
 		hasCompleteArguments;
 	if (!canSalvageFinalizedCall && !canSalvageCompleteArguments) {
-		logCodexDebug("codex stream close salvage refused", {
+		const refusalDetails = {
 			toolArgumentCorrelationFailed: runtime.toolArgumentCorrelationFailed,
 			argumentsComplete: toolCalls.map(toolCall => {
 				const block = toolCall as ToolCall & { argumentsComplete?: boolean };
@@ -1368,7 +1380,21 @@ function trySalvageCodexFinalizedToolCalls(
 			}),
 			currentItemType: runtime.currentItem?.type ?? null,
 			currentBlockType: runtime.currentBlock?.type ?? null,
-		});
+			canSalvageFinalizedCall,
+			canSalvageCompleteArguments,
+			finalizedToolCallIds: runtime.finalizedToolCallIds.size,
+			contentBlockTypes: context.output.content.map(block => block.type),
+			errorCode: error instanceof Error ? ((error as Error & { code?: unknown }).code ?? null) : null,
+			providerCode:
+				error instanceof Error ? ((error as Error & { providerCode?: unknown }).providerCode ?? null) : null,
+			recentEvents: runtime.recentEvents,
+		};
+		const isTransientClose = isCodexTransientStreamClose(error) || isCodexIdleStall(error) || isUnexpectedStreamEnd;
+		if (isTransientClose && toolCalls.length > 0) {
+			logger.warn("[codex] codex stream close salvage refused", refusalDetails);
+		} else {
+			logCodexDebug("codex stream close salvage refused", refusalDetails);
+		}
 		return false;
 	}
 
@@ -1503,6 +1529,7 @@ function handleCodexStreamEvent(args: {
 	firstTokenTime?: number;
 }): number | undefined {
 	const { model, output, stream, runtime, rawEvent } = args;
+	recordCodexRecentEvent(runtime, rawEvent);
 	const eventType = typeof rawEvent.type === "string" ? rawEvent.type : "";
 	if (!eventType) return args.firstTokenTime;
 
@@ -1652,6 +1679,23 @@ function handleCodexStreamEvent(args: {
 	}
 
 	return firstTokenTime;
+}
+
+function recordCodexRecentEvent(runtime: CodexStreamRuntime, rawEvent: Record<string, unknown>): void {
+	const item = asRecord(rawEvent.item);
+	const itemType = typeof item?.type === "string" ? item.type : null;
+	let itemId: string | null = null;
+	if (typeof rawEvent.item_id === "string") itemId = rawEvent.item_id;
+	else if (typeof item?.id === "string") itemId = item.id;
+	const descriptor: CodexRecentEventDescriptor = {
+		type: typeof rawEvent.type === "string" ? rawEvent.type : null,
+		itemType,
+		itemId,
+		outputIndex: typeof rawEvent.output_index === "number" ? rawEvent.output_index : null,
+		deltaLength: typeof rawEvent.delta === "string" ? rawEvent.delta.length : 0,
+	};
+	if (runtime.recentEvents.length >= CODEX_RECENT_EVENT_LIMIT) runtime.recentEvents.shift();
+	runtime.recentEvents.push(descriptor);
 }
 
 function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null {
