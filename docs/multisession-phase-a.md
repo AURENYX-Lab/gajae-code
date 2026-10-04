@@ -49,7 +49,7 @@ Both arms run the same `session-runner.ts`, `bootstrap.ts` manifest, `workload.t
 - If an arm has fewer than 5 valid reps, the verdict is `insufficient-evidence`, never pass.
 - B is eligible only from at least 5 complete 30-sample (1 Hz × 30 s) repetitions; shortened `--seconds` baselines are diagnostic only.
 - Churn is eligible only when all 20 Worker cycles finish with no session failure and every post-close sample is complete.
-- An orphan receipt that could not list processes or read identities is incomplete, which makes the orphan gate `insufficient-evidence`.
+- An orphan receipt whose process enumeration or ownership scan failed is incomplete, which makes the orphan gate `insufficient-evidence`. A surviving process whose identity cannot be read, or whose ownership cannot be proven, is an unresolved orphan and fails the gate.
 - `--report` refuses to combine run directories whose `environment.json` pins differ (source SHA, dirty flag, workload/bootstrap digest, Bun, macOS, CPU, contract digest).
 - When every gate passes, the verdict is `pass` only if characterization is `equal`. Otherwise it is `pass (isolation-model opportunity evidence only)`, per `capabilityLabelRule.claimRule`.
 
@@ -75,7 +75,7 @@ The gates are pre-registered in `bench/multisession/preregistration.json`. `cont
 
 ## Preflight
 
-`preflight.ts` runs two Workers in one host on the shortened native-backed script: bash, grep, then one model turn the mock provider holds in flight for 4 s. Session 1 starts once session 0 has streamed text and then pays a Worker cold start (~1 s), so its in-flight turn begins about 1 s after session 0's. Session 0 then disposes while session 1's in-flight turn is still running. The close barrier is judged from recorded evidence, not a sampled flag: some session 1 `turn` interval must span from session 0's `disposing` phase until its Worker termination is confirmed. Session 0 is then closed. The preflight passes only if all of these hold:
+`preflight.ts` runs two Workers in one host on the shortened native-backed script: bash, grep, then one model turn the mock provider holds in flight for 4 s. Session 1 starts once session 0 has streamed text and then pays a Worker cold start (~1 s), so its in-flight turn begins about 1 s after session 0's. Session 0 then disposes while session 1's in-flight turn is still running. The close barrier is judged from recorded evidence, not a sampled flag: some session 1 `turn` interval must span from session 0's `disposing` phase until its Worker termination is confirmed. The interval is checked after session 0 has been closed and session 1 has completed. The preflight passes only if all of these hold:
 - The close barrier holds.
 - Worker 1 completes.
 - Both evidence sets equal a standalone run of the same script.

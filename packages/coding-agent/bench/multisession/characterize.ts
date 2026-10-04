@@ -497,7 +497,6 @@ export async function characterize(): Promise<CharacterizationOutcome> {
 	try {
 		await Promise.all([
 			fs.mkdir(path.join(cwd, ".gjc", "extensions"), { recursive: true }),
-			fs.mkdir(cwd, { recursive: true }),
 			fs.mkdir(stateRoot, { recursive: true }),
 			fs.mkdir(homeDir, { recursive: true }),
 			fs.mkdir(evidenceDir, { recursive: true }),

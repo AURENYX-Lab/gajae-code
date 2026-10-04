@@ -542,7 +542,6 @@ async function main(): Promise<void> {
 	const contract = await loadContract();
 	const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${values.sanity ? "sanity" : (values.arm ?? "characterize")}`;
 	const runDir = path.join(ARTIFACTS_ROOT, runId);
-	await fs.mkdir(runDir, { recursive: true });
 	await writeJson(path.join(runDir, "environment.json"), {
 		...provenance,
 		contractDigest: contractDigest(contract),
