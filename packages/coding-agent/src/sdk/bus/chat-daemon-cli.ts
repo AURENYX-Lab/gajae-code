@@ -155,7 +155,9 @@ async function loadConfig(agentDir: string, kind: ChatDaemonKind): Promise<ChatD
 const DISABLED_READS_BEFORE_RETIRE = 2;
 
 /**
- * True only when the current config definitely disables this provider. Read or
+ * True only when the current config definitely disables this provider:
+ * `notifications.enabled: false`, the provider switched off, or a missing
+ * config file (the same results that keep a new owner from starting). Read or
  * validation errors (half-written file, incomplete or quarantined provider) are
  * indeterminate and keep the owner serving.
  */
