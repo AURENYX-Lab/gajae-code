@@ -10,6 +10,7 @@ import { SessionManager } from "../../src/session/session-manager";
 import { createAgentSession } from "../../src/sdk/session";
 import { getAgentDir } from "@gajae-code/utils";
 import { RunnerBootstrap, bootstrapDigest } from "./bootstrap";
+import { LAG_INTERVAL_MS, LagSampler } from "./lag";
 import { createBenchMockProvider, type BenchMockProvider } from "./mock-provider";
 import { benchNow, REQUIRED_WORKLOAD_EVENTS, type RunnerEvent, type WorkloadEventKind } from "./types";
 import { buildWorkloadScript, type WorkloadTurn, type WorkloadVariant, workloadDigest } from "./workload";
@@ -139,8 +140,7 @@ export async function runSession(opts: {
 	let unsubscribe = () => {};
 	let environmentRestore: (() => void) | undefined;
 	let lagTimer: NodeJS.Timeout | undefined;
-	let nextLagAt = 0;
-	const lagSamplesMs: number[] = [];
+	let lagSamples: number[] = [];
 	let transcriptSource: string | undefined;
 	let failure: unknown;
 	let failed = false;
@@ -315,12 +315,9 @@ export async function runSession(opts: {
 		});
 		emitPhase("ready");
 
-		nextLagAt = performance.now() + 100;
-		lagTimer = setInterval(() => {
-			const now = performance.now();
-			lagSamplesMs.push(Math.max(0, now - nextLagAt));
-			nextLagAt += 100;
-		}, 100);
+		const sampler = new LagSampler(performance.now());
+		lagSamples = sampler.samplesMs;
+		lagTimer = setInterval(() => sampler.tick(performance.now()), LAG_INTERVAL_MS);
 
 		let turnNumber = 0;
 		for (const group of stepGroups(script)) {
@@ -417,7 +414,7 @@ export async function runSession(opts: {
 		}
 
 		if (session) {
-			const lagEvent: RunnerEvent = { type: "lag", sessionIndex: opts.sessionIndex, samplesMs: lagSamplesMs };
+			const lagEvent: RunnerEvent = { type: "lag", sessionIndex: opts.sessionIndex, samplesMs: lagSamples };
 			emit(lagEvent, false);
 			timingLines.push(jsonLine(lagEvent));
 		}

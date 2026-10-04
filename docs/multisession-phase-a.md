@@ -62,7 +62,7 @@ The gates are pre-registered in `bench/multisession/preregistration.json`. `cont
 | Memory at N=5 | worker `gatedTotal` steady-state mean ≤ 50% of standalone; sampled peak not higher |
 | Turn latency | p95 ≤ +10% |
 | Throughput | ≥ −10% |
-| Event-loop lag | max-over-threads p95 ≤ 50 ms |
+| Event-loop lag | max-over-threads p95 ≤ 50 ms; each sample is how late a 100 ms timer tick fired relative to the previous tick (`lag.ts`) |
 | Cold readiness | median not slower (Worker arm includes host spawn; warm admission reported separately) |
 | Teardown | host footprint 10 s after the 5th close ≤ B × 1.15 |
 | Churn | 20 create×5/close×5 cycles on one resident host; cycle 20 ≤ cycle 1 × 1.10 |
