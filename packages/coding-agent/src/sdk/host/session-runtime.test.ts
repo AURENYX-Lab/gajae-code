@@ -5140,6 +5140,60 @@ test("SDK turn.steer preserves its expected run token and propagates a stale-run
 });
 
 describe("post-acceptance invocation terminalization", () => {
+	test.each([
+		"todo-reminder",
+		"overflow-retry",
+	])("preserves prompt correlation across a %s continuation", async continuation => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), `gjc-${continuation}-correlation-`));
+		let harness: InvocationHarness | undefined;
+		try {
+			harness = await invocationHarness(`${continuation}-correlation`, cwd, {
+				sendUserMessage: async (_content, options) => {
+					await options?.onPreflightAcceptCommit?.();
+					await neverSettlingPromise();
+				},
+			});
+			const accepted = await harness.control("turn.prompt", { text: "finish the outstanding work" });
+			expect(accepted.ok).toBe(true);
+			const correlation = {
+				commandId: accepted.result?.commandId,
+				turnId: accepted.result?.turnId,
+			};
+			const lifecycleScope = createAttemptMinter().mint("main");
+
+			await harness.emit("agent_start", { lifecycleScope });
+			if (continuation === "todo-reminder") {
+				await harness.emit("todo_reminder", {
+					todos: [{ content: "finish the outstanding work", status: "pending" }],
+					attempt: 1,
+					maxAttempts: 3,
+				});
+			}
+			await harness.emit("agent_start", { lifecycleScope });
+			await harness.emit("agent_end", {
+				messages: [{ role: "assistant", stopReason: "stop", content: "completed" }],
+			});
+
+			const terminal = await settledStatus(harness, "turn.result", { kind: "prompt", ...correlation });
+			expect(terminal).toMatchObject({
+				status: "terminal_ok",
+				commandId: correlation.commandId,
+				turnId: correlation.turnId,
+			});
+			const ends = harness.broadcasts.filter(frame => frame.kind === "agent_end");
+			expect(ends).toHaveLength(1);
+			expect(ends[0]).toMatchObject({
+				payload: {
+					commandId: correlation.commandId,
+					turnId: correlation.turnId,
+				},
+			});
+		} finally {
+			await harness?.stop();
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
 	test("preserves external prompt correlation across a retryable provider error", async () => {
 		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-retryable-provider-correlation-"));
 		let harness: InvocationHarness | undefined;
