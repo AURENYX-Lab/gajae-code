@@ -1689,6 +1689,9 @@ function handleCodexStreamEvent(args: {
 function recordCodexRecentEvent(runtime: CodexStreamRuntime, rawEvent: Record<string, unknown>): void {
 	const item = asRecord(rawEvent.item);
 	const itemType = typeof item?.type === "string" ? item.type : null;
+	// Diagnostics must never invoke a `delta` accessor: tool-argument handlers
+	// capture exactly one value, and an extra read could observe a different one.
+	const delta = Object.getOwnPropertyDescriptor(rawEvent, "delta")?.value;
 	let itemId: string | null = null;
 	if (typeof rawEvent.item_id === "string") itemId = rawEvent.item_id;
 	else if (typeof item?.id === "string") itemId = item.id;
@@ -1697,7 +1700,7 @@ function recordCodexRecentEvent(runtime: CodexStreamRuntime, rawEvent: Record<st
 		itemType,
 		itemId,
 		outputIndex: typeof rawEvent.output_index === "number" ? rawEvent.output_index : null,
-		deltaLength: typeof rawEvent.delta === "string" ? rawEvent.delta.length : 0,
+		deltaLength: typeof delta === "string" ? delta.length : 0,
 	};
 	runtime.recentEvents[runtime.recentEventIndex] = descriptor;
 	runtime.recentEventIndex = (runtime.recentEventIndex + 1) % CODEX_RECENT_EVENT_LIMIT;
