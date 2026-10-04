@@ -73,15 +73,15 @@ function trimHunkToSnapshot(
  * matches, so a hunk whose old side (context + deleted lines) occurs more than
  * once in the live file could land on the wrong copy. Refuse such replays.
  */
-function everyHunkLandsUniquely(hunks: Diff.StructuredPatchHunk[], currentLines: string[]): boolean {
+function everyHunkLandsUniquely(hunks: Diff.StructuredPatchHunk[], lines: string[]): boolean {
 	for (const hunk of hunks) {
 		const oldSide = hunk.lines.filter(line => line[0] === " " || line[0] === "-").map(line => line.slice(1));
 		if (oldSide.length === 0) return false;
 		let occurrences = 0;
-		for (let start = 0; start + oldSide.length <= currentLines.length; start++) {
+		for (let start = 0; start + oldSide.length <= lines.length; start++) {
 			let matches = true;
 			for (let offset = 0; offset < oldSide.length; offset++) {
-				if (currentLines[start + offset] !== oldSide[offset]) {
+				if (lines[start + offset] !== oldSide[offset]) {
 					matches = false;
 					break;
 				}
@@ -195,6 +195,11 @@ function tryRecoverFromSnapshot(
 		hunks.push(trimmed);
 	}
 	patch.hunks = hunks;
+	// Content is the only location evidence a replayed hunk carries, so it must
+	// identify one site in the authored version too. If the snapshot itself holds
+	// the hunk at more than one place, a single live match may be an unrelated
+	// identical copy left standing after the anchored copy changed out-of-band.
+	if (!everyHunkLandsUniquely(hunks, previousText.split("\n"))) return null;
 	if (!everyHunkLandsUniquely(hunks, currentText.split("\n"))) return null;
 	const merged = Diff.applyPatch(currentText, patch, { fuzzFactor: HASHLINE_RECOVERY_FUZZ_FACTOR });
 	if (typeof merged !== "string" || merged === currentText) return null;

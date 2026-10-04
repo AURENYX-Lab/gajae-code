@@ -373,7 +373,7 @@ describe("hashline parser — block op syntax", () => {
 	it("explains an insert op whose inline text only echoes the anchored line", () => {
 		const op = `»${tag(1, "aaa")}`;
 		expect(() => parseHashline(`${op}|aaa\n`)).toThrow(
-			`repeats the anchored line's current content, so it was read as an anchor echo, not as new content. Put the lines to insert on the lines after "${op}".`,
+			`matches the supplied anchor hash, so it was read as an anchor echo, not as new content. Put the lines to insert on the lines after "${op}".`,
 		);
 	});
 
@@ -1316,6 +1316,22 @@ describe("hashline — anchor-stale recovery via read snapshot cache", () => {
 		]);
 		const currentText = ["// header", "function b() {", "  return 2;", "}", ""].join("\n");
 		const edits = parseHashline(`≔${tag(1, "function b() {")}..${tag(3, "}")}\nfunction b() {\n  return 3;\n}`);
+
+		expect(
+			tryRecoverHashlineWithCache({ cache, absolutePath: fakePath, currentText, edits, options: {} }),
+		).toBeNull();
+	});
+
+	it("refuses range recovery that would relocate onto an identical copy after the anchored copy changed", () => {
+		const cache = new FileReadCache();
+		const fakePath = "/tmp/__hashline-recovery-relocate__.ts";
+		const pad = ["x", "x", "x"];
+		const block = ["function b() {", "  return 2;", "}"];
+		cache.recordFull(fakePath, [...pad, ...block, ...pad, ...block, ...pad]);
+		// Out-of-band edit changed the anchored copy's start line; the second,
+		// identical copy (with identical context) is untouched.
+		const currentText = [...pad, "function b(y) {", "  return 2;", "}", ...pad, ...block, ...pad].join("\n");
+		const edits = parseHashline(`≔${tag(4, "function b() {")}..${tag(6, "}")}\nfunction b() {\n  return 3;\n}`);
 
 		expect(
 			tryRecoverHashlineWithCache({ cache, absolutePath: fakePath, currentText, edits, options: {} }),

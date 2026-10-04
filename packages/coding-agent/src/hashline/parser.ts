@@ -219,7 +219,7 @@ function formatEmptyInsertError(opLineNum: number, context: EmptyInsertContext):
 	const base = `line ${opLineNum}: ${HL_OP_INSERT_BEFORE} and ${HL_OP_INSERT_AFTER} operations require at least one verbatim payload line.`;
 	if (context.echoedAnchorText) {
 		return (
-			`${base} The text after "${HL_BODY_SEP}" on "${context.op}${HL_BODY_SEP}…" repeats the anchored line's current content, ` +
+			`${base} The text after "${HL_BODY_SEP}" on "${context.op}${HL_BODY_SEP}…" matches the supplied anchor hash, ` +
 			`so it was read as an anchor echo, not as new content. Put the lines to insert on the lines after "${context.op}".`
 		);
 	}
