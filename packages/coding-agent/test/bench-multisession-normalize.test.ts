@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import { TempDir } from "@gajae-code/utils";
 import { compareEvidence, normalizeEvidenceValue } from "../bench/multisession/normalize";
@@ -366,5 +367,22 @@ describe("multi-session evidence normalizer", () => {
 			normalizeEvidenceValue(reminder("2026-10-04 (Sun)", "09:21 UTC+00:00 (UTC)", "/elsewhere"), "/tmp/a"),
 		).not.toBe(left);
 		expect(normalizeEvidenceValue("the local time is 09:21", "/tmp/a")).toBe("the local time is 09:21");
+	});
+
+	test("normalizes a home-abbreviated root in the reminder cwd, and nothing outside the root", () => {
+		const reminder = (cwd: string) =>
+			`<system-reminder>\nToday is 2026-10-04 (Sun), the local time is 20:58 UTC+09:00 (Asia/Seoul), and the current working directory is '${cwd}'.\n</system-reminder>`;
+		const standaloneRoot = path.join(os.homedir(), "bench", "standalone", "session-0");
+		const workerRoot = path.join(os.homedir(), "bench", "worker", "session-0");
+		const left = normalizeEvidenceValue(reminder("~/bench/standalone/session-0/project"), standaloneRoot);
+		const right = normalizeEvidenceValue(reminder("~/bench/worker/session-0/project"), workerRoot);
+		expect(left).toBe(right);
+		expect(left).toBe(
+			"<system-reminder>\nToday is <date>, the local time is <local-time>, and the current working directory is '<root>/project'.\n</system-reminder>",
+		);
+		// A sibling directory sharing the root as a name prefix is not the root.
+		expect(normalizeEvidenceValue("~/bench/worker/session-01/project", workerRoot)).toBe(
+			"~/bench/worker/session-01/project",
+		);
 	});
 });

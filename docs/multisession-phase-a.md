@@ -106,7 +106,7 @@ The table maps entrypoint × transport × lifecycle outcome to the existing cove
 | `createAgentSession` | in-process | storage isolation per agentDir | `test/sdk-session-isolation.test.ts` |
 
 The Worker arm adds two behaviors that no existing test covered. Phase A adds characterization tests for both:
-- **Session fidelity under a Worker isolate:** normalized evidence equality, in `test/bench-multisession-runner.test.ts` and `test/bench-multisession-normalize.test.ts`.
+- **Session fidelity under a Worker isolate:** normalized evidence equality, in `test/bench-multisession-runner.test.ts` and `test/bench-multisession-normalize.test.ts`. The normalizer replaces each run root in two spellings: absolute and home-abbreviated (`~/…`). The per-turn reminder renders the cwd home-abbreviated, so without the second spelling, a run under the home directory differs only by its arm directory name. The first gated preflight (at `2fa4bdd2be`) failed `fidelity` on exactly this, before the fix. The fix is a harness defect, not a Worker difference, and that attempt's artifacts are kept with the results.
 - **Closing one session while a sibling in the same host has an in-flight model turn** (request issued, mock response delayed 4 s, interval spanning session 0's `disposing` through its confirmed Worker termination `closedAt`; delta streaming during closure is not measured): `test/bench-multisession-preflight.test.ts` covers the decision logic, and `preflight.ts` exercises it live.
 
 ## Worker policy exception (decision C5)

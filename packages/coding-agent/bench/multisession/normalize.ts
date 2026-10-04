@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { parseJsonl } from "./jsonl";
 
@@ -13,7 +14,7 @@ export const NORMALIZATION_ALLOWLIST = [
 	{ field: "pid fields", reason: "Operating-system process identifiers differ between runs." },
 	{ field: "*duration* fields", reason: "Elapsed execution time differs between repeated workload runs." },
 	{ field: "promptPrefix.hash", reason: "This hash covers full messages including generated IDs and timestamps; message payloads remain compared separately." },
-	{ field: "absolute temporary-root paths", reason: "Each isolated run uses a distinct temporary filesystem root." },
+	{ field: "temporary-root paths, absolute or home-abbreviated (~/…)", reason: "Each isolated run uses a distinct temporary filesystem root; the per-turn reminder renders a root under the home directory as ~/…." },
 	{ field: "task-completion notice duration and job ID tokens", reason: "The system-generated task notice embeds elapsed time and job identity in text; its remaining content is preserved." },
 	{ field: "session transcript filenames beneath the isolated root", reason: "Session files embed a generated timestamp and session UUID in their basename." },
 	{ field: "host date and local clock in the per-turn project-context reminder", reason: "The reminder renders the wall-clock minute, so runs that straddle a minute boundary differ; the surrounding reminder text stays compared." },
@@ -71,9 +72,19 @@ function normalizeHostWallClock(value: string): string {
 	);
 }
 
+/** The root as it can appear in evidence: absolute, and home-abbreviated when it lies under the home directory. */
+function rootSpellings(tempRoot: string): string[] {
+	const home = os.homedir();
+	if (!tempRoot.startsWith(home + path.sep)) return [tempRoot];
+	return [tempRoot, `~${tempRoot.slice(home.length)}`];
+}
+
 function replaceRootPath(value: string, tempRoot: string): string {
-	const escaped = tempRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-	const rooted = value.replace(new RegExp(`${escaped}(?=$|[/\\\\])`, "gu"), "<root>");
+	let rooted = value;
+	for (const spelling of rootSpellings(tempRoot)) {
+		const escaped = spelling.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+		rooted = rooted.replace(new RegExp(`${escaped}(?=$|[/\\\\])`, "gu"), "<root>");
+	}
 	// The session basename includes a generated timestamp and UUID beneath the isolated root.
 	return rooted.replace(/(<root>[/\\]sessions[/\\])[^/\\]+/gu, "$1<session>");
 }
