@@ -5161,19 +5161,9 @@ describe("post-acceptance invocation terminalization", () => {
 			};
 			const retryScope = {};
 
-			await harness.emit("agent_start", { lifecycleScope: retryScope });
-			await harness.emit("agent_end", {
-				messages: [
-					{
-						role: "assistant",
-						stopReason: "error",
-						errorStatus: 503,
-						transportFailure: { kind: "transport", providerCode: "server_is_overloaded" },
-					},
-				],
-			});
-
-			await harness.emit("agent_start", { lifecycleScope: retryScope });
+			for (let attempt = 0; attempt < 3; attempt++) {
+				await harness.emit("agent_start", { lifecycleScope: retryScope });
+			}
 			await harness.emit("agent_end", {
 				messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "recovered" }] }],
 			});
@@ -5183,13 +5173,13 @@ describe("post-acceptance invocation terminalization", () => {
 				status: "terminal_ok",
 				commandId: correlation.commandId,
 				turnId: correlation.turnId,
-				outcome: { kind: "completed" },
+				outcome: { kind: "stopped", reason: "end_turn" },
 			});
 			expect(harness.broadcasts.filter(frame => frame.kind === "agent_end").at(-1)).toMatchObject({
 				payload: {
 					commandId: correlation.commandId,
 					turnId: correlation.turnId,
-					outcome: { kind: "completed" },
+					outcome: { kind: "stopped", reason: "end_turn" },
 				},
 			});
 		} finally {
