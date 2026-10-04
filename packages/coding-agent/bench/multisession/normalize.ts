@@ -16,6 +16,7 @@ export const NORMALIZATION_ALLOWLIST = [
 	{ field: "absolute temporary-root paths", reason: "Each isolated run uses a distinct temporary filesystem root." },
 	{ field: "task-completion notice duration and job ID tokens", reason: "The system-generated task notice embeds elapsed time and job identity in text; its remaining content is preserved." },
 	{ field: "session transcript filenames beneath the isolated root", reason: "Session files embed a generated timestamp and session UUID in their basename." },
+	{ field: "host date and local clock in the per-turn project-context reminder", reason: "The reminder renders the wall-clock minute, so runs that straddle a minute boundary differ; the surrounding reminder text stays compared." },
 ] as const;
 
 function idField(key: string, objectType: string | undefined, isSessionEntry: boolean): boolean {
@@ -62,6 +63,14 @@ function normalizeTaskCompletionNotice(value: string): string {
 		.replace(/(<header>[^<]*\[)[0-9]+(?:\.[0-9]+)?(?:ms|s)(\]<\/header>)/gu, "$1<duration>$2");
 }
 
+function normalizeHostWallClock(value: string): string {
+	if (!value.includes("the local time is")) return value;
+	return value.replace(
+		/(Today is )[^,\n]+(, the local time is )[^,\n]+(, and the current working directory is )/gu,
+		"$1<date>$2<local-time>$3",
+	);
+}
+
 function replaceRootPath(value: string, tempRoot: string): string {
 	const escaped = tempRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 	const rooted = value.replace(new RegExp(`${escaped}(?=$|[/\\\\])`, "gu"), "<root>");
@@ -71,7 +80,8 @@ function replaceRootPath(value: string, tempRoot: string): string {
 
 /** Normalize only explicit identity, time, pid, temporary-root, and derived-hash volatility. */
 export function normalizeEvidenceValue(value: unknown, tempRoot: string, parentType?: string): unknown {
-	if (typeof value === "string") return normalizeTaskCompletionNotice(replaceRootPath(value, path.resolve(tempRoot)));
+	if (typeof value === "string")
+		return normalizeHostWallClock(normalizeTaskCompletionNotice(replaceRootPath(value, path.resolve(tempRoot))));
 	if (Array.isArray(value)) return value.map(item => normalizeEvidenceValue(item, tempRoot, parentType));
 	if (value === null || typeof value !== "object") return value;
 

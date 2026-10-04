@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import * as path from "node:path";
 import { TempDir } from "@gajae-code/utils";
-import { compareEvidence } from "../bench/multisession/normalize";
+import { compareEvidence, normalizeEvidenceValue } from "../bench/multisession/normalize";
 
 let tempDir: TempDir | undefined;
 
@@ -232,5 +232,24 @@ describe("multi-session evidence normalizer", () => {
 			expect(result.equal).toBe(false);
 			expect(result.diffs.some(diff => diff.startsWith(change.stream))).toBe(true);
 		}
+	});
+
+	test("normalizes only the reminder date and clock, keeping the rest of the reminder compared", () => {
+		const reminder = (date: string, time: string, cwd: string) =>
+			`<system-reminder>\nToday is ${date}, the local time is ${time}, and the current working directory is '${cwd}'.\n</system-reminder>`;
+		const left = normalizeEvidenceValue(
+			reminder("2026-10-04 (Sun)", "09:21 UTC+00:00 (UTC)", "/tmp/a/project"),
+			"/tmp/a",
+		);
+		const right = normalizeEvidenceValue(
+			reminder("2026-10-05 (Mon)", "00:00 UTC+00:00 (UTC)", "/tmp/b/project"),
+			"/tmp/b",
+		);
+		expect(left).toBe(right);
+		expect(left).toBe(reminder("<date>", "<local-time>", "<root>/project"));
+		expect(
+			normalizeEvidenceValue(reminder("2026-10-04 (Sun)", "09:21 UTC+00:00 (UTC)", "/elsewhere"), "/tmp/a"),
+		).not.toBe(left);
+		expect(normalizeEvidenceValue("the local time is 09:21", "/tmp/a")).toBe("the local time is 09:21");
 	});
 });
