@@ -3304,7 +3304,6 @@ test("cancel 100ms after background prompt start settles cancelled and follow-up
 		await bounded(fixture.promptDelivered, "background prompt delivery");
 		await Bun.sleep(100);
 		await bounded(fixture.agent.cancel({ sessionId: fixture.sessionId }), "background cancel acknowledgement");
-		fixture.sendStopped("cancelled");
 		expect(await bounded(background, "background cancelled settlement")).toEqual({ stopReason: "cancelled" });
 		const followUp = prompt(fixture, "follow-up");
 		await waitFor(() => fixture.promptDeliveryCount() === 2, "follow-up prompt delivery");
