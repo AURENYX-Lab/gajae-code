@@ -140,6 +140,99 @@ function createProductionCodexToolCallEvents(nestedError: boolean): Record<strin
 	];
 }
 
+type CompleteToolTimeoutReplayVariant = {
+	argumentsDone: boolean;
+	outputItemDone: boolean;
+	newItem: "none" | "message" | "reasoning";
+	correlateDelta: boolean;
+};
+
+function createCompleteToolTimeoutReplayEvents(variant: CompleteToolTimeoutReplayVariant): Record<string, unknown>[] {
+	const argumentsValue = JSON.stringify({ ops: [] });
+	const functionCall = {
+		type: "function_call",
+		id: "fc_variant",
+		call_id: "call_variant",
+		name: "todo_write",
+		arguments: "",
+	};
+	const events: Record<string, unknown>[] = [
+		{
+			type: "response.output_item.added",
+			output_index: 0,
+			item: {
+				type: "reasoning",
+				id: "rs_before_call",
+				content: [],
+				summary: [],
+			},
+		},
+		{
+			type: "response.output_item.done",
+			output_index: 0,
+			item: {
+				type: "reasoning",
+				id: "rs_before_call",
+				content: [],
+				summary: [],
+			},
+		},
+		{
+			type: "response.output_item.added",
+			output_index: 1,
+			item: functionCall,
+		},
+		{
+			type: "response.function_call_arguments.delta",
+			...(variant.correlateDelta ? { item_id: "fc_variant", output_index: 1 } : {}),
+			delta: argumentsValue,
+		},
+	];
+	if (variant.argumentsDone) {
+		events.push({
+			type: "response.function_call_arguments.done",
+			...(variant.correlateDelta ? { item_id: "fc_variant", output_index: 1 } : {}),
+			arguments: argumentsValue,
+		});
+	}
+	if (variant.outputItemDone) {
+		events.push({
+			type: "response.output_item.done",
+			output_index: 1,
+			item: {
+				...functionCall,
+				arguments: argumentsValue,
+			},
+		});
+	}
+	if (variant.newItem !== "none") {
+		events.push({
+			type: "response.output_item.added",
+			output_index: 2,
+			item:
+				variant.newItem === "message"
+					? {
+							type: "message",
+							id: "msg_after_call",
+							role: "assistant",
+							content: [],
+						}
+					: {
+							type: "reasoning",
+							id: "rs_after_call",
+							content: [],
+							summary: [],
+						},
+		});
+	}
+	events.push({
+		type: "error",
+		code: "request_timeout",
+		message: "stream disconnected before completion: stream closed before response.completed (code=request_timeout)",
+	});
+	return events;
+}
+
 function getRequestSignal(input: string | URL | Request, init: RequestInit | undefined): AbortSignal | undefined {
 	if (init?.signal) return init.signal;
 	if (input instanceof Request) return input.signal;
@@ -488,6 +581,40 @@ describe("openai-codex streaming", () => {
 			id: "call_production|fc_production",
 			name: "todo_write",
 			arguments: { ops: [{ op: "init", phases: [] }] },
+		});
+	});
+
+	it.each(
+		(["none", "message", "reasoning"] as const).flatMap(newItem =>
+			[false, true].flatMap(argumentsDone =>
+				[false, true].flatMap(outputItemDone =>
+					[false, true].map(correlateDelta => ({
+						argumentsDone,
+						outputItemDone,
+						newItem,
+						correlateDelta,
+					})),
+				),
+			),
+		),
+	)("salvages complete todo_write arguments across replay variants (%j)", async (variant: CompleteToolTimeoutReplayVariant) => {
+		const sse = createCodexErrorSse(createCompleteToolTimeoutReplayEvents(variant));
+		global.fetch = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toContainEqual({
+			type: "toolCall",
+			id: "call_variant|fc_variant",
+			name: "todo_write",
+			arguments: { ops: [] },
 		});
 	});
 

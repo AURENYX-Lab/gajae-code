@@ -1352,6 +1352,23 @@ function trySalvageCodexFinalizedToolCalls(
 		) &&
 		hasCompleteArguments;
 	if (!canSalvageFinalizedCall && !canSalvageCompleteArguments) {
+		logCodexDebug("codex stream close salvage refused", {
+			toolArgumentCorrelationFailed: runtime.toolArgumentCorrelationFailed,
+			argumentsComplete: toolCalls.map(toolCall => {
+				const block = toolCall as ToolCall & { argumentsComplete?: boolean };
+				return block.argumentsComplete === true;
+			}),
+			sourceItemIdPresent: toolCalls.map(toolCall => {
+				const block = toolCall as ToolCall & { sourceItemId?: string };
+				return typeof block.sourceItemId === "string";
+			}),
+			sourceCallIdPresent: toolCalls.map(toolCall => {
+				const block = toolCall as ToolCall & { sourceCallId?: string };
+				return typeof block.sourceCallId === "string";
+			}),
+			currentItemType: runtime.currentItem?.type ?? null,
+			currentBlockType: runtime.currentBlock?.type ?? null,
+		});
 		return false;
 	}
 
