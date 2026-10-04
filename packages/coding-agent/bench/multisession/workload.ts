@@ -145,4 +145,3 @@ export function buildWorkloadScript(variant: WorkloadVariant = "full"): readonly
 export function workloadDigest(): string {
 	return crypto.createHash("sha256").update(canonicalJson(FULL_SCRIPT)).digest("hex");
 }
-

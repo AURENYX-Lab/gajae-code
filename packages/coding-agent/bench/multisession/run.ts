@@ -538,9 +538,22 @@ async function main(): Promise<void> {
 		return;
 	}
 
+	const mode = values.characterize ? "characterize" : values.sanity ? "sanity" : values.arm;
+	if (mode !== "characterize" && mode !== "sanity" && !ARM_MODES.includes(mode as (typeof ARM_MODES)[number])) {
+		throw new Error(`--arm must be one of ${ARM_MODES.join("|")} (or use --report / --characterize / --sanity)`);
+	}
+	const ns = values.n.split(",").map(value => positiveInteger("--n", value));
+	const repCount = positiveInteger("--reps", values.reps);
+	const cycles = nonNegativeInteger("--churn", values.churn);
+	const idleMs = nonNegativeInteger("--idle-ms", values["idle-ms"]);
+	const seconds = positiveInteger("--seconds", values.seconds);
+
 	const provenance = await currentProvenance();
 	const contract = await loadContract();
-	const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${values.sanity ? "sanity" : (values.arm ?? "characterize")}`;
+	// Admission is decided before anything is written, so a refused run leaves no run directory.
+	if (mode === "sanity" || mode === "worker") await admit("worker", contract, provenance);
+	if (mode === "preflight") await admit("preflight", contract, provenance);
+	const runId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${mode}`;
 	const runDir = path.join(ARTIFACTS_ROOT, runId);
 	await writeJson(path.join(runDir, "environment.json"), {
 		...provenance,
@@ -549,32 +562,27 @@ async function main(): Promise<void> {
 		bunConfig: "default (no --smol)",
 	});
 
-	if (values.characterize) {
-		const outcome = await characterize();
-		await writeJson(path.join(runDir, "characterization.json"), outcome);
-		progress(`characterization: ${JSON.stringify(outcome)}`);
-		return;
-	}
-
-	if (values.sanity) {
-		// Non-gating real-provider check: both arms, N=3, the operator's default model.
-		// It runs a Worker arm, so it is admitted exactly like one.
-		await admit("worker", contract, provenance);
-		const summary = await runSanity(runId, runDir);
-		await writeJson(path.join(runDir, "sanity.json"), summary);
-		progress(`sanity: ${JSON.stringify(summary)}`);
-		return;
-	}
-
-	switch (values.arm) {
+	switch (mode) {
+		case "characterize": {
+			const outcome = await characterize();
+			await writeJson(path.join(runDir, "characterization.json"), outcome);
+			progress(`characterization: ${JSON.stringify(outcome)}`);
+			return;
+		}
+		case "sanity": {
+			// Non-gating real-provider check: both arms, N=3, the operator's default model.
+			const summary = await runSanity(runId, runDir);
+			await writeJson(path.join(runDir, "sanity.json"), summary);
+			progress(`sanity: ${JSON.stringify(summary)}`);
+			return;
+		}
 		case "broker": {
-			const record = await measureBrokerBaseline({ reps: Number(values.reps), seconds: Number(values.seconds) });
+			const record = await measureBrokerBaseline({ reps: repCount, seconds });
 			await writeJson(path.join(runDir, "broker.json"), record);
 			progress(`broker baseline B=${record.b ?? "insufficient-evidence"}`);
 			return;
 		}
 		case "preflight": {
-			await admit("preflight", contract, provenance);
 			const outcome = await decidePreflight(
 				createRealPreflightAdapter({ workDir: path.join(runDir, "preflight"), runId, driverStartEpochMs: Date.now() }),
 			);
@@ -587,29 +595,41 @@ async function main(): Promise<void> {
 		}
 		case "standalone":
 		case "worker": {
-			if (values.arm === "worker") await admit("worker", contract, provenance);
-			const kind: ArmKind = values.arm;
-			const ns = values.n.split(",").map(Number);
-			const repCount = Number(values.reps);
-			const idleMs = Number(values["idle-ms"]);
 			for (const n of ns) {
 				for (let rep = 0; rep < repCount; rep += 1) {
-					const record = await runRep({ kind, n, rep, idleMs, variant: "full", runId, runDir });
+					const record = await runRep({ kind: mode, n, rep, idleMs, variant: "full", runId, runDir });
 					progress(
-						`${kind} n=${n} rep=${rep} ${record.invalidReason ? `INVALID (${record.invalidReason})` : "ok"} samples=${record.samples.length} orphans=${record.orphans.owned.length + record.orphans.unresolved.length}`,
+						`${mode} n=${n} rep=${rep} ${record.invalidReason ? `INVALID (${record.invalidReason})` : "ok"} samples=${record.samples.length} orphans=${record.orphans.owned.length + record.orphans.unresolved.length}`,
 					);
 				}
 			}
-			const cycles = Number(values.churn);
-			if (cycles > 0) await runChurn({ kind, cycles, runId, runDir });
+			if (cycles > 0) await runChurn({ kind: mode, cycles, runId, runDir });
 			return;
 		}
-		default:
-			throw new Error("--arm must be one of broker|standalone|preflight|worker (or use --report / --characterize)");
 	}
 }
 
+const ARM_MODES = ["broker", "standalone", "preflight", "worker"] as const;
+
+function positiveInteger(flag: string, value: string): number {
+	const parsed = Number(value);
+	if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${flag} must be a positive integer, got "${value}"`);
+	return parsed;
+}
+
+function nonNegativeInteger(flag: string, value: string): number {
+	const parsed = Number(value);
+	if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`${flag} must be a non-negative integer, got "${value}"`);
+	return parsed;
+}
+
 if (import.meta.main) {
-	await main();
+	try {
+		await main();
+	} catch (error) {
+		// A refusal or failed run is an expected outcome, reported without a stack.
+		process.stderr.write(`multisession: ${error instanceof Error ? error.message : String(error)}\n`);
+		process.exitCode = 1;
+	}
 	process.exit();
 }

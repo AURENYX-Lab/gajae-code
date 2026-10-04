@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@gajae-code/utils";
-import { buildReport } from "../bench/multisession/run";
+import { ARTIFACTS_ROOT, buildReport } from "../bench/multisession/run";
 import type { ArmKind, RepRecord, RunnerEvent } from "../bench/multisession/types";
 
 let tempDir: TempDir | undefined;
@@ -103,5 +104,26 @@ describe("multi-session report assembly", () => {
 		expect(fidelityDiffs).toEqual(["n2 r1 s1: no worker evidence", "n3 r1: no worker repetition to compare"]);
 		expect(markdown).toContain("Fidelity comparisons: 1 session pairs, 2 differences");
 		expect(markdown).toContain("| fidelity | fail |");
+	});
+});
+
+describe("multi-session CLI refusals", () => {
+	const runScript = path.join(import.meta.dir, "..", "bench", "multisession", "run.ts");
+	const runDirs = async (): Promise<string[]> => fs.readdir(ARTIFACTS_ROOT).catch(() => []);
+
+	it.each([
+		[
+			["--arm", "bogus"],
+			"--arm must be one of broker|standalone|preflight|worker (or use --report / --characterize / --sanity)",
+		],
+		[["--arm", "standalone", "--reps", "0"], '--reps must be a positive integer, got "0"'],
+		[["--arm", "standalone", "--n", "1,x"], '--n must be a positive integer, got "x"'],
+	])("rejects %p with one error line and writes no run directory", async (args, message) => {
+		const before = await runDirs();
+		const child = Bun.spawn([process.execPath, runScript, ...args], { stdout: "pipe", stderr: "pipe" });
+		const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+		expect(exitCode).toBe(1);
+		expect(stderr.trim()).toBe(`multisession: ${message}`);
+		expect(await runDirs()).toEqual(before);
 	});
 });

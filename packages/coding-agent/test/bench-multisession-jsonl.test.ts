@@ -36,7 +36,9 @@ describe("bench strict JSONL", () => {
 		const record = '{"text":"가재"}\n';
 		const bytes = new TextEncoder().encode(`{"a":1}\n${record}`);
 		const encoder = new TextEncoder();
-		const split = bytes.length - 3; // inside the multi-byte characters
+		// Split after the first byte of "가" (a three-byte UTF-8 sequence).
+		const split = bytes.indexOf(new TextEncoder().encode("가")[0]!) + 1;
+		expect(bytes[split]! & 0xc0).toBe(0x80); // the next chunk starts on a continuation byte
 		const stream = new ReadableStream<Uint8Array>({
 			start(controller) {
 				controller.enqueue(bytes.subarray(0, split));

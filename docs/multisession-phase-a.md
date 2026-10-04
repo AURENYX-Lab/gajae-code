@@ -141,7 +141,7 @@ bun packages/coding-agent/bench/multisession/run.ts --characterize
 bun packages/coding-agent/bench/multisession/run.ts --report artifacts/multisession
 ```
 
-Raw samples, environment pins (git SHA, Bun version, macOS build, CPU), and `preflight.json` are written under the gitignored `artifacts/multisession/`.
+Raw samples, environment pins (git SHA, Bun version, macOS build, CPU), and `preflight.json` are written under the gitignored `artifacts/multisession/`. Arguments and admission are checked before anything is written. A refused or malformed invocation exits 1 with one `multisession:` error line and creates no run directory.
 
 ## Rollback
 
