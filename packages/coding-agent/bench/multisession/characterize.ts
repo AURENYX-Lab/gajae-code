@@ -398,7 +398,8 @@ export async function characterize(): Promise<CharacterizationOutcome> {
 	const cwd = path.join(temporaryRoot, "project");
 	const stateRoot = path.join(cwd, ".gjc", "state");
 	const homeDir = path.join(temporaryRoot, "home");
-	const evidenceDir = path.join(temporaryRoot, "broker-evidence");
+	// Same `<root>/evidence` layout as session-runner, so the normalized `done` path matches.
+	const evidenceDir = path.join(temporaryRoot, "evidence");
 	const runnerRoot = path.join(temporaryRoot, "runner");
 	const hostStderrPath = path.join(evidenceDir, "host-stderr.log");
 	const hostStderrCaptureAbort = new AbortController();

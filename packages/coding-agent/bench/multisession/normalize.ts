@@ -2,13 +2,12 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 const EVIDENCE_STREAMS = ["transcript.jsonl", "requests.jsonl", "tools.jsonl", "events.jsonl"] as const;
-const NORMALIZED_ID = "<id>";
 const NORMALIZED_TIMESTAMP = "<timestamp>";
 const NORMALIZED_PID = "<pid>";
 
 /** Explicit volatility rules. Transcript and request payload content stays compared unless a rule below names it. */
 export const NORMALIZATION_ALLOWLIST = [
-	{ field: "session, entry, tool-call, message, response, job, and compaction entry IDs", reason: "Runtime-generated identities differ between isolated runs." },
+	{ field: "session, entry, tool-call, message, response, job, and compaction entry IDs", reason: "Runtime-generated identities differ between isolated runs; each distinct ID maps to <id:N> by first appearance across the evidence directory, so references between entries stay compared." },
 	{ field: "timestamp/time fields", reason: "Wall-clock timestamps differ between otherwise identical runs." },
 	{ field: "pid fields", reason: "Operating-system process identifiers differ between runs." },
 	{ field: "*duration* fields", reason: "Elapsed execution time differs between repeated workload runs." },
@@ -78,28 +77,63 @@ function replaceRootPath(value: string, tempRoot: string): string {
 	return rooted.replace(/(<root>[/\\]sessions[/\\])[^/\\]+/gu, "$1<session>");
 }
 
-/** Normalize only explicit identity, time, pid, temporary-root, and derived-hash volatility. */
-export function normalizeEvidenceValue(value: unknown, tempRoot: string, parentType?: string): unknown {
+function normalizeArgumentPayload(value: unknown, tempRoot: string): unknown {
+	if (typeof value === "string") return replaceRootPath(value, path.resolve(tempRoot));
+	if (Array.isArray(value)) return value.map(item => normalizeArgumentPayload(item, tempRoot));
+	if (value === null || typeof value !== "object") return value;
+	const record = value as Record<string, unknown>;
+	return Object.fromEntries(
+		Object.entries(record).map(([key, item]) => [key, normalizeArgumentPayload(item, tempRoot)]),
+	);
+}
+
+/** Bijective ID canonicalization: the same raw ID always maps to the same token. */
+function canonicalId(item: unknown, ids: Map<string, string>): unknown {
+	if (item === undefined || item === null) return item;
+	const raw = JSON.stringify(item);
+	let token = ids.get(raw);
+	if (token === undefined) {
+		token = `<id:${ids.size + 1}>`;
+		ids.set(raw, token);
+	}
+	return token;
+}
+
+/**
+ * Normalize only explicit identity, time, pid, temporary-root, and derived-hash
+ * volatility. `ids` is shared across one evidence directory's streams.
+ */
+export function normalizeEvidenceValue(
+	value: unknown,
+	tempRoot: string,
+	parentType?: string,
+	ids: Map<string, string> = new Map(),
+): unknown {
 	if (typeof value === "string")
 		return normalizeHostWallClock(normalizeTaskCompletionNotice(replaceRootPath(value, path.resolve(tempRoot))));
-	if (Array.isArray(value)) return value.map(item => normalizeEvidenceValue(item, tempRoot, parentType));
+	if (Array.isArray(value)) return value.map(item => normalizeEvidenceValue(item, tempRoot, parentType, ids));
 	if (value === null || typeof value !== "object") return value;
 
 	const record = value as Record<string, unknown>;
 	const objectType = typeof record.type === "string" ? record.type.toLowerCase() : parentType;
 	const normalized: Record<string, unknown> = {};
 	for (const [key, item] of Object.entries(record)) {
-		if (idField(key, objectType, "parentId" in record)) normalized[key] = item === undefined ? item : NORMALIZED_ID;
+		if (["args", "arguments", "input"].includes(key)) normalized[key] = normalizeArgumentPayload(item, tempRoot);
+		else if (idField(key, objectType, "parentId" in record)) normalized[key] = canonicalId(item, ids);
 		else if (timestampField(key)) normalized[key] = item === undefined ? item : NORMALIZED_TIMESTAMP;
 		else if (pidField(key)) normalized[key] = item === undefined ? item : NORMALIZED_PID;
 		else if (durationField(key)) normalized[key] = item === undefined ? item : NORMALIZED_TIMESTAMP;
 		else if (key === "hash" && objectType === "promptprefix") normalized[key] = item === undefined ? item : "<hash>";
-		else normalized[key] = normalizeEvidenceValue(item, tempRoot, key === "promptPrefix" ? "promptprefix" : objectType);
+		else normalized[key] = normalizeEvidenceValue(item, tempRoot, key === "promptPrefix" ? "promptprefix" : objectType, ids);
 	}
 	return normalized;
 }
 
-async function readNormalizedLines(directory: string, stream: (typeof EVIDENCE_STREAMS)[number]): Promise<unknown[]> {
+async function readNormalizedLines(
+	directory: string,
+	stream: (typeof EVIDENCE_STREAMS)[number],
+	ids: Map<string, string>,
+): Promise<unknown[]> {
 	const file = Bun.file(path.join(directory, stream));
 	if (!(await file.exists())) throw new Error(`Missing evidence stream ${path.join(directory, stream)}`);
 	const contents = await file.text();
@@ -107,7 +141,7 @@ async function readNormalizedLines(directory: string, stream: (typeof EVIDENCE_S
 	return contents
 		.split("\n")
 		.filter(line => line.length > 0)
-		.map(line => normalizeEvidenceValue(JSON.parse(line) as unknown, tempRoot));
+		.map(line => normalizeEvidenceValue(JSON.parse(line) as unknown, tempRoot, undefined, ids));
 }
 
 function collectDiffs(left: unknown, right: unknown, currentPath: string, diffs: string[]): void {
@@ -140,11 +174,13 @@ export async function compareEvidence(
 	dirB: string,
 ): Promise<{ equal: boolean; diffs: string[] }> {
 	const diffs: string[] = [];
+	const idsA = new Map<string, string>();
+	const idsB = new Map<string, string>();
 	for (const stream of EVIDENCE_STREAMS) {
 		let left: unknown[];
 		let right: unknown[];
 		try {
-			[left, right] = await Promise.all([readNormalizedLines(dirA, stream), readNormalizedLines(dirB, stream)]);
+			[left, right] = await Promise.all([readNormalizedLines(dirA, stream, idsA), readNormalizedLines(dirB, stream, idsB)]);
 		} catch (error) {
 			diffs.push(`${stream}: ${error instanceof Error ? error.message : String(error)}`);
 			continue;

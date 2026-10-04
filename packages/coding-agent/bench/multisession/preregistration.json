@@ -47,7 +47,7 @@
     }
   },
   "definitions": {
-    "steadyStateWindow": "Every scheduled 1Hz sample tick in active workload phases, excluding the first 2000ms after ready; the window denominator is all scheduled ticks.",
+    "steadyStateWindow": "Every scheduled 1Hz sample tick from 2000ms after the last session is ready until the first session starts disposing; this spans the active workload phases and the scripted idle between them, because mock-provider turns complete in milliseconds and a 1Hz sampler cannot isolate them. The window denominator is all scheduled ticks.",
     "sampleRateHz": 1,
     "sampledPeak": "Maximum cohort total at a scheduled sample instant within the steady-state window.",
     "p95TurnLatency": "Per repetition, nearest-rank p95 of endedAt - startedAt over all RunnerEvent turn events from all sessions; the gate compares medians of per-repetition p95 values.",
@@ -63,14 +63,14 @@
     "memoryFormula": "For each arm, gatedTotal(t) = armTotal(t) + B, where armTotal already includes the driver exactly once; pass the 50% mean threshold only when W + B ≤ 0.5 × (S + B), with no sampled-peak regression.",
     "contractDigest": "SHA-256 hex of canonical JSON for this file; the digest is external and is not embedded in the immutable contract.",
     "postingReceipt": "Store contractDigest, discussionCommentUrl, and postedAt separately in preregistration-receipt.json before preflight or Worker admission.",
-    "brokerBaselineB": "Median across at least five complete repetitions of each repetition's mean 1Hz footprint samples over 30 seconds, after trampoline exit and idle readiness; acquired from the isolated ensureBroker discovery pid and incarnation, then the exact owned Broker is stopped and verified dead.",
+    "brokerBaselineB": "Median across at least five complete repetitions of each repetition's mean 1Hz footprint samples over 30 seconds (shorter diagnostic baselines are never eligible), after trampoline exit and idle readiness; acquired from the isolated ensureBroker discovery pid and incarnation, then the exact owned Broker is stopped and verified dead.",
     "statistics": "Each gate uses the median of per-repetition measurements from valid N=5 repetitions; an arm with fewer than five valid repetitions makes that gate insufficient-evidence.",
     "percentileEstimator": "Nearest rank: sorted[ceil(p × count) - 1].",
     "repEligibility": "A rep is valid only when every scheduled gated-window tick has exactly one complete sample with a resolved total; its 10000ms post-close teardown sample is complete; visibility self-check passed; every session has all REQUIRED_WORKLOAD_EVENTS; and invalidReason is absent. Zero-tolerance completeness applies: missing ticks are never zero-filled or omitted.",
-    "sampleCompleteness": "Complete only if every owned member has a resolved footprint read, no owned read is unresolved or raced, no unresolved-ownership process exists, and the driver read is resolved. Incomplete samples remain in raw output but their partial totals are never used.",
-    "churnEligibility": "Cycle-1 and cycle-20 samples at the post-close phase point must both be complete.",
-    "orphanEligibility": "Both owned-process and unresolved-ownership orphan counts must be zero.",
-    "fidelity": "Normalized runner evidence must equal the required real-host characterization for the fidelity gate."
+    "sampleCompleteness": "Complete only if every owned member has a resolved footprint read, no owned read is unresolved or raced, no unresolved-ownership process exists, and the driver read is resolved. A non-driver member the OS confirms exited between the ownership scan and its read holds no memory and contributes nothing without making the sample incomplete. Incomplete samples remain in raw output but their partial totals are never used.",
+    "churnEligibility": "All 20 Worker cycles must complete with no session failure, and every cycle post-close sample must be complete; otherwise churn is insufficient evidence.",
+    "orphanEligibility": "Both owned-process and unresolved-ownership orphan counts must be zero, and every orphan receipt must be complete (process listing and identity reads succeeded); an incomplete receipt is insufficient evidence.",
+    "fidelity": "Normalized runner evidence of every Worker session must equal the same (N, repetition, session index) standalone session; a missing repetition or session on either side is a difference. Real-host characterization is separate and only caps the claim label (capabilityLabelRule)."
   },
   "environment": {
     "platform": "darwin-arm64",

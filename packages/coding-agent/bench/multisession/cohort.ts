@@ -14,11 +14,13 @@ import {
 	readProcessEnv as readEnvironment,
 } from "./procinfo";
 import { closeFootprintSampler, sampleProcess as readFootprint } from "./footprint";
-import type { CohortExclusion, CohortMember, CohortSample, FootprintRead, ProcessEnvRead } from "./types";
+import type { CohortExclusion, CohortMember, CohortSample, FootprintRead, OrphanReceipt, ProcessEnvRead } from "./types";
 
 export const COHORT_MARKER_ENV = "GJC_BENCH_COHORT";
 /** launchd's kernel unique id (`p_uniqueid` of pid 1). */
 export const LAUNCHD_UNIQUE_ID = 1n;
+/** Pause before re-reading a process identity that first read as unknown. */
+const IDENTITY_RETRY_MS = 20;
 
 type ProcessIdentity = { pid: number; incarnation: string };
 type AncestrySnapshot = { members: ProcessIdentity[]; complete: boolean };
@@ -181,7 +183,13 @@ export class Cohort {
 			const ownUid = typeof process.getuid === "function" ? process.getuid() : undefined;
 			const knownForeignUid = uid !== null && ownUid !== undefined && uid !== ownUid;
 			if (knownForeignUid && rootsForPid.length === 0 && pid !== this.#driverPid) continue;
-			const observation = this.#observe(pid);
+			let observation = this.#observe(pid);
+			// A process caught mid-exit (or mid-exec) can briefly read as unknown; one
+			// short re-read separates that transient from a live unreadable process.
+			if (observation.status === "unknown") {
+				Bun.sleepSync(IDENTITY_RETRY_MS);
+				observation = this.#observe(pid);
+			}
 			if (observation.status === "absent") continue;
 			if (observation.status === "unknown") {
 				if (!knownForeignUid) {
@@ -364,15 +372,20 @@ export class Cohort {
 		};
 	}
 
-	orphanCheck(): { owned: number[]; unresolved: number[] } {
+	orphanCheck(): OrphanReceipt {
 		const scan = this.scanOwnership();
+		// An orphan is a process that is still alive: a pid the OS confirms exited
+		// after the scan (typically a short-lived host process caught mid-enumeration)
+		// holds nothing and cannot leak, whatever its ownership verdict was.
+		const alive = (pid: number): boolean => pid !== this.#driverPid && this.#observe(pid).status !== "absent";
 		const owned = uniquePids(
-			scan.members
-				.filter(member => member.pid !== this.#driverPid && member.reason !== "unresolved-ownership")
-				.map(member => member.pid),
-		);
-		const unresolved = uniquePids(scan.unresolvedPids.filter(pid => pid !== this.#driverPid));
-		return { owned, unresolved };
+			scan.members.filter(member => member.reason !== "unresolved-ownership").map(member => member.pid),
+		).filter(alive);
+		const unresolved = uniquePids(scan.unresolvedPids).filter(alive);
+		// identity-unresolved pids are already listed in `unresolved`; any other scan
+		// error means the enumeration itself cannot prove that nothing remains.
+		const errors = scan.errors.filter(error => !error.startsWith("identity-unresolved:"));
+		return { owned, unresolved, complete: errors.length === 0, errors };
 	}
 
 	visibilityCheck(): { passed: boolean; reason?: string } {

@@ -42,6 +42,17 @@ export interface CohortExclusion {
 }
 
 /** One 1Hz cohort sample. */
+/**
+ * Post-shutdown orphan receipt. `complete` is false when the final process
+ * enumeration or ancestry scan failed; an incomplete receipt never proves zero.
+ */
+export interface OrphanReceipt {
+	owned: number[];
+	unresolved: number[];
+	complete: boolean;
+	errors: string[];
+}
+
 export interface CohortSample {
 	/** Monotonic ms since run start (performance.now() of the driver). */
 	t: number;
@@ -111,7 +122,7 @@ export interface RepRecord {
 	/** Warm Worker admission per session (Worker arm only, non-gating). */
 	warmAdmissionMs: number[];
 	visibilityCheck: { passed: boolean; reason?: string };
-	orphans: { owned: number[]; unresolved: number[] };
+	orphans: OrphanReceipt;
 	invalidReason?: string;
 }
 
@@ -122,7 +133,11 @@ export interface ChurnRecord {
 	cycleSamples: CohortSample[];
 	/** Host-only footprint (Worker arm) at the same phase point, per cycle. */
 	hostFootprints: Array<number | null>;
-	orphans: { owned: number[]; unresolved: number[] };
+	/** Session failures per cycle (index 0 = cycle 1); a cycle is valid only when empty. */
+	cycleErrors: string[][];
+	/** Cycles completed before the run stopped; fewer than requested is insufficient evidence. */
+	completedCycles: number;
+	orphans: OrphanReceipt;
 }
 
 export interface BrokerBaselineRecord {

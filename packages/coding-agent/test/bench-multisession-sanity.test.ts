@@ -30,7 +30,7 @@ function rep(runnerEvents: RunnerEvent[], samples: CohortSample[]): RepRecord {
 		coldReadyMs: [],
 		warmAdmissionMs: [],
 		visibilityCheck: { passed: true },
-		orphans: { owned: [], unresolved: [] },
+		orphans: { owned: [], unresolved: [], complete: true, errors: [] },
 	};
 }
 
@@ -55,7 +55,7 @@ describe("multi-session sanity summary", () => {
 			errors: ["provider rejected the request"],
 			turnLatencyMs: [350],
 			peakArmFootprint: 700,
-			orphans: { owned: [], unresolved: [] },
+			orphans: { owned: [], unresolved: [], complete: true, errors: [] },
 		});
 	});
 

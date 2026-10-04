@@ -150,7 +150,7 @@ describe("multi-session ownership cohort", () => {
 
 		const scan = harness.cohort.scanOwnership();
 		expect(scan.members.some(member => member.pid === root.pid && member.reason === "marker")).toBe(true);
-		expect(harness.cohort.orphanCheck()).toEqual({ owned: [root.pid], unresolved: [] });
+		expect(harness.cohort.orphanCheck()).toEqual({ owned: [root.pid], unresolved: [], complete: true, errors: [] });
 		harness.cohort.close();
 	});
 
@@ -200,6 +200,20 @@ describe("multi-session ownership cohort", () => {
 		expect(sample.complete).toBe(false);
 		expect(sample.armTotal).toBeNull();
 		expect(harness.cohort.orphanCheck().unresolved).toContain(stray.pid);
+
+		// The same stray exits right after the orphan scan lists it: not an orphan.
+		const observe = harness.deps.observeProcessIncarnation!;
+		let scanned = false;
+		harness.deps.observeProcessIncarnation = pid => {
+			if (pid !== stray.pid) return observe(pid);
+			const result = scanned ? { status: "absent" as const } : observe(pid);
+			scanned = true;
+			return result;
+		};
+		const receipt = harness.cohort.orphanCheck();
+		expect(scanned).toBe(true);
+		expect(receipt.unresolved).not.toContain(stray.pid);
+		expect(receipt.complete).toBe(true);
 		harness.cohort.close();
 	});
 
@@ -225,6 +239,29 @@ describe("multi-session ownership cohort", () => {
 		const settled = harness.cohort.sample(1, "active:fixture");
 		expect(settled.complete).toBe(true);
 		expect(settled.armTotal).toBe(100 * 10 + root.pid * 10);
+		harness.cohort.close();
+	});
+
+	it("re-reads an unknown identity once: a process gone on re-read is skipped, a persistent unknown stays unresolved", () => {
+		const harness = makeHarness();
+		const transient = harness.add(250, { env: { status: "argv-only", argv: ["sh"] } });
+		const stuck = harness.add(251, { env: { status: "argv-only", argv: ["sh"] } });
+		const observe = harness.deps.observeProcessIncarnation!;
+		let transientReads = 0;
+		harness.deps.observeProcessIncarnation = pid => {
+			if (pid === transient.pid) {
+				transientReads += 1;
+				return transientReads === 1
+					? { status: "unknown", reasonCode: "identity_unavailable" }
+					: { status: "absent" };
+			}
+			if (pid === stuck.pid) return { status: "unknown", reasonCode: "identity_unavailable" };
+			return observe(pid);
+		};
+		const scan = harness.cohort.scanOwnership();
+		expect(transientReads).toBe(2);
+		expect(scan.unresolvedPids).toEqual([stuck.pid]);
+		expect(scan.errors).toEqual([`identity-unresolved:${stuck.pid}:identity_unavailable`]);
 		harness.cohort.close();
 	});
 
@@ -358,9 +395,9 @@ describe("multi-session ownership cohort", () => {
 			const token = `fixture-${process.pid}-${Date.now()}`;
 			const parentExitedFile = path.join(tempDir, "parent-exited");
 			const grandchildPidFile = path.join(tempDir, "grandchild-pid");
-			const grandchildSource = `await Bun.write(${JSON.stringify(grandchildPidFile)}, String(process.pid)); await new Promise(() => {});`;
+			const grandchildSource = `await Bun.write(${JSON.stringify(grandchildPidFile)}, String(process.pid)); await Promise.withResolvers().promise;`;
 			const parentSource = `const child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(grandchildSource)}], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore", env: process.env }); child.unref();`;
-			const rootSource = `const parent = Bun.spawn([process.execPath, "-e", ${JSON.stringify(parentSource)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore", env: process.env }); await parent.exited; await Bun.write(${JSON.stringify(parentExitedFile)}, "exited"); await new Promise(() => {});`;
+			const rootSource = `const parent = Bun.spawn([process.execPath, "-e", ${JSON.stringify(parentSource)}], { stdin: "ignore", stdout: "ignore", stderr: "ignore", env: process.env }); await parent.exited; await Bun.write(${JSON.stringify(parentExitedFile)}, "exited"); await Promise.withResolvers().promise;`;
 			const root = Bun.spawn([process.execPath, "-e", rootSource], {
 				stdin: "ignore",
 				stdout: "ignore",

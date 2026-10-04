@@ -39,7 +39,12 @@ async function writeEvidence(
 				role: "assistant",
 				content: [
 					{ type: "text", text: "assistant text remains significant" },
-					{ type: "toolCall", id: "tool-call-one", name: "bash", arguments: { command: "printf ok" } },
+					{
+						type: "toolCall",
+						id: "tool-call-one",
+						name: "bash",
+						arguments: { command: "printf ok", durationMs: 25, pid: 111 },
+					},
 				],
 				responseId: "response-one",
 				duration: 25,
@@ -69,7 +74,22 @@ async function writeEvidence(
 	const requests = [
 		{
 			sessionId: "session-one",
-			context: { messages: [{ role: "user", content: "same request payload", timestamp: 1_000 }] },
+			context: {
+				messages: [
+					{ role: "user", content: "same request payload", timestamp: 1_000 },
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "tool-call-one",
+								name: "bash",
+								arguments: { command: "printf ok", durationMs: 25, pid: 111 },
+							},
+						],
+					},
+				],
+			},
 			options: { pid: 111, timestamp: "2026-01-01T00:00:01.000Z" },
 		},
 	];
@@ -77,7 +97,8 @@ async function writeEvidence(
 		{
 			toolCallId: "tool-call-one",
 			toolName: "bash",
-			args: { command: "printf ok" },
+			args: { command: "printf ok", durationMs: 25, pid: 111 },
+			input: { durationMs: 25, pid: 111 },
 			result: { content: [{ type: "text", text: "tool result remains significant" }] },
 			pid: 111,
 		},
@@ -100,6 +121,10 @@ async function writeEvidence(
 	}
 }
 
+function rename(id: unknown): unknown {
+	return typeof id === "string" ? `new-${id}` : id;
+}
+
 function fixturePaths(name: string): { evidence: string; root: string } {
 	if (!tempDir) throw new Error("Test temp directory was not initialized.");
 	const root = path.join(tempDir.path(), name);
@@ -113,16 +138,18 @@ describe("multi-session evidence normalizer", () => {
 		const right = fixturePaths("right");
 		await Promise.all([
 			writeEvidence(left.evidence, left.root),
+			// Every runtime ID is renamed consistently: same relationships, new identities.
 			writeEvidence(right.evidence, right.root, (stream, record) => {
 				if (stream === "transcript.jsonl") {
-					record.id = `new-${String(record.id)}`;
+					record.id = rename(record.id);
+					record.parentId = rename(record.parentId);
 					if ("timestamp" in record) record.timestamp = "2026-02-02T00:00:00.000Z";
 					if (typeof record.cwd === "string") record.cwd = record.cwd.replace(left.root, right.root);
 					if (record.type === "message" && typeof record.message === "object" && record.message !== null) {
 						const message = record.message as Record<string, unknown>;
 						if (message.role === "assistant") {
 							message.timestamp = 9999;
-							message.responseId = "new-response";
+							message.responseId = rename(message.responseId);
 							message.duration = 800;
 							if (typeof message.promptPrefix === "object" && message.promptPrefix !== null) {
 								(message.promptPrefix as Record<string, unknown>).hash = "new-prefix";
@@ -132,35 +159,40 @@ describe("multi-session evidence normalizer", () => {
 							const call = message.content.find(
 								item => typeof item === "object" && item !== null && "id" in item,
 							);
-							if (call && typeof call === "object") (call as Record<string, unknown>).id = "new-tool-call";
+							if (call && typeof call === "object") {
+								const callRecord = call as Record<string, unknown>;
+								callRecord.id = rename(callRecord.id);
+							}
 						}
 					}
 					if (record.type === "custom_message") {
-						record.jobId = "job-two";
+						record.jobId = rename(record.jobId);
 						record.durationMs = 800;
 						if (typeof record.content === "string") {
 							record.content = record.content.replaceAll("job-one", "job-two").replace("[500ms]", "[1.2s]");
 						}
 					}
 					if (record.type === "compaction") {
-						record.compactionEntryId = "compaction-two";
-						record.firstKeptEntryId = "entry-assistant";
+						record.compactionEntryId = rename(record.compactionEntryId);
+						record.firstKeptEntryId = rename(record.firstKeptEntryId);
 						const evictedContent = record.evictedContent as Record<string, unknown>;
-						evictedContent.compactionEntryId = "compaction-two";
-						evictedContent.firstKeptEntryId = "entry-assistant";
+						evictedContent.compactionEntryId = rename(evictedContent.compactionEntryId);
+						evictedContent.firstKeptEntryId = rename(evictedContent.firstKeptEntryId);
 						evictedContent.evictedAt = 9999;
 					}
 				}
 				if (stream === "requests.jsonl") {
-					record.sessionId = "new-session";
+					record.sessionId = rename(record.sessionId);
 					const options = record.options as Record<string, unknown>;
 					options.pid = 222;
 					options.timestamp = "2026-02-02T00:00:01.000Z";
 					const context = record.context as { messages: Array<Record<string, unknown>> };
 					context.messages[0]!.timestamp = 9999;
+					for (const item of context.messages[1]!.content as Array<Record<string, unknown>>)
+						item.id = rename(item.id);
 				}
 				if (stream === "tools.jsonl") {
-					record.toolCallId = "new-tool-call";
+					record.toolCallId = rename(record.toolCallId);
 					record.pid = 222;
 				}
 				if (stream === "events.jsonl") {
@@ -177,6 +209,23 @@ describe("multi-session evidence normalizer", () => {
 		await expect(compareEvidence(left.evidence, right.evidence)).resolves.toEqual({ equal: true, diffs: [] });
 	});
 
+	test("keeps relationships between IDs significant", async () => {
+		tempDir = TempDir.createSync("@bench-multisession-normalize-ids-");
+		const left = fixturePaths("left");
+		const right = fixturePaths("right");
+		await Promise.all([
+			writeEvidence(left.evidence, left.root),
+			// Compaction keeps from the assistant entry instead of the user entry.
+			writeEvidence(right.evidence, right.root, (stream, record) => {
+				if (stream === "transcript.jsonl" && record.type === "compaction")
+					record.firstKeptEntryId = "entry-assistant";
+			}),
+		]);
+		const result = await compareEvidence(left.evidence, right.evidence);
+		expect(result.equal).toBe(false);
+		expect(result.diffs).toContain("transcript.jsonl[4].firstKeptEntryId");
+	});
+
 	test("retains request payload, tool arguments, assistant text, tool results, and token evidence", async () => {
 		tempDir = TempDir.createSync("@bench-multisession-normalize-diff-");
 		const cases = [
@@ -189,9 +238,75 @@ describe("multi-session evidence normalizer", () => {
 				},
 			},
 			{
+				stream: "requests.jsonl",
+				mutate: (_stream: string, record: Record<string, unknown>) => {
+					if (_stream !== "requests.jsonl") return;
+					const context = record.context as { messages: Array<Record<string, unknown>> };
+					const content = context.messages[1]!.content as Record<string, unknown>[];
+					const call = content[0]!;
+					(call.arguments as Record<string, unknown>).durationMs = 800;
+				},
+			},
+			{
+				stream: "requests.jsonl",
+				mutate: (_stream: string, record: Record<string, unknown>) => {
+					if (_stream !== "requests.jsonl") return;
+					const context = record.context as { messages: Array<Record<string, unknown>> };
+					const content = context.messages[1]!.content as Record<string, unknown>[];
+					const call = content[0]!;
+					(call.arguments as Record<string, unknown>).pid = 222;
+				},
+			},
+			{
 				stream: "tools.jsonl",
 				mutate: (_stream: string, record: Record<string, unknown>) => {
 					if (_stream === "tools.jsonl") (record.args as Record<string, unknown>).command = "printf changed";
+				},
+			},
+			{
+				stream: "tools.jsonl",
+				mutate: (_stream: string, record: Record<string, unknown>) => {
+					if (_stream === "tools.jsonl") (record.args as Record<string, unknown>).durationMs = 800;
+				},
+			},
+			{
+				stream: "tools.jsonl",
+				mutate: (_stream: string, record: Record<string, unknown>) => {
+					if (_stream === "tools.jsonl") (record.args as Record<string, unknown>).pid = 222;
+				},
+			},
+			{
+				stream: "tools.jsonl",
+				mutate: (_stream: string, record: Record<string, unknown>) => {
+					if (_stream === "tools.jsonl") (record.input as Record<string, unknown>).durationMs = 800;
+				},
+			},
+			{
+				stream: "transcript.jsonl",
+				mutate: (_stream: string, record: Record<string, unknown>) => {
+					if (_stream !== "transcript.jsonl" || record.type !== "message") return;
+					const message = record.message as Record<string, unknown>;
+					if (message.role !== "assistant" || !Array.isArray(message.content)) return;
+					const call = message.content.find(
+						item => typeof item === "object" && item !== null && "arguments" in item,
+					);
+					if (call && typeof call === "object") {
+						((call as Record<string, unknown>).arguments as Record<string, unknown>).durationMs = 800;
+					}
+				},
+			},
+			{
+				stream: "transcript.jsonl",
+				mutate: (_stream: string, record: Record<string, unknown>) => {
+					if (_stream !== "transcript.jsonl" || record.type !== "message") return;
+					const message = record.message as Record<string, unknown>;
+					if (message.role !== "assistant" || !Array.isArray(message.content)) return;
+					const call = message.content.find(
+						item => typeof item === "object" && item !== null && "arguments" in item,
+					);
+					if (call && typeof call === "object") {
+						((call as Record<string, unknown>).arguments as Record<string, unknown>).pid = 222;
+					}
 				},
 			},
 			{

@@ -1,11 +1,12 @@
 import * as crypto from "node:crypto";
+import { COHORT_MARKER_ENV } from "./cohort";
 
 /** Explicit bench setup. Keep this value identical for both isolation arms. */
 export const RunnerBootstrap = {
 	version: 1,
 	agentDir: "isolated-temporary-directory-per-session",
 	environment: {
-		allowlist: ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "SystemRoot"],
+		allowlist: ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "SystemRoot", COHORT_MARKER_ENV],
 		stripNames: [
 			"GJC_MASTER_CAPABILITY",
 			"GJC_MASTER_OWNER_SESSION_ID",

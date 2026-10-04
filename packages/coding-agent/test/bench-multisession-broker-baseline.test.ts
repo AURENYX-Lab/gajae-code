@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { $ } from "bun";
 import { type BrokerBaselineDeps, measureBrokerBaseline } from "../bench/multisession/broker-baseline";
 import type { BrokerDiscovery } from "../src/sdk/broker/discovery";
 import { ensureBroker } from "../src/sdk/broker/ensure";
@@ -130,16 +131,21 @@ describe("multi-session Broker baseline", () => {
 		"starts and stops a real isolated Broker identity",
 		async () => {
 			let discovery: BrokerDiscovery | undefined;
+			let parentPid: number | undefined;
 			const record = await measureBrokerBaseline({
 				reps: 1,
 				seconds: 2,
 				deps: {
 					ensureBroker: async settings => {
 						discovery = await ensureBroker(settings);
+						parentPid = Number((await $`ps -o ppid= -p ${discovery.pid}`.quiet().text()).trim());
 						return discovery;
 					},
 				},
 			});
+			// The measured identity is the detached Broker that survived its spawn
+			// trampoline: reparented to launchd, not a child of this driver.
+			expect(parentPid).toBe(1);
 			expect(discovery).toBeDefined();
 			expect(record.reps).toHaveLength(1);
 			expect(record.reps[0]?.complete).toBe(true);

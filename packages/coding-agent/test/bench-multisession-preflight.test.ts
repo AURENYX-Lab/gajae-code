@@ -12,7 +12,7 @@ function fakeAdapter(overrides: Partial<PreflightAdapter> = {}): PreflightAdapte
 		},
 		waitFirstDisposed: async () => {
 			calls.push("waitFirstDisposed");
-			return { survivorStreaming: true, survivorDisposed: false };
+			return { disposingAt: 100, disposedAt: 120 };
 		},
 		closeSession: async index => {
 			calls.push(`close:${index}`);
@@ -21,11 +21,15 @@ function fakeAdapter(overrides: Partial<PreflightAdapter> = {}): PreflightAdapte
 			calls.push("waitSurvivor");
 			return { ok: true };
 		},
+		survivorTurns: () => [
+			{ startedAt: 10, endedAt: 40 },
+			{ startedAt: 50, endedAt: 200 },
+		],
 		hostIdentity: () => ({ status: "present", incarnation: HOST.incarnation }),
 		shutdown: async () => {
 			calls.push("shutdown");
 		},
-		orphanCheck: () => ({ owned: [], unresolved: [] }),
+		orphanCheck: () => ({ owned: [], unresolved: [], complete: true, errors: [] }),
 		workerEvidence: () => ["/w/0", "/w/1"],
 		standaloneEvidence: async () => ["/s/0", "/s/1"],
 		compare: async () => ({ equal: true, diffs: [] }),
@@ -104,18 +108,46 @@ describe("bench multisession preflight decision", () => {
 	});
 
 	test("an owned or unresolved process after shutdown fails zero-orphans", async () => {
-		const owned = await decidePreflight(fakeAdapter({ orphanCheck: () => ({ owned: [777], unresolved: [] }) }));
+		const owned = await decidePreflight(
+			fakeAdapter({ orphanCheck: () => ({ owned: [777], unresolved: [], complete: true, errors: [] }) }),
+		);
 		expect(failed(owned.checks)).toEqual(["zero-orphans"]);
 		expect(owned.checks.find(check => check.name === "zero-orphans")?.detail).toContain("777");
-		const unresolved = await decidePreflight(fakeAdapter({ orphanCheck: () => ({ owned: [], unresolved: [778] }) }));
+		const unresolved = await decidePreflight(
+			fakeAdapter({ orphanCheck: () => ({ owned: [], unresolved: [778], complete: true, errors: [] }) }),
+		);
 		expect(failed(unresolved.checks)).toEqual(["zero-orphans"]);
+		const unproven = await decidePreflight(
+			fakeAdapter({
+				orphanCheck: () => ({ owned: [], unresolved: [], complete: false, errors: ["process-list-failed:EPERM"] }),
+			}),
+		);
+		expect(failed(unproven.checks)).toEqual(["zero-orphans"]);
+		expect(unproven.checks.find(check => check.name === "zero-orphans")?.detail).toContain("process-list-failed");
 	});
 
-	test("a survivor that already finished when session 0 disposed fails the close barrier", async () => {
+	test("the close barrier needs one survivor turn spanning the whole dispose window", async () => {
+		// Survivor turns finished before session 0 disposed (survivor idle).
+		const idle = await decidePreflight(fakeAdapter({ survivorTurns: () => [{ startedAt: 10, endedAt: 99 }] }));
+		expect(failed(idle.checks)).toEqual(["close-barrier"]);
+		// A turn that starts inside the window does not span it.
+		const late = await decidePreflight(fakeAdapter({ survivorTurns: () => [{ startedAt: 110, endedAt: 300 }] }));
+		expect(failed(late.checks)).toEqual(["close-barrier"]);
+		// A turn that ends inside the window does not span it either.
+		const early = await decidePreflight(fakeAdapter({ survivorTurns: () => [{ startedAt: 50, endedAt: 115 }] }));
+		expect(failed(early.checks)).toEqual(["close-barrier"]);
+	});
+
+	test("session 0 never completing fails the close barrier and the survivor check", async () => {
 		const outcome = await decidePreflight(
-			fakeAdapter({ waitFirstDisposed: async () => ({ survivorStreaming: true, survivorDisposed: true }) }),
+			fakeAdapter({
+				waitFirstDisposed: async () => {
+					throw new Error("session 0 failed: model error");
+				},
+			}),
 		);
-		expect(failed(outcome.checks)).toEqual(["close-barrier"]);
+		expect(failed(outcome.checks)).toEqual(["survivor-completed", "close-barrier", "fidelity"]);
+		expect(outcome.checks.find(check => check.name === "close-barrier")?.detail).toBe("session 0 never completed");
 	});
 
 	test("a host that never starts aborts and fails without later checks", async () => {

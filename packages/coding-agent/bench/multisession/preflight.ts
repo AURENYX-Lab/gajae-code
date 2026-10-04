@@ -1,9 +1,10 @@
 /**
  * Worker feasibility preflight (S5).
  *
- * Two Workers in one host run the shortened native-backed script (bash + grep).
- * Worker 0 is closed after its full transcript while Worker 1 is still
- * streaming; Worker 1 must complete, both evidence sets must equal the same
+ * Two Workers in one host run the shortened native-backed script (bash, grep,
+ * and one long in-flight model turn). Worker 0 disposes and is closed while a
+ * Worker 1 turn is in flight (proven from turn timestamps, not sampled state);
+ * Worker 1 must complete, both evidence sets must equal the same
  * script run as standalone processes, the host identity must be unchanged, and
  * no owned process may remain after shutdown.
  *
@@ -19,6 +20,7 @@ import { Cohort } from "./cohort";
 import type { PreflightRecord } from "./contract";
 import { compareEvidence } from "./normalize";
 import type { Provenance } from "./provenance";
+import type { OrphanReceipt, RunnerEvent } from "./types";
 
 export type PreflightCheckName =
 	| "host-started"
@@ -37,15 +39,17 @@ export interface PreflightCheck {
 export interface PreflightAdapter {
 	/** Start the Worker host with sessions 0 and 1 staggered; returns host identity. */
 	startHost(): Promise<{ pid: number; incarnation: string }>;
-	/** Wait until session 0 disposed; report whether session 1 was mid-stream at that instant. */
-	waitFirstDisposed(): Promise<{ survivorStreaming: boolean; survivorDisposed: boolean }>;
+	/** Wait until session 0 completed; returns its dispose window on the bench clock. */
+	waitFirstDisposed(): Promise<{ disposingAt: number; disposedAt: number }>;
 	closeSession(index: number): Promise<void>;
 	/** Wait for session 1 to finish; ok=false with the runner error otherwise. */
 	waitSurvivor(): Promise<{ ok: boolean; error?: string }>;
+	/** Session 1's completed turn intervals on the bench clock. */
+	survivorTurns(): Array<{ startedAt: number; endedAt: number }>;
 	/** Current identity of the host pid ("absent"/"unknown" when it died or cannot be observed). */
 	hostIdentity(pid: number): { status: "present"; incarnation: string } | { status: "absent" | "unknown" };
 	shutdown(): Promise<void>;
-	orphanCheck(): { owned: number[]; unresolved: number[] };
+	orphanCheck(): OrphanReceipt;
 	/** Evidence directories for sessions 0 and 1 in the Worker host. */
 	workerEvidence(): string[];
 	/** Run the same script as standalone processes; returns evidence dirs for sessions 0 and 1. */
@@ -71,22 +75,29 @@ export async function decidePreflight(adapter: PreflightAdapter): Promise<Prefli
 		adapter.abort();
 		return finish();
 	}
+	let window: { disposingAt: number; disposedAt: number } | undefined;
 	try {
-		const barrier = await adapter.waitFirstDisposed();
-		const barrierMet = barrier.survivorStreaming && !barrier.survivorDisposed;
-		checks.push({
-			name: "close-barrier",
-			passed: barrierMet,
-			detail: barrierMet
-				? "session 0 disposed while session 1 was streaming"
-				: `survivorStreaming=${barrier.survivorStreaming} survivorDisposed=${barrier.survivorDisposed}`,
-		});
+		window = await adapter.waitFirstDisposed();
 		await adapter.closeSession(0);
 		const survivor = await adapter.waitSurvivor();
 		checks.push({ name: "survivor-completed", passed: survivor.ok, ...(survivor.error ? { detail: survivor.error } : {}) });
 	} catch (error) {
 		checks.push({ name: "survivor-completed", passed: false, detail: String(error) });
 	}
+	// The barrier holds only if a session 1 turn was in flight across session 0's
+	// whole dispose window; judged from recorded turn intervals after the fact.
+	const overlapping = window
+		? adapter.survivorTurns().find(turn => turn.startedAt <= window.disposingAt && turn.endedAt >= window.disposedAt)
+		: undefined;
+	checks.push({
+		name: "close-barrier",
+		passed: overlapping !== undefined,
+		detail: !window
+			? "session 0 never completed"
+			: overlapping
+				? `session 1 turn [${overlapping.startedAt.toFixed(0)}, ${overlapping.endedAt.toFixed(0)}] spans session 0 dispose [${window.disposingAt.toFixed(0)}, ${window.disposedAt.toFixed(0)}]`
+				: `no session 1 turn spans session 0 dispose [${window.disposingAt.toFixed(0)}, ${window.disposedAt.toFixed(0)}]`,
+	});
 
 	const identity = adapter.hostIdentity(host.pid);
 	const sameHost = identity.status === "present" && identity.incarnation === host.incarnation;
@@ -104,11 +115,15 @@ export async function decidePreflight(adapter: PreflightAdapter): Promise<Prefli
 	}
 	if (!checks.some(check => check.name === "zero-orphans")) {
 		const orphans = adapter.orphanCheck();
-		const clean = orphans.owned.length === 0 && orphans.unresolved.length === 0;
+		const clean = orphans.complete && orphans.owned.length === 0 && orphans.unresolved.length === 0;
 		checks.push({
 			name: "zero-orphans",
 			passed: clean,
-			...(clean ? {} : { detail: `owned=${orphans.owned.join(",")} unresolved=${orphans.unresolved.join(",")}` }),
+			...(clean
+				? {}
+				: {
+						detail: `owned=${orphans.owned.join(",")} unresolved=${orphans.unresolved.join(",")}${orphans.complete ? "" : ` incomplete=${orphans.errors.join(",")}`}`,
+					}),
 		});
 	}
 
@@ -133,9 +148,11 @@ export async function decidePreflight(adapter: PreflightAdapter): Promise<Prefli
 	return finish();
 }
 
-// Long enough that session 0 is still mid-script when session 1 (started after
-// session 0 streams) pays its Worker cold start and begins streaming.
-const PREFLIGHT_IDLE_MS = 3_000;
+// Timing budget: session 1 starts once session 0 streams (after its first tool
+// turn) and pays ~1 s of Worker cold start; with no idle, session 0 disposes right
+// after its PREFLIGHT_IN_FLIGHT_MS turn, while session 1's own in-flight turn
+// (started ~1 s later) is still running. The barrier check verifies the overlap.
+const PREFLIGHT_IDLE_MS = 0;
 const SESSION_TIMEOUT_MS = 120_000;
 
 /** Adapter driving real processes, Workers, and the ownership cohort. */
@@ -147,7 +164,12 @@ export function createRealPreflightAdapter(options: { workDir: string; runId: st
 	const arm = createArm({ kind: "worker", rootDir: workerRoot, idleMs: PREFLIGHT_IDLE_MS, variant: "preflight", token, cohort });
 	const streamed = (index: number): boolean =>
 		arm.events.some(event => event.type === "workload" && event.sessionIndex === index && event.event === "streamed-text");
-	const disposed = (index: number): boolean => arm.sessions.get(index)?.disposedAt !== undefined;
+	const phaseAt = (index: number, phase: string): number | undefined => {
+		for (const event of arm.events) {
+			if (event.type === "phase" && event.sessionIndex === index && event.phase === phase) return event.t;
+		}
+		return undefined;
+	};
 	const failed = (index: number): string | undefined => arm.sessions.get(index)?.error;
 
 	return {
@@ -164,14 +186,14 @@ export function createRealPreflightAdapter(options: { workDir: string; runId: st
 			return { pid: root.pid, incarnation: root.incarnation };
 		},
 		async waitFirstDisposed() {
-			await arm.waitFor(() => disposed(0) || failed(0) !== undefined, SESSION_TIMEOUT_MS);
-			if (failed(0)) throw new Error(`session 0 failed: ${failed(0)}`);
-			const barrier = { survivorStreaming: streamed(1), survivorDisposed: disposed(1) };
-			// `done` (carrying the evidence directory) follows `disposed`; closing the
-			// session before it is relayed would lose session 0's evidence.
+			// Settled means `done` (with the evidence directory) arrived; closing the
+			// session before that would lose session 0's evidence.
 			await arm.waitDisposed([0], SESSION_TIMEOUT_MS);
 			if (failed(0)) throw new Error(`session 0 failed: ${failed(0)}`);
-			return barrier;
+			const disposingAt = phaseAt(0, "disposing");
+			const disposedAt = phaseAt(0, "disposed");
+			if (disposingAt === undefined || disposedAt === undefined) throw new Error("session 0 dispose window was not observed");
+			return { disposingAt, disposedAt };
 		},
 		closeSession: index => arm.closeSession(index),
 		async waitSurvivor() {
@@ -183,6 +205,10 @@ export function createRealPreflightAdapter(options: { workDir: string; runId: st
 			const error = failed(1);
 			return error ? { ok: false, error } : { ok: true };
 		},
+		survivorTurns: () =>
+			arm.events
+				.filter((event): event is Extract<RunnerEvent, { type: "turn" }> => event.type === "turn" && event.sessionIndex === 1)
+				.map(event => ({ startedAt: event.startedAt, endedAt: event.endedAt })),
 		hostIdentity(pid) {
 			const observation = observeProcessIncarnation(pid);
 			return observation.status === "present" ? observation : { status: observation.status };

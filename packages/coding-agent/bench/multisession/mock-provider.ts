@@ -14,7 +14,6 @@ export interface BenchMockProvider {
 	child: MockModel;
 	rootModel: Model;
 	childModel: Model;
-	requestLines: string[];
 	dispose(): void;
 	register(): void;
 }
@@ -154,7 +153,9 @@ function rootResponse(context: Context): MockResponse {
 		return respond([toolResponse(turn.action)]);
 	}
 	if (turn.action.kind === "text" || turn.action.kind === "compaction") {
-		return respond([turn.action.text]);
+		const response = respond([turn.action.text]);
+		// A scripted latency keeps this turn in flight (preflight close barrier).
+		return turn.delayMs ? { ...response, delayMs: turn.delayMs } : response;
 	}
 	return respond([`bench ${turn.key} tool complete`]);
 }
@@ -223,14 +224,19 @@ export function createBenchMockProviderDefinition(
 }
 
 /** Create a provider instance scoped to one session and register its child model for task resolution. */
-export function createBenchMockProvider(registry: ModelRegistry, sessionIndex: number): BenchMockProvider {
-	const requestLines: string[] = [];
+export function createBenchMockProvider(
+	registry: ModelRegistry,
+	sessionIndex: number,
+	requestsPath: string,
+): BenchMockProvider {
+	const requestWriter = Bun.file(requestsPath).writer();
 	const sourceId = `${SOURCE_PREFIX}${sessionIndex}`;
 	const originalSyncExtensionSources = registry.syncExtensionSources;
 	registry.syncExtensionSources = activeSourceIds =>
 		originalSyncExtensionSources.call(registry, [...activeSourceIds, sourceId]);
-	const definition = createBenchMockProviderDefinition(sessionIndex, line => {
-		requestLines.push(line);
+	const definition = createBenchMockProviderDefinition(sessionIndex, async line => {
+		await requestWriter.write(`${line}\n`);
+		await requestWriter.flush();
 	});
 	const register = (): void => {
 		registry.registerProvider(PROVIDER, definition.config, sourceId);
@@ -241,6 +247,7 @@ export function createBenchMockProvider(registry: ModelRegistry, sessionIndex: n
 	const rootModel = registry.find(PROVIDER, definition.root.id);
 	const childModel = registry.find(PROVIDER, definition.child.id);
 	if (!rootModel || !childModel) {
+		requestWriter.end();
 		registry.syncExtensionSources = originalSyncExtensionSources;
 		registry.clearSourceRegistrations(sourceId);
 		throw new Error("bench-mock provider registration did not expose both root and child models");
@@ -251,9 +258,9 @@ export function createBenchMockProvider(registry: ModelRegistry, sessionIndex: n
 		child: definition.child,
 		rootModel,
 		childModel,
-		requestLines,
 		register,
 		dispose: () => {
+			requestWriter.end();
 			registry.syncExtensionSources = originalSyncExtensionSources;
 			registry.clearSourceRegistrations(sourceId);
 		},

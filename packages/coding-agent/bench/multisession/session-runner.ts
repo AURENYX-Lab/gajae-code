@@ -76,7 +76,7 @@ function observedCompactionCount(session: AgentSession): number {
 	return session.sessionManager.getBranch().filter(entry => entry.type === "compaction").length;
 }
 
-function setAllowlistedEnvironment(): () => void {
+export function setAllowlistedEnvironment(): () => void {
 	const original = new Map(Object.entries(process.env));
 	for (const key of Object.keys(process.env)) delete process.env[key];
 	for (const key of RunnerBootstrap.environment.allowlist) {
@@ -122,6 +122,7 @@ export async function runSession(opts: {
 	const agentDir = path.join(sessionRoot, "agent");
 	const cwd = path.join(sessionRoot, "project");
 	const evidenceDir = path.join(sessionRoot, "evidence");
+	const requestsPath = path.join(evidenceDir, "requests.jsonl");
 	const sessionDataDir = path.join(sessionRoot, "sessions");
 	const workloadVariant = opts.workloadVariant ?? "full";
 	const script = buildWorkloadScript(workloadVariant);
@@ -131,7 +132,6 @@ export async function runSession(opts: {
 	const observed = new Set<WorkloadEventKind>();
 	const pendingTools = new Map<string, ToolStart>();
 	let pendingTaskJobId: string | undefined;
-	let requestLines: string[] = [];
 	let sessionManager: SessionManager | undefined;
 	let session: AgentSession | undefined;
 	let authStorage: AuthStorage | undefined;
@@ -179,6 +179,7 @@ export async function runSession(opts: {
 			fs.mkdir(evidenceDir, { recursive: true }),
 			fs.mkdir(sessionDataDir, { recursive: true }),
 		]);
+		await Bun.write(requestsPath, "");
 		await Bun.write(path.join(cwd, "workload.txt"), "bench-grep-marker\nsecond deterministic workload line\n");
 
 		sessionManager = SessionManager.create(cwd, SessionManager.explicitDestination(sessionDataDir));
@@ -234,8 +235,7 @@ export async function runSession(opts: {
 				agentDir,
 				automaticRefresh: false,
 			});
-			provider = createBenchMockProvider(modelRegistry, opts.sessionIndex);
-			requestLines = provider.requestLines;
+			provider = createBenchMockProvider(modelRegistry, opts.sessionIndex, requestsPath);
 			if (!(await modelRegistry.getApiKey(provider.root))) {
 				throw new Error("bench-mock root API key did not resolve after bootstrap.");
 			}
@@ -433,13 +433,17 @@ export async function runSession(opts: {
 		timingLines.push(jsonLine(heapEvent));
 
 		try {
+			provider?.dispose();
+		} catch (error) {
+			fail(error);
+		}
+		try {
 			if (transcriptSource && (await Bun.file(transcriptSource).exists())) {
 				await Bun.write(path.join(evidenceDir, "transcript.jsonl"), await Bun.file(transcriptSource).text());
 			} else {
 				await Bun.write(path.join(evidenceDir, "transcript.jsonl"), "");
 			}
 			await Promise.all([
-				Bun.write(path.join(evidenceDir, "requests.jsonl"), appendLines(requestLines)),
 				Bun.write(path.join(evidenceDir, "tools.jsonl"), appendLines(toolLines)),
 				Bun.write(path.join(evidenceDir, "events.jsonl"), appendLines(eventLines)),
 				Bun.write(path.join(evidenceDir, "timing.jsonl"), appendLines(timingLines)),
@@ -463,11 +467,6 @@ export async function runSession(opts: {
 		}
 
 		try {
-			provider?.dispose();
-		} catch (error) {
-			fail(error);
-		}
-		try {
 			authStorage?.close();
 		} catch (error) {
 			fail(error);
@@ -476,7 +475,7 @@ export async function runSession(opts: {
 	}
 
 	if (failed) throw failure;
-	emit({ type: "done", sessionIndex: opts.sessionIndex, evidenceDir });
+	eventLines.push(jsonLine({ type: "done", sessionIndex: opts.sessionIndex, evidenceDir }));
 	await Bun.write(path.join(evidenceDir, "events.jsonl"), appendLines(eventLines));
 	return { evidenceDir };
 }

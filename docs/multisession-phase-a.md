@@ -38,14 +38,20 @@ Both arms run the same `session-runner.ts`, `bootstrap.ts` manifest, `workload.t
 - Each arm root blocks on a stdin `ack` until the driver has registered its pid and incarnation (`channel.ts`).
 - Ownership comes from an inherited `GJC_BENCH_COHORT` env token, read for every same-user process via `KERN_PROCARGS2`. The Darwin unique-id ancestry tracker is secondary evidence.
 - XNU redacts the environment of many same-user processes (platform binaries such as `/bin/sh`, `sleep`), so most of them are `argv-only`. For these, ownership is settled from the original-parent chain (`PROC_PIDUNIQIDENTIFIERINFO` `p_puniqueid`, which survives reparenting to launchd). The process is owned if the chain reaches the driver, a root, or a tracked descendant. It is excluded if the chain reaches launchd or a live pre-run process. A process that started before the run is also excluded.
-- A process whose ownership still cannot be proven (for example, its original parent already exited) is `unresolved-ownership` and makes the sample incomplete. A process that the OS confirms has exited before its footprint read holds no memory, so it contributes nothing either way.
+- A process whose ownership still cannot be proven (for example, its original parent already exited) is `unresolved-ownership` and makes the sample incomplete. A process that the OS confirms has exited before its footprint read holds no memory, so it contributes nothing either way. An identity that first reads as unknown is re-read once after 20 ms, so a process caught mid-exit is not mistaken for a live unresolved one. The final orphan check counts only processes still alive, and its receipt records whether the process enumeration itself completed.
 
 **Totals.** `gatedTotal = Σ owned phys_footprint (driver counted once) + B`.
 
 **Eligibility (zero tolerance).**
 - A sample is complete only when every member read and every ownership decision resolved.
 - A rep is valid only when every scheduled 1 Hz tick in its gated window, its post-close teardown sample, and its marker visibility self-check are complete.
+- The steady-state (gated) window runs from 2 s after the last session is ready until the first session starts disposing. It includes the scripted idle between workload phases: mock-provider turns finish in milliseconds, so a 1 Hz sampler cannot isolate them.
 - If an arm has fewer than 5 valid reps, the verdict is `insufficient-evidence`, never pass.
+- B is eligible only from at least 5 complete 30-sample (1 Hz × 30 s) repetitions; shortened `--seconds` baselines are diagnostic only.
+- Churn is eligible only when all 20 Worker cycles finish with no session failure and every post-close sample is complete.
+- An orphan receipt that could not list processes or read identities is incomplete, which makes the orphan gate `insufficient-evidence`.
+- `--report` refuses to combine run directories whose `environment.json` pins differ (source SHA, dirty flag, workload/bootstrap digest, Bun, macOS, CPU, contract digest).
+- When every gate passes, the verdict is `pass` only if characterization is `equal`. Otherwise it is `pass (isolation-model opportunity evidence only)`, per `capabilityLabelRule.claimRule`.
 
 ## Gates
 
@@ -61,7 +67,7 @@ The gates are pre-registered in `bench/multisession/preregistration.json`. `cont
 | Teardown | host footprint 10 s after the 5th close ≤ B × 1.15 |
 | Churn | 20 create×5/close×5 cycles on one resident host; cycle 20 ≤ cycle 1 × 1.10 |
 | Orphans | zero owned or unresolved processes after shutdown, both arms |
-| Fidelity | normalized transcript / request / tool / event evidence equal across arms (`normalize.ts`) |
+| Fidelity | every Worker session's normalized transcript / request / tool / event evidence equals the same (N, rep, session) standalone session; a missing counterpart is a difference (`normalize.ts`) |
 
 **Deviation from RFC A.3:** both arms use the default Bun configuration. `--smol` is not measured.
 
@@ -69,7 +75,8 @@ The gates are pre-registered in `bench/multisession/preregistration.json`. `cont
 
 ## Preflight
 
-`preflight.ts` runs two Workers in one host on the shortened native-backed script (bash + grep). Session 1 starts once session 0 is streaming. The 3 s inter-phase idle keeps session 0 mid-script while session 1 pays its Worker cold start. Session 0 must dispose while session 1 is streaming (the close barrier), and it is then closed. The preflight passes only if all of these hold:
+`preflight.ts` runs two Workers in one host on the shortened native-backed script: bash, grep, then one model turn the mock provider holds in flight for 4 s. Session 1 starts once session 0 has streamed text and then pays a Worker cold start (~1 s), so its in-flight turn begins about 1 s after session 0's. Session 0 then disposes while session 1's in-flight turn is still running. The close barrier is judged from recorded evidence, not a sampled flag: some session 1 `turn` interval must span session 0's whole `disposing`→`disposed` window. Session 0 is then closed. The preflight passes only if all of these hold:
+- The close barrier holds.
 - Worker 1 completes.
 - Both evidence sets equal a standalone run of the same script.
 - The host pid and incarnation are unchanged.

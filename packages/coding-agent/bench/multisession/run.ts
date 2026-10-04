@@ -42,6 +42,7 @@ import {
 	benchNow,
 	type ChurnRecord,
 	type CohortSample,
+	type OrphanReceipt,
 	type RepRecord,
 	type RunnerEvent,
 } from "./types";
@@ -266,17 +267,26 @@ export async function runChurn(options: { kind: ArmKind; cycles: number; runId: 
 	const arm = createArm({ kind: options.kind, rootDir, idleMs: 0, variant: "full", token, cohort });
 	const cycleSamples: CohortSample[] = [];
 	const hostFootprints: Array<number | null> = [];
+	const cycleErrors: string[][] = [];
+	let completedCycles = 0;
 	try {
 		for (let cycle = 0; cycle < options.cycles; cycle += 1) {
 			const indices = Array.from({ length: 5 }, (_, slot) => cycle * 5 + slot);
 			arm.createSessions(indices);
 			await arm.waitDisposed(indices, SESSION_TIMEOUT_MS);
+			cycleErrors.push(
+				indices.flatMap(index => {
+					const error = arm.sessions.get(index)?.error;
+					return error === undefined ? [] : [`session ${index}: ${error}`];
+				}),
+			);
 			for (const index of indices) await arm.closeSession(index);
 			await Bun.sleep(10_000);
 			cohort.scanOwnership();
 			const sample = cohort.sample(cycle, `post-close-cycle-${cycle + 1}`);
 			cycleSamples.push(sample);
 			hostFootprints.push(hostFootprint(sample, options.kind));
+			completedCycles += 1;
 			progress(`${label} cycle ${cycle + 1}/${options.cycles} armTotal=${sample.armTotal ?? "incomplete"}`);
 		}
 	} catch (error) {
@@ -287,7 +297,14 @@ export async function runChurn(options: { kind: ArmKind; cycles: number; runId: 
 	}
 	await Bun.sleep(1_000);
 	cohort.scanOwnership();
-	const record: ChurnRecord = { arm: options.kind, cycleSamples, hostFootprints, orphans: cohort.orphanCheck() };
+	const record: ChurnRecord = {
+		arm: options.kind,
+		cycleSamples,
+		hostFootprints,
+		cycleErrors,
+		completedCycles,
+		orphans: cohort.orphanCheck(),
+	};
 	cohort.close();
 	await writeJson(path.join(options.runDir, `churn-${options.kind}.json`), record);
 	return record;
@@ -312,7 +329,7 @@ export interface SanityArmSummary {
 	errors: string[];
 	turnLatencyMs: number[];
 	peakArmFootprint: number | null;
-	orphans: { owned: number[]; unresolved: number[] };
+	orphans: OrphanReceipt;
 }
 
 export type SanitySummary =
@@ -394,6 +411,39 @@ function evidenceDirs(rep: RepRecord): Map<number, string> {
 	return dirs;
 }
 
+/** Environment pins that must be identical across every report operand. */
+const PROVENANCE_PINS = [
+	"sourceSha",
+	"dirty",
+	"workloadDigest",
+	"bootstrapDigest",
+	"bunVersion",
+	"osVersion",
+	"cpu",
+	"contractDigest",
+] as const;
+
+/**
+ * Every operand (reps, churn, B, characterization) is read from its run
+ * directory's environment.json; operands from different source, configuration,
+ * Bun, or machine pins are never combined into one report.
+ */
+export async function assertConsistentProvenance(files: string[]): Promise<void> {
+	const pinsByRun = new Map<string, string>();
+	for (const file of files) {
+		const runDir = path.dirname(file);
+		if (pinsByRun.has(runDir)) continue;
+		const environment = await readJsonIfExists<Record<string, unknown>>(path.join(runDir, "environment.json"));
+		if (!environment) throw new Error(`Report operand ${file} has no environment.json pins`);
+		pinsByRun.set(runDir, JSON.stringify(PROVENANCE_PINS.map(pin => [pin, environment[pin] ?? null])));
+	}
+	const distinct = new Set(pinsByRun.values());
+	if (distinct.size > 1) {
+		const lines = [...pinsByRun].map(([runDir, pins]) => `${path.basename(runDir)}: ${pins}`);
+		throw new Error(`Report operands have inconsistent provenance pins:\n${lines.join("\n")}`);
+	}
+}
+
 export async function buildReport(dir: string): Promise<{ markdown: string; fidelityDiffs: string[] }> {
 	const contract = await loadContract();
 	const files = await collectJson(dir);
@@ -402,6 +452,7 @@ export async function buildReport(dir: string): Promise<{ markdown: string; fide
 	const churn: { standalone?: ChurnRecord; worker?: ChurnRecord } = {};
 	let broker: BrokerBaselineRecord = { reps: [], b: null };
 	let characterization: "equal" | "differs" | "unavailable" = "unavailable";
+	await assertConsistentProvenance(files.map(({ file }) => file));
 	for (const { file, value } of files) {
 		const name = path.basename(file);
 		if (name.startsWith("rep-")) {
@@ -420,21 +471,30 @@ export async function buildReport(dir: string): Promise<{ markdown: string; fide
 	// of the same (n, rep) standalone run after normalization.
 	const fidelityDiffs: string[] = [];
 	let compared = 0;
-	for (const workerRep of worker) {
-		const standaloneRep = reps.get(`standalone:${workerRep.n}:${workerRep.rep}`);
-		if (!standaloneRep) continue;
+	// Every gated repetition of either arm needs a matched counterpart and every
+	// session index needs evidence on both sides; anything missing is a difference.
+	const pairKeys = new Set([...reps.values()].map(rep => `${rep.n}:${rep.rep}`));
+	for (const key of [...pairKeys].sort()) {
+		const [n, repIndex] = key.split(":").map(Number);
+		const standaloneRep = reps.get(`standalone:${key}`);
+		const workerRep = reps.get(`worker:${key}`);
+		if (!standaloneRep || !workerRep) {
+			fidelityDiffs.push(`n${n} r${repIndex}: no ${standaloneRep ? "worker" : "standalone"} repetition to compare`);
+			continue;
+		}
 		const a = evidenceDirs(standaloneRep);
 		const b = evidenceDirs(workerRep);
-		for (const [index, workerDir] of b) {
+		for (let index = 0; index < n; index += 1) {
 			const standaloneDir = a.get(index);
-			if (!standaloneDir) {
-				fidelityDiffs.push(`n${workerRep.n} r${workerRep.rep} s${index}: no standalone evidence`);
+			const workerDir = b.get(index);
+			if (!standaloneDir || !workerDir) {
+				fidelityDiffs.push(`n${n} r${repIndex} s${index}: no ${standaloneDir ? "worker" : "standalone"} evidence`);
 				continue;
 			}
 			const comparison = await compareEvidence(standaloneDir, workerDir);
 			compared += 1;
 			if (!comparison.equal)
-				fidelityDiffs.push(...comparison.diffs.slice(0, 5).map(diff => `n${workerRep.n} r${workerRep.rep} s${index}: ${diff}`));
+				fidelityDiffs.push(...comparison.diffs.slice(0, 5).map(diff => `n${n} r${repIndex} s${index}: ${diff}`));
 		}
 	}
 	const report = evaluate({

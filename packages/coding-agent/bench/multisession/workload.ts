@@ -17,6 +17,8 @@ export interface WorkloadTurn {
 	phase: string;
 	prompt: string;
 	action: WorkloadAction;
+	/** Model response latency for this turn (mock provider `delayMs`); keeps a turn in flight. */
+	delayMs?: number;
 }
 
 const COMPACTION_PAYLOAD = `BENCH_COMPACTION_PAYLOAD ${"The deterministic compaction turn retains this payload. ".repeat(2_000)}`;
@@ -97,6 +99,9 @@ const FULL_SCRIPT: readonly WorkloadTurn[] = [
 	},
 ];
 
+/** Duration of the preflight's in-flight turn; see preflight.ts for the timing budget. */
+export const PREFLIGHT_IN_FLIGHT_MS = 4_000;
+
 const PREFLIGHT_SCRIPT: readonly WorkloadTurn[] = [
 	{
 		key: "preflight-bash",
@@ -109,6 +114,15 @@ const PREFLIGHT_SCRIPT: readonly WorkloadTurn[] = [
 		phase: "preflight-tools",
 		prompt: "BENCH_PREFLIGHT_TOOL:grep",
 		action: { kind: "tool", name: "search", arguments: { pattern: "bench-grep-marker", paths: ["workload.txt"] } },
+	},
+	{
+		// A long in-flight model response: the sibling session is mid-turn while the
+		// first session disposes (preflight close barrier).
+		key: "preflight-stream",
+		phase: "preflight-tools",
+		prompt: "BENCH_PREFLIGHT_TEXT:in-flight",
+		action: { kind: "text", text: "bench preflight in-flight response" },
+		delayMs: PREFLIGHT_IN_FLIGHT_MS,
 	},
 ];
 

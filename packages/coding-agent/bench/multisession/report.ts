@@ -11,7 +11,11 @@ import type { PreregistrationContract } from "./contract";
 
 export type Characterization = "equal" | "differs" | "unavailable";
 export type CapabilityLabel = "full-capability" | "isolation-model opportunity evidence";
-export type OverallVerdict = "pass" | `stop at Phase A: ${string}` | "insufficient-evidence";
+export type OverallVerdict =
+	| "pass"
+	| "pass (isolation-model opportunity evidence only)"
+	| `stop at Phase A: ${string}`
+	| "insufficient-evidence";
 
 export interface ReportGate {
 	name: string;
@@ -188,11 +192,15 @@ export function evaluate(input: {
 	});
 
 	const failedGate = gates.find(gate => gate.verdict === "fail");
+	// capabilityLabelRule.claimRule: only an equal real-host characterization permits
+	// an all-gates-pass claim; otherwise passing gates are opportunity evidence only.
 	const verdict: OverallVerdict = failedGate
 		? `stop at Phase A: ${failedGate.name}`
 		: gates.some(gate => gate.verdict === "insufficient-evidence")
 			? "insufficient-evidence"
-			: "pass";
+			: input.characterization === "equal"
+				? "pass"
+				: "pass (isolation-model opportunity evidence only)";
 	return {
 		verdict,
 		capabilityLabel: input.characterization === "equal" ? "full-capability" : "isolation-model opportunity evidence",
@@ -265,6 +273,9 @@ function isSampleComplete(sample: CohortSample): boolean {
 	let driverTotal = 0;
 	const identities = new Set<string>();
 	for (const member of sample.members) {
+		// Same policy as Cohort.sample: an OS-confirmed exit between ownership scan and
+		// read holds no memory, so it contributes nothing whoever owned it.
+		if (member.read.status === "absent" && member.reason !== "driver") continue;
 		if (member.reason === "unresolved-ownership" || member.read.status !== "ok" || !validFootprint(member.read.physFootprint)) return false;
 		if (member.pid !== member.read.pid || member.incarnation !== member.read.incarnation) return false;
 		const identity = `${member.read.pid}:${member.read.incarnation}`;
@@ -284,9 +295,18 @@ function eligibleReps(repetitions: RepRecord[], eligibility: RepEligibility[], c
 	return repetitions.filter(rep => rep.n === concurrency && validKeys.has(`${rep.arm}:${rep.n}:${rep.rep}`));
 }
 
+/** Registered B observation length: 30 one-second samples per repetition. */
+export const BROKER_BASELINE_SECONDS = 30;
+
 function validBrokerBaseline(broker: BrokerBaselineRecord, minimum: number): number | null {
 	if (broker.b === null || !validFootprint(broker.b)) return null;
-	const complete = broker.reps.filter(rep => rep.complete && rep.samples.length > 0 && rep.samples.every(sample => sample !== null && validFootprint(sample)));
+	// Shortened diagnostic baselines (--seconds < 30) are never eligible.
+	const complete = broker.reps.filter(
+		rep =>
+			rep.complete &&
+			rep.samples.length >= BROKER_BASELINE_SECONDS &&
+			rep.samples.every(sample => sample !== null && validFootprint(sample)),
+	);
 	return complete.length >= minimum ? broker.b : null;
 }
 
@@ -363,10 +383,17 @@ function activeWindow(events: RunnerEvent[], sessionCount: number): { start: num
 
 function evaluateChurn(churn: ChurnRecord | undefined, cycles: number, maximumGrowth: number): Measurement {
 	if (!churn) return { value: null, detail: "Churn record is missing" };
-	if (churn.cycleSamples.length < cycles) return { value: null, detail: `Expected ${cycles} cycle samples` };
-	const first = churn.cycleSamples[0]!;
-	const last = churn.cycleSamples[cycles - 1]!;
-	if (!isSampleComplete(first) || !isSampleComplete(last)) return { value: null, detail: "Cycle-1 or cycle-20 post-close sample is incomplete" };
+	if (churn.completedCycles < cycles || churn.cycleSamples.length < cycles || churn.cycleErrors.length < cycles) {
+		return { value: null, detail: `Expected ${cycles} completed cycles, got ${churn.completedCycles}` };
+	}
+	// Every cycle must run its full workload cleanly and sample completely; a cycle
+	// that failed or sampled partially means the growth ratio measures something else.
+	const failedCycle = churn.cycleErrors.slice(0, cycles).findIndex(errors => errors.length > 0);
+	if (failedCycle >= 0) {
+		return { value: null, detail: `Cycle ${failedCycle + 1} had session failures: ${churn.cycleErrors[failedCycle]!.join("; ")}` };
+	}
+	const incompleteCycle = churn.cycleSamples.slice(0, cycles).findIndex(sample => !isSampleComplete(sample));
+	if (incompleteCycle >= 0) return { value: null, detail: `Cycle ${incompleteCycle + 1} post-close sample is incomplete` };
 	const firstHost = churn.hostFootprints[0];
 	const lastHost = churn.hostFootprints[cycles - 1];
 	if (firstHost === undefined || lastHost === undefined || firstHost === null || lastHost === null || !validFootprint(firstHost) || !validFootprint(lastHost) || firstHost === 0) {
@@ -397,6 +424,22 @@ function evaluateOrphans(
 			worker: null,
 			threshold: "Zero owned and unresolved-ownership orphans in both arms and churn records",
 			detail: `At least ${minimum} valid N=${concurrency} reps per arm and both churn orphan receipts are required.`,
+		};
+	}
+	const receipts = [
+		...standalone.filter(rep => rep.n === concurrency).map(rep => rep.orphans),
+		...worker.filter(rep => rep.n === concurrency).map(rep => rep.orphans),
+		churn.standalone.orphans,
+		churn.worker.orphans,
+	];
+	if (receipts.some(receipt => !receipt.complete)) {
+		return {
+			name: "orphans",
+			verdict: "insufficient-evidence",
+			standalone: null,
+			worker: null,
+			threshold: "Zero owned and unresolved-ownership orphans in both arms and churn records",
+			detail: "At least one orphan receipt comes from an incomplete process enumeration and cannot prove zero.",
 		};
 	}
 	const orphanCount = (repetitions: RepRecord[]): number => repetitions
