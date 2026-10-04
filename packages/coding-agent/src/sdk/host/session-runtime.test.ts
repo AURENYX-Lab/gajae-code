@@ -5139,6 +5139,64 @@ test("SDK turn.steer preserves its expected run token and propagates a stale-run
 });
 
 describe("post-acceptance invocation terminalization", () => {
+	test("preserves external prompt correlation across a retryable provider error", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-retryable-provider-correlation-"));
+		let harness: InvocationHarness | undefined;
+		try {
+			harness = await invocationHarness("retryable-provider-correlation", cwd, {
+				sendUserMessage: async (_content, options) => {
+					await options?.onPreflightAcceptCommit?.();
+					await neverSettlingPromise();
+				},
+			});
+			const accepted = await harness.control("turn.prompt", {
+				text: "recover after a provider overload",
+				clientRef: "retryable-provider-correlation",
+			});
+			expect(accepted.ok).toBe(true);
+			const correlation = {
+				commandId: accepted.result?.commandId,
+				turnId: accepted.result?.turnId,
+			};
+			const retryScope = {};
+
+			await harness.emit("agent_start", { lifecycleScope: retryScope });
+			await harness.emit("agent_end", {
+				messages: [
+					{
+						role: "assistant",
+						stopReason: "error",
+						errorStatus: 503,
+						transportFailure: { kind: "transport", providerCode: "server_is_overloaded" },
+					},
+				],
+			});
+
+			await harness.emit("agent_start", { lifecycleScope: retryScope });
+			await harness.emit("agent_end", {
+				messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "recovered" }] }],
+			});
+
+			const terminal = await settledStatus(harness, "turn.result", { kind: "prompt", ...correlation });
+			expect(terminal).toMatchObject({
+				status: "terminal_ok",
+				commandId: correlation.commandId,
+				turnId: correlation.turnId,
+				outcome: { kind: "completed" },
+			});
+			expect(harness.broadcasts.filter(frame => frame.kind === "agent_end").at(-1)).toMatchObject({
+				payload: {
+					commandId: correlation.commandId,
+					turnId: correlation.turnId,
+					outcome: { kind: "completed" },
+				},
+			});
+		} finally {
+			await harness?.stop();
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
 	test.each([
 		{ status: 402, code: "provider_http_402" },
 		{ status: 429, code: "provider_http_429" },
