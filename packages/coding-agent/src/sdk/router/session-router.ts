@@ -25,7 +25,11 @@ import {
 	readSdkSessionEndpoint,
 	type SdkSessionEndpoint,
 } from "../client/discovery";
-import { SESSION_HOST_OBSERVER_CAPABILITY, TURN_STREAM_CAPABILITY } from "../host/host";
+import {
+	POSITIONED_NOTIFICATION_EFFECTS_CAPABILITY,
+	SESSION_HOST_OBSERVER_CAPABILITY,
+	TURN_STREAM_CAPABILITY,
+} from "../host/host";
 import {
 	type ActivatedPreparedSession,
 	type PreparedSessionActivationClient,
@@ -291,6 +295,13 @@ export interface SessionRouterOptions {
 	attachFilter?: (sessionId: string) => boolean;
 	/** Marks default SDK clients as notification-only observers; demanding by default. */
 	observer?: boolean;
+	/**
+	 * Negotiates positioned-only notification effects on default SDK clients, so the
+	 * host stops sending them the raw native copy of frames whose positioned
+	 * envelope already reached them. Only notification-effect publishers opt in;
+	 * ordinary SDK observers keep both public surfaces.
+	 */
+	positionedNotificationEffects?: boolean;
 	deps?: SessionRouterDeps;
 	/** Runtime-specific identity validation; Router supplies a conservative fallback. */
 	correlateFrame?: SessionRouterFrameCorrelator;
@@ -619,6 +630,7 @@ export class SessionRouter {
 	readonly #sessionIds: ReadonlySet<string> | undefined;
 	readonly #attachFilter: ((sessionId: string) => boolean) | undefined;
 	readonly #observer: boolean;
+	readonly #positionedNotificationEffects: boolean;
 	readonly #deps: SessionRouterDeps;
 	readonly #correlateFrame: SessionRouterFrameCorrelator;
 	readonly #index: SessionIndex;
@@ -662,6 +674,7 @@ export class SessionRouter {
 		this.#sessionIds = options.sessionIds === undefined ? undefined : new Set(options.sessionIds);
 		this.#attachFilter = options.attachFilter;
 		this.#observer = options.observer === true;
+		this.#positionedNotificationEffects = options.positionedNotificationEffects === true;
 		this.#deps = options.deps ?? {};
 		this.#correlateFrame = options.correlateFrame ?? fallbackCorrelation;
 		this.#index = this.#deps.createIndex?.(options.agentDir) ?? new DefaultSessionIndex(options.agentDir);
@@ -1530,9 +1543,13 @@ export class SessionRouter {
 				endpointMtimeMs,
 			});
 		} else {
+			const capabilities = [
+				...(this.#observer ? [SESSION_HOST_OBSERVER_CAPABILITY, TURN_STREAM_CAPABILITY] : []),
+				...(this.#positionedNotificationEffects ? [POSITIONED_NOTIFICATION_EFFECTS_CAPABILITY] : []),
+			];
 			const defaultClient = new SdkClient(endpoint.url, endpoint.token, {
 				...ACP_SESSION_RECONNECT,
-				...(this.#observer ? { capabilities: [SESSION_HOST_OBSERVER_CAPABILITY, TURN_STREAM_CAPABILITY] } : {}),
+				...(capabilities.length > 0 ? { capabilities } : {}),
 			});
 			transport = defaultClient;
 			connection = defaultClient.connect().then(() => defaultClient);
