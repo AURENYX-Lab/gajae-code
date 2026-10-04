@@ -422,6 +422,34 @@ activity, or an earlier pending claim.
 
 Reconciliation state survives client disconnect/reconnect. With the session-private durable store (`.sdk-reconciliation/`), accepted and terminal prompt records also survive **GJC session-process restart** for the same session identity within capacity, subject to crash-consistent fsync. An ordinary non-terminal prompt record at restart finalizes its pending outcome and receipt state. A prompt with the explicit `deadlineRecoveryPending` marker is the exception: it remains `accepted` or `in_flight`, and its staged pending outcome is not exposed by Q26 while the SDK retains a durable recovery owner. A process restart does not recreate a missing exact-run/tool observation, so the pending outcome stays private until a real terminal event or new settlement evidence arrives. If ownership or settlement remains uncertain, the record stays nonterminal and recoverable instead of being converted into a synthetic deadline failure. A stopped prompt without receipt evidence becomes `terminal_ok + missing`; failed prompt or skill settlement without body evidence becomes `unknown`. Eviction or absence still returns honest `unknown`; that means the prior outcome is unknowable, not that execution did not occur. Active records are capped at 128 per kind and are never aged into terminal. Terminal records are capped at 256 per kind and evicted oldest-terminal first, with no age-based eviction. Reconciliation stores no prompt, transcript, credential, or provider-response body.
 
+### Request-owned queue cancellation and execution deadlines
+
+SDK-only ordinary abort cancels a snapshot of its authenticated requester's
+already-admitted preflights, including a prompt accepted durably but not yet
+started. It cancels those per-request controllers without borrowing another
+run's abort authority; foreign admissions and later pipelined requests are not
+part of the snapshot. A local `aborted: true` acknowledges cancellation, not a
+new durable execution terminal. For already-accepted work, recover its original
+`clientRef` through `turn.result`; unconfirmed terminal persistence remains
+uncertain and never permits mutation replay.
+
+Before consumption, a prompt diverted into steering retains its own queue-removal
+capability; cancelling it must not abort unrelated active work. After consumption,
+its durable completion belongs to the exact consuming run and cancellation domain.
+A trusted natural terminal settles each joined accepted prompt with its own
+correlation. Confirmed queue removal settles only that submission, without waiting
+for an unrelated run. A deterministic cancellation receipt waits for that
+submission's durable terminal; held or failed persistence remains uncertain,
+including same-key replay. Retired queue authority cannot be reused to abort the
+root run.
+
+Confirmed queue residence suspends the terminal lease. Actual consumption or
+own-run promotion starts a fresh bounded lease, renewed only by attributable
+progress in the same consuming run and cancellation domain. Session teardown
+retires joined attribution; late predecessor progress or terminal events cannot
+adopt or settle a successor. Transport or delivery failure alone does not prove
+execution settled and does not retire a live unsettled execution owner.
+
 `turn.prompt` remains ordered and non-idempotent. Its envelope `idempotencyKey`
 does not replay a response or produce `idempotency_conflict`. A retained duplicate
 `clientRef` fails before execution with `client_ref_conflict`, but callers must not
