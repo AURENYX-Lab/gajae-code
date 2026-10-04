@@ -365,6 +365,18 @@ describe("hashline parser — block op syntax", () => {
 		expect(() => parseHashline(pl("orphan"))).toThrow(/payload line has no preceding/);
 	});
 
+	it("explains how to insert a blank line when an insert op has no payload", () => {
+		const op = `»${tag(1, "aaa")}`;
+		expect(() => parseHashline(`${op}\n`)).toThrow(`To insert a single blank line, put one empty line after "${op}"`);
+	});
+
+	it("explains an insert op whose inline text only echoes the anchored line", () => {
+		const op = `»${tag(1, "aaa")}`;
+		expect(() => parseHashline(`${op}|aaa\n`)).toThrow(
+			`repeats the anchored line's current content, so it was read as an anchor echo, not as new content. Put the lines to insert on the lines after "${op}".`,
+		);
+	});
+
 	it("leniently treats a bare blank line after « / » as an empty payload", () => {
 		const hash = computeLineHash(5, "aaa");
 		const anchor = { line: 5, hash };

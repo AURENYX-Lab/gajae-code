@@ -196,7 +196,7 @@ export const done = true;
   - `line N: range A..B ends before it starts.`
   - `line N: range A..B uses two different hashes for the same line.`
 - Missing payload for `»` / `«`:
-  - `line N: » and « operations require at least one verbatim payload line.`
+  - `line N: » and « operations require at least one verbatim payload line.` followed by a hint: how to insert a single blank line (one empty line after the op), or, when the op line's `|TEXT` only repeated the anchored line's content, that the text was read as an anchor echo and the new lines belong after the op.
 - Stray payload line:
   - `line N: payload line has no preceding », «, or ≔ operation.`
 - Unknown op:
