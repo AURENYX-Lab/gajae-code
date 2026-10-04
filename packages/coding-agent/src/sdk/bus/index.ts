@@ -111,6 +111,7 @@ import {
 	canDeliverSdkEvent,
 	createSdkSurfaceFactory,
 	masterAttestationForEffectiveHost,
+	POSITIONED_NOTIFICATION_EFFECTS_CAPABILITY,
 	reattestMasterSessionIdentity,
 	SESSION_HOST_OBSERVER_CAPABILITY,
 	type SessionSdkHost,
@@ -210,7 +211,6 @@ import {
 	ASK_SELECTED_ACK_CAPABILITY,
 	type EnsureDaemonResult,
 	ensureTelegramDaemonRunningDetailed,
-	POSITIONED_NOTIFICATION_EFFECTS_CAPABILITY,
 } from "./telegram-daemon";
 
 export type {
