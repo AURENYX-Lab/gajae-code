@@ -4,6 +4,27 @@ Phase A of [Discussion #6247](https://github.com/Yeachan-Heo/gajae-code/discussi
 
 This document describes the bench-only harness under `packages/coding-agent/bench/multisession/` that answers it. Nothing under `packages/*/src`, `crates/`, or `scripts/` is changed. The harness does not change how `gjc` runs sessions.
 
+## Result: stop at Phase A (memory)
+
+The gated runs used commit `f6edcaa5ac` with contract digest `678a6887…9334`. They ran on macOS 26.5.1, an Apple M5 Max, and Bun 1.4.0 in its default config.
+
+At N=5 there were 5 of 5 valid repetitions per arm. The Worker arm's gated steady mean is 1907.0 MB, against 1896.6 MB for standalone. The gate requires the Worker to be at most 50%; it is about 100.5%. The sampled peak also regresses by 5.6%.
+
+Each added session costs about 300 MB in both arms, because every Worker carries its own heap and module graph.
+
+Gate by gate:
+
+- **Memory:** fails (above).
+- **Cold readiness:** fails, 1236 ms against 1007 ms.
+- **Churn:** insufficient evidence. The Worker host crashed in cycle 4 with the Bun 1.4.0 `Worker`-thread `EXC_BREAKPOINT`.
+- **Latency, throughput, lag, teardown, orphans:** pass.
+
+Per the stop rule, Phases B–E are not admitted. Full results and disclosures: [discussion comment](https://github.com/Yeachan-Heo/gajae-code/discussions/6247#discussioncomment-18744865).
+
+**Known harness limitation: the fidelity gate is uninformative.** Two repetitions of the same arm differ at the same rate as standalone does against Worker. The reason is that the workload's async `task` completion notice can land before or after the next prompt.
+
+A future run needs a deterministic notice point, or a same-arm control that sets the noise floor. Without one of these, the fidelity gate cannot distinguish Worker effects from noise.
+
 ## Measurement boundary
 
 The two arms run identical work. The only difference between them is process vs Worker isolation.
