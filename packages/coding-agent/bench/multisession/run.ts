@@ -17,7 +17,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { parseArgs } from "node:util";
+import * as util from "node:util";
 import { createArm, type Arm } from "./arms";
 import { measureBrokerBaseline } from "./broker-baseline";
 import { characterize } from "./characterize";
@@ -33,7 +33,7 @@ import {
 import { compareEvidence } from "./normalize";
 import { createRealPreflightAdapter, decidePreflight, preflightRecord } from "./preflight";
 import { currentProvenance, type Provenance } from "./provenance";
-import { evaluate, renderMarkdown } from "./report";
+import { evaluate, hostResidueFootprint, renderMarkdown } from "./report";
 import { SANITY_UNAVAILABLE } from "./session-runner";
 import type { WorkloadVariant } from "./workload";
 import {
@@ -310,16 +310,8 @@ export async function runChurn(options: { kind: ArmKind; cycles: number; runId: 
 	return record;
 }
 
-/** Worker arm: the resident host's footprint. Standalone: owned residue beyond the driver. */
 function hostFootprint(sample: CohortSample, kind: ArmKind): number | null {
-	if (!sample.complete) return null;
-	const members = sample.members.filter(member => (kind === "worker" ? member.reason === "root" : member.reason !== "driver"));
-	let total = 0;
-	for (const member of members) {
-		if (member.read.status !== "ok") return null;
-		total += member.read.physFootprint;
-	}
-	return kind === "worker" && members.length === 0 ? null : total;
+	return sample.complete ? hostResidueFootprint(sample, kind) : null;
 }
 
 export interface SanityArmSummary {
@@ -435,7 +427,9 @@ export async function assertConsistentProvenance(files: string[]): Promise<void>
 		if (pinsByRun.has(runDir)) continue;
 		const environment = await readJsonIfExists<Record<string, unknown>>(path.join(runDir, "environment.json"));
 		if (!environment) throw new Error(`Report operand ${file} has no environment.json pins`);
-		pinsByRun.set(runDir, JSON.stringify(PROVENANCE_PINS.map(pin => [pin, environment[pin] ?? null])));
+		const missing = PROVENANCE_PINS.filter(pin => environment[pin] === undefined || environment[pin] === null);
+		if (missing.length > 0) throw new Error(`Report operand ${file} is missing provenance pins: ${missing.join(", ")}`);
+		pinsByRun.set(runDir, JSON.stringify(PROVENANCE_PINS.map(pin => [pin, environment[pin]])));
 	}
 	const distinct = new Set(pinsByRun.values());
 	if (distinct.size > 1) {
@@ -519,7 +513,7 @@ export async function buildReport(dir: string): Promise<{ markdown: string; fide
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-	const { values } = parseArgs({
+	const { values } = util.parseArgs({
 		args: process.argv.slice(2),
 		options: {
 			arm: { type: "string" },

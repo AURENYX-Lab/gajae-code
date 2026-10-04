@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { parseJsonl } from "./jsonl";
 
 const EVIDENCE_STREAMS = ["transcript.jsonl", "requests.jsonl", "tools.jsonl", "events.jsonl"] as const;
 const NORMALIZED_TIMESTAMP = "<timestamp>";
@@ -138,10 +139,9 @@ async function readNormalizedLines(
 	if (!(await file.exists())) throw new Error(`Missing evidence stream ${path.join(directory, stream)}`);
 	const contents = await file.text();
 	const tempRoot = await fs.realpath(path.resolve(directory, ".."));
-	return contents
-		.split("\n")
-		.filter(line => line.length > 0)
-		.map(line => normalizeEvidenceValue(JSON.parse(line) as unknown, tempRoot, undefined, ids));
+	return parseJsonl(contents, path.join(directory, stream)).map(value =>
+		normalizeEvidenceValue(value, tempRoot, undefined, ids),
+	);
 }
 
 function collectDiffs(left: unknown, right: unknown, currentPath: string, diffs: string[]): void {

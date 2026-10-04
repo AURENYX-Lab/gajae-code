@@ -12,10 +12,12 @@ function fakeAdapter(overrides: Partial<PreflightAdapter> = {}): PreflightAdapte
 		},
 		waitFirstDisposed: async () => {
 			calls.push("waitFirstDisposed");
-			return { disposingAt: 100, disposedAt: 120 };
+			return { disposingAt: 100 };
 		},
+		// Session 0 is confirmed terminated at t=150.
 		closeSession: async index => {
 			calls.push(`close:${index}`);
+			return 150;
 		},
 		waitSurvivor: async () => {
 			calls.push("waitSurvivor");
@@ -126,16 +128,19 @@ describe("bench multisession preflight decision", () => {
 		expect(unproven.checks.find(check => check.name === "zero-orphans")?.detail).toContain("process-list-failed");
 	});
 
-	test("the close barrier needs one survivor turn spanning the whole dispose window", async () => {
+	test("the close barrier needs one survivor turn spanning dispose start through confirmed termination", async () => {
 		// Survivor turns finished before session 0 disposed (survivor idle).
 		const idle = await decidePreflight(fakeAdapter({ survivorTurns: () => [{ startedAt: 10, endedAt: 99 }] }));
 		expect(failed(idle.checks)).toEqual(["close-barrier"]);
 		// A turn that starts inside the window does not span it.
 		const late = await decidePreflight(fakeAdapter({ survivorTurns: () => [{ startedAt: 110, endedAt: 300 }] }));
 		expect(failed(late.checks)).toEqual(["close-barrier"]);
-		// A turn that ends inside the window does not span it either.
-		const early = await decidePreflight(fakeAdapter({ survivorTurns: () => [{ startedAt: 50, endedAt: 115 }] }));
+		// A turn that ends after disposal but before the Worker is terminated does not span it.
+		const early = await decidePreflight(fakeAdapter({ survivorTurns: () => [{ startedAt: 50, endedAt: 130 }] }));
 		expect(failed(early.checks)).toEqual(["close-barrier"]);
+		// Exactly spanning [disposingAt, closedAt] passes.
+		const exact = await decidePreflight(fakeAdapter({ survivorTurns: () => [{ startedAt: 100, endedAt: 150 }] }));
+		expect(failed(exact.checks)).toEqual([]);
 	});
 
 	test("session 0 never completing fails the close barrier and the survivor check", async () => {

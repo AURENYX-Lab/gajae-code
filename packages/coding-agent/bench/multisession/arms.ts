@@ -47,7 +47,7 @@ export interface Arm {
 	roots(): Array<RootHandle<HostEvent>>;
 	createSessions(indices: number[]): void;
 	closeSession(sessionIndex: number): Promise<void>;
-	/** Resolves when every listed session reached `disposed` (or failed). */
+	/** Resolves when every listed session published `done` after persisting its evidence (or failed). */
 	waitDisposed(indices: number[], timeoutMs: number): Promise<void>;
 	/** Resolves when the predicate holds over received events. */
 	waitFor(predicate: () => boolean, timeoutMs: number): Promise<void>;
@@ -92,7 +92,7 @@ export function createArm(options: ArmOptions): Arm {
 
 	/**
 	 * Relay a root's events; when its stdout ends (root exited or crashed), every
-	 * session it hosted that never reached `disposed` is marked failed so waits
+	 * session it hosted that never published `done` is marked failed so waits
 	 * settle immediately instead of hanging until their timeout.
 	 */
 	const pump = async (root: RootHandle<HostEvent>, hosted: () => number[]): Promise<void> => {
@@ -134,8 +134,8 @@ export function createArm(options: ArmOptions): Arm {
 
 	const settled = (index: number): boolean => {
 		const timing = sessions.get(index);
-		// `done` (which carries the evidence directory) follows `disposed`; a session is
-		// settled only once its evidence is known, or it failed.
+		// `done` (which carries the evidence directory) is published only after the
+		// evidence is on disk; a session is settled once it arrives, or it failed.
 		return timing !== undefined && (timing.evidenceDir !== undefined || timing.error !== undefined);
 	};
 

@@ -74,6 +74,17 @@ describe("multi-session report assembly", () => {
 		await expect(buildReport(root)).rejects.toThrow("no environment.json pins");
 	});
 
+	it("refuses identically incomplete pins instead of treating them as consistent", async () => {
+		tempDir = TempDir.createSync("@bench-multisession-assembly-partial-");
+		const root = tempDir.path();
+		const { sourceSha: _sourceSha, ...partial } = PINS;
+		await writeRun(path.join(root, "run-a"), [rep("standalone", 1, [])], partial);
+		await writeRun(path.join(root, "run-b"), [rep("worker", 1, [])], partial);
+		await expect(buildReport(root)).rejects.toThrow("missing provenance pins: sourceSha");
+		await writeRun(path.join(root, "run-a"), [rep("standalone", 1, [])], {});
+		await expect(buildReport(root)).rejects.toThrow("missing provenance pins");
+	});
+
 	it("counts an unmatched repetition and a missing session as fidelity differences", async () => {
 		tempDir = TempDir.createSync("@bench-multisession-assembly-fidelity-");
 		const root = tempDir.path();

@@ -2,10 +2,11 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
+import * as url from "node:url";
 import { SdkClient, SdkClientError } from "../../src/sdk/client/client";
 import { brokerOwnerForTest, ensureBroker } from "../../src/sdk/broker/ensure";
 import type { BrokerDiscovery } from "../../src/sdk/broker/discovery";
+import { parseJsonl } from "./jsonl";
 import { compareEvidence } from "./normalize";
 import { observeProcessIncarnation } from "../../src/sdk/broker/process-incarnation";
 import { RunnerBootstrap, bootstrapDigest } from "./bootstrap";
@@ -289,24 +290,17 @@ async function latestTranscript(directory: string): Promise<{ path: string; text
 	};
 	await visit(directory);
 	if (!newest) return undefined;
-	return { path: newest.path, text: await fs.readFile(newest.path, "utf8") };
-}
-
-function parseJsonLines(text: string): unknown[] {
-	return text
-		.split("\n")
-		.filter(line => line.length > 0)
-		.map(line => JSON.parse(line) as unknown);
+	return { path: newest.path, text: await Bun.file(newest.path).text() };
 }
 
 function countCompactionEntries(text: string): number {
-	return parseJsonLines(text).filter(entry => isRecord(entry) && entry.type === "compaction").length;
+	return parseJsonl(text, "session transcript").filter(entry => isRecord(entry) && entry.type === "compaction").length;
 }
 
 /** Error text of every persisted assistant message that ended with `stopReason: "error"`. */
 function transcriptAssistantErrors(text: string): string[] {
 	const errors: string[] = [];
-	for (const entry of parseJsonLines(text)) {
+	for (const entry of parseJsonl(text, "session transcript")) {
 		if (!isRecord(entry) || !isRecord(entry.message)) continue;
 		const message = entry.message;
 		if (message.role !== "assistant" || message.stopReason !== "error") continue;
@@ -321,7 +315,8 @@ async function isolatedLogProblems(homeDir: string): Promise<string[]> {
 	const names = await fs.readdir(logsDir).catch(() => [] as string[]);
 	const problems: string[] = [];
 	for (const name of names.filter(name => name.endsWith(".log")).sort()) {
-		for (const record of parseJsonLines(await Bun.file(path.join(logsDir, name)).text())) {
+		const logPath = path.join(logsDir, name);
+		for (const record of parseJsonl(await Bun.file(logPath).text(), logPath)) {
 			if (isRecord(record) && (record.level === "error" || record.level === "warn")) problems.push(jsonLine(record));
 		}
 	}
@@ -365,7 +360,6 @@ async function writeEvidence(options: {
 	timing: readonly string[];
 	sessionIndex: number;
 }): Promise<void> {
-	await fs.mkdir(options.evidenceDir, { recursive: true });
 	await Promise.all([
 		Bun.write(path.join(options.evidenceDir, "transcript.jsonl"), options.transcript),
 		Bun.write(path.join(options.evidenceDir, "requests.jsonl"), options.requests),
@@ -534,12 +528,12 @@ export async function characterize(): Promise<CharacterizationOutcome> {
 				2,
 			),
 		);
-		const extensionSource = await fs.readFile(extensionPath, "utf8");
+		const extensionSource = await Bun.file(extensionPath).text();
 		const runtimeExtension = extensionSource
 			.replace('import type { ExtensionAPI } from "../../src/extensibility/extensions/types";\n', "")
 			.replace(
 				'import { createBenchMockProviderDefinition } from "./mock-provider";',
-				`import { createBenchMockProviderDefinition } from ${JSON.stringify(pathToFileURL(path.join(import.meta.dir, "mock-provider.ts")).href)};`,
+				`import { createBenchMockProviderDefinition } from ${JSON.stringify(url.pathToFileURL(path.join(import.meta.dir, "mock-provider.ts")).href)};`,
 			)
 			.replace(
 				"export default function characterizeExtension(api: ExtensionAPI): void {",
@@ -645,7 +639,7 @@ export async function characterize(): Promise<CharacterizationOutcome> {
 					if (!taskJobId) throw new Error("SDK task job ID was not observed in the task result.");
 					await waitForTaskJob(sessionClient, taskJobId);
 					requestsContents = await Bun.file(path.join(evidenceDir, "requests.jsonl")).text();
-					if (!parseJsonLines(requestsContents).some(request => isRecord(request) && request.modelId === "child")) {
+					if (!parseJsonl(requestsContents, "requests.jsonl").some(request => isRecord(request) && request.modelId === "child")) {
 						throw new Error("SDK task completed without an observed bench-mock/child model request.");
 					}
 					emitWorkload("task-completed");
@@ -751,7 +745,9 @@ export async function characterize(): Promise<CharacterizationOutcome> {
 			if (disposed || hostExited) emitPhase("disposed");
 		}
 		hostStderrTail = hostStderrCaptured
-			? await fs.readFile(hostStderrPath, "utf8").catch(error => `unavailable: ${errorMessage(error)}`)
+			? await Bun.file(hostStderrPath)
+					.text()
+					.catch(error => `unavailable: ${errorMessage(error)}`)
 			: "unavailable: lifecycle stderr log was not retained before startup cleanup";
 		hostExitDiagnostics = {
 			pid: sessionHostPid ?? null,

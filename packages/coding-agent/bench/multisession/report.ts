@@ -1,5 +1,6 @@
 import {
 	REQUIRED_WORKLOAD_EVENTS,
+	type ArmKind,
 	type BrokerBaselineRecord,
 	type ChurnRecord,
 	type CohortSample,
@@ -347,15 +348,8 @@ function repMetrics(rep: RepRecord, contract: PreregistrationContract): RepMetri
 	if (coldReadiness.length !== rep.n || coldReadiness.some(value => !Number.isFinite(value) || value < 0)) return null;
 	const teardown = rep.samples.find(sample => sample.tick === rep.teardownTick);
 	if (!teardown || !isSampleComplete(teardown)) return null;
-	const teardownMembers = rep.arm === "worker"
-		? teardown.members.filter(member => member.reason === "root")
-		: teardown.members.filter(member => member.reason !== "driver");
-	if (teardownMembers.length === 0 && rep.arm === "worker") return null;
-	let teardownHostFootprint = 0;
-	for (const member of teardownMembers) {
-		if (member.read.status !== "ok") return null;
-		teardownHostFootprint += member.read.physFootprint;
-	}
+	const teardownHostFootprint = hostResidueFootprint(teardown, rep.arm);
+	if (teardownHostFootprint === null) return null;
 	return {
 		turnLatencyP95,
 		throughput,
@@ -363,6 +357,24 @@ function repMetrics(rep: RepRecord, contract: PreregistrationContract): RepMetri
 		coldReadiness: median(coldReadiness),
 		teardownHostFootprint,
 	};
+}
+
+/**
+ * Worker arm: the resident host root's footprint, which must be a live read.
+ * Standalone: owned residue beyond the driver; a member the OS confirmed exited
+ * holds nothing (the same policy as sample completeness).
+ */
+export function hostResidueFootprint(sample: CohortSample, arm: ArmKind): number | null {
+	let total = 0;
+	let liveHosts = 0;
+	for (const member of sample.members) {
+		if (arm === "worker" ? member.reason !== "root" : member.reason === "driver") continue;
+		if (arm === "standalone" && member.read.status === "absent") continue;
+		if (member.read.status !== "ok") return null;
+		total += member.read.physFootprint;
+		liveHosts += 1;
+	}
+	return arm === "worker" && liveHosts === 0 ? null : total;
 }
 
 function activeWindow(events: RunnerEvent[], sessionCount: number): { start: number; end: number } | null {

@@ -41,7 +41,6 @@ export interface CohortExclusion {
 	reason: "pre-run" | "non-owned-ancestry" | "marker-free" | "pid-reused";
 }
 
-/** One 1Hz cohort sample. */
 /**
  * Post-shutdown orphan receipt. `complete` is false when the final process
  * enumeration or ancestry scan failed; an incomplete receipt never proves zero.
@@ -53,6 +52,7 @@ export interface OrphanReceipt {
 	errors: string[];
 }
 
+/** One 1Hz cohort sample. */
 export interface CohortSample {
 	/** Monotonic ms since run start (performance.now() of the driver). */
 	t: number;

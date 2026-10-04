@@ -1,4 +1,5 @@
 import * as crypto from "node:crypto";
+import { canonicalJson } from "./contract";
 
 /**
  * `full` is the gated mock workload, `preflight` the shortened Worker feasibility
@@ -142,14 +143,6 @@ export function buildWorkloadScript(variant: WorkloadVariant = "full"): readonly
 
 /** SHA-256 digest of the canonical workload script definition. */
 export function workloadDigest(): string {
-	return crypto.createHash("sha256").update(JSON.stringify(canonicalize(FULL_SCRIPT))).digest("hex");
+	return crypto.createHash("sha256").update(canonicalJson(FULL_SCRIPT)).digest("hex");
 }
 
-function canonicalize(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(canonicalize);
-	if (value !== null && typeof value === "object") {
-		const record = value as Record<string, unknown>;
-		return Object.fromEntries(Object.keys(record).sort().map(key => [key, canonicalize(record[key])]));
-	}
-	return value;
-}

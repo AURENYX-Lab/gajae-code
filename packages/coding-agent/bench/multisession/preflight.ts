@@ -39,9 +39,10 @@ export interface PreflightCheck {
 export interface PreflightAdapter {
 	/** Start the Worker host with sessions 0 and 1 staggered; returns host identity. */
 	startHost(): Promise<{ pid: number; incarnation: string }>;
-	/** Wait until session 0 completed; returns its dispose window on the bench clock. */
-	waitFirstDisposed(): Promise<{ disposingAt: number; disposedAt: number }>;
-	closeSession(index: number): Promise<void>;
+	/** Wait until session 0 completed (evidence persisted); returns when it began disposing, on the bench clock. */
+	waitFirstDisposed(): Promise<{ disposingAt: number }>;
+	/** Close a session; resolves with the bench-clock time its termination was confirmed. */
+	closeSession(index: number): Promise<number>;
 	/** Wait for session 1 to finish; ok=false with the runner error otherwise. */
 	waitSurvivor(): Promise<{ ok: boolean; error?: string }>;
 	/** Session 1's completed turn intervals on the bench clock. */
@@ -75,19 +76,20 @@ export async function decidePreflight(adapter: PreflightAdapter): Promise<Prefli
 		adapter.abort();
 		return finish();
 	}
-	let window: { disposingAt: number; disposedAt: number } | undefined;
+	let window: { disposingAt: number; closedAt: number } | undefined;
 	try {
-		window = await adapter.waitFirstDisposed();
-		await adapter.closeSession(0);
+		const { disposingAt } = await adapter.waitFirstDisposed();
+		window = { disposingAt, closedAt: await adapter.closeSession(0) };
 		const survivor = await adapter.waitSurvivor();
 		checks.push({ name: "survivor-completed", passed: survivor.ok, ...(survivor.error ? { detail: survivor.error } : {}) });
 	} catch (error) {
 		checks.push({ name: "survivor-completed", passed: false, detail: String(error) });
 	}
-	// The barrier holds only if a session 1 turn was in flight across session 0's
-	// whole dispose window; judged from recorded turn intervals after the fact.
+	// The barrier holds only if a session 1 turn was in flight from session 0's
+	// dispose start through its confirmed Worker termination; judged from
+	// recorded turn intervals after the fact.
 	const overlapping = window
-		? adapter.survivorTurns().find(turn => turn.startedAt <= window.disposingAt && turn.endedAt >= window.disposedAt)
+		? adapter.survivorTurns().find(turn => turn.startedAt <= window.disposingAt && turn.endedAt >= window.closedAt)
 		: undefined;
 	checks.push({
 		name: "close-barrier",
@@ -95,8 +97,8 @@ export async function decidePreflight(adapter: PreflightAdapter): Promise<Prefli
 		detail: !window
 			? "session 0 never completed"
 			: overlapping
-				? `session 1 turn [${overlapping.startedAt.toFixed(0)}, ${overlapping.endedAt.toFixed(0)}] spans session 0 dispose [${window.disposingAt.toFixed(0)}, ${window.disposedAt.toFixed(0)}]`
-				: `no session 1 turn spans session 0 dispose [${window.disposingAt.toFixed(0)}, ${window.disposedAt.toFixed(0)}]`,
+				? `session 1 turn [${overlapping.startedAt.toFixed(0)}, ${overlapping.endedAt.toFixed(0)}] spans session 0 dispose→close [${window.disposingAt.toFixed(0)}, ${window.closedAt.toFixed(0)}]`
+				: `no session 1 turn spans session 0 dispose→close [${window.disposingAt.toFixed(0)}, ${window.closedAt.toFixed(0)}]`,
 	});
 
 	const identity = adapter.hostIdentity(host.pid);
@@ -191,11 +193,15 @@ export function createRealPreflightAdapter(options: { workDir: string; runId: st
 			await arm.waitDisposed([0], SESSION_TIMEOUT_MS);
 			if (failed(0)) throw new Error(`session 0 failed: ${failed(0)}`);
 			const disposingAt = phaseAt(0, "disposing");
-			const disposedAt = phaseAt(0, "disposed");
-			if (disposingAt === undefined || disposedAt === undefined) throw new Error("session 0 dispose window was not observed");
-			return { disposingAt, disposedAt };
+			if (disposingAt === undefined) throw new Error("session 0 disposing phase was not observed");
+			return { disposingAt };
 		},
-		closeSession: index => arm.closeSession(index),
+		async closeSession(index) {
+			await arm.closeSession(index);
+			const closedAt = arm.sessions.get(index)?.closedAt;
+			if (closedAt === undefined) throw new Error(`session ${index} termination was not confirmed`);
+			return closedAt;
+		},
 		async waitSurvivor() {
 			try {
 				await arm.waitDisposed([1], SESSION_TIMEOUT_MS);

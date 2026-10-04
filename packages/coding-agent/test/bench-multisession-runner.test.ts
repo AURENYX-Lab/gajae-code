@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { Context } from "@gajae-code/ai/core";
 import { TempDir } from "@gajae-code/utils";
 import { COHORT_MARKER_ENV } from "../bench/multisession/cohort";
+import { parseJsonl } from "../bench/multisession/jsonl";
 import { createBenchMockProvider } from "../bench/multisession/mock-provider";
 import { compareEvidence } from "../bench/multisession/normalize";
 import { runSession, setAllowlistedEnvironment } from "../bench/multisession/session-runner";
@@ -38,10 +39,7 @@ async function runOne(
 }
 
 function parseJsonLines(text: string): Record<string, unknown>[] {
-	return text
-		.split("\n")
-		.filter(line => line.length > 0)
-		.map(line => JSON.parse(line) as Record<string, unknown>);
+	return parseJsonl(text, "evidence") as Record<string, unknown>[];
 }
 
 describe("multi-session session runner", () => {

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import * as path from "node:path";
 import { $ } from "bun";
-import { readJsonLines } from "../bench/multisession/channel";
+import { readJsonlStream } from "../bench/multisession/jsonl";
 
 const CHANNEL = path.join(import.meta.dir, "../bench/multisession/channel.ts");
 
@@ -40,7 +40,7 @@ describe("bench multisession root registration handshake", () => {
 
 		root.stdin.write(`${JSON.stringify({ type: "ack" })}\n${JSON.stringify({ type: "go" })}\n`);
 		root.stdin.flush();
-		const events = readJsonLines<{ type: string; pid: number }>(root.stdout);
+		const events = readJsonlStream<{ type: string; pid: number }>(root.stdout, "root stdout");
 		const first = await events.next();
 		expect(first.value?.type).toBe("child");
 		const childPid = first.value?.pid ?? 0;

@@ -6,25 +6,8 @@
  */
 import { observeProcessIncarnation } from "../../src/sdk/broker/process-incarnation";
 import { COHORT_MARKER_ENV } from "./cohort";
+import { readJsonlStream } from "./jsonl";
 import { benchNow } from "./types";
-
-/** Splits a byte stream into JSON records, one per line. */
-export async function* readJsonLines<T>(stream: ReadableStream<Uint8Array>): AsyncGenerator<T> {
-	const decoder = new TextDecoder();
-	let buffered = "";
-	for await (const chunk of stream) {
-		buffered += decoder.decode(chunk, { stream: true });
-		let newline = buffered.indexOf("\n");
-		while (newline !== -1) {
-			const line = buffered.slice(0, newline).trim();
-			buffered = buffered.slice(newline + 1);
-			if (line) yield JSON.parse(line) as T;
-			newline = buffered.indexOf("\n");
-		}
-	}
-	const rest = buffered.trim();
-	if (rest) yield JSON.parse(rest) as T;
-}
 
 /** Root side: write one event record to stdout. */
 export function emitToDriver(record: unknown): void {
@@ -38,7 +21,7 @@ export function emitToDriver(record: unknown): void {
  */
 export async function* driverCommands<T extends { type: string }>(): AsyncGenerator<T> {
 	let acked = false;
-	for await (const command of readJsonLines<T>(Bun.stdin.stream())) {
+	for await (const command of readJsonlStream<T>(Bun.stdin.stream(), "driver commands")) {
 		if (!acked) {
 			if (command.type !== "ack") throw new Error(`expected ack before ${command.type}`);
 			acked = true;
@@ -101,7 +84,7 @@ export function spawnRoot<Event>(options: SpawnRootOptions): RootHandle<Event> {
 		pid: child.pid,
 		incarnation: observation.incarnation,
 		spawnedAt,
-		events: readJsonLines<Event>(child.stdout),
+		events: readJsonlStream<Event>(child.stdout, "root stdout"),
 		exited: child.exited,
 		send,
 		kill: () => {

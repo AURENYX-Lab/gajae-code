@@ -1,4 +1,5 @@
 import * as crypto from "node:crypto";
+import { canonicalJson } from "./contract";
 import { COHORT_MARKER_ENV } from "./cohort";
 
 /** Explicit bench setup. Keep this value identical for both isolation arms. */
@@ -57,16 +58,8 @@ export const RunnerBootstrap = {
 
 export type RunnerBootstrap = typeof RunnerBootstrap;
 
-function canonicalize(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(canonicalize);
-	if (value !== null && typeof value === "object") {
-		const record = value as Record<string, unknown>;
-		return Object.fromEntries(Object.keys(record).sort().map(key => [key, canonicalize(record[key])]));
-	}
-	return value;
-}
 
 /** SHA-256 digest of the key-sorted bootstrap manifest. */
 export function bootstrapDigest(): string {
-	return crypto.createHash("sha256").update(JSON.stringify(canonicalize(RunnerBootstrap))).digest("hex");
+	return crypto.createHash("sha256").update(canonicalJson(RunnerBootstrap)).digest("hex");
 }

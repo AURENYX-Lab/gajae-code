@@ -75,7 +75,7 @@ The gates are pre-registered in `bench/multisession/preregistration.json`. `cont
 
 ## Preflight
 
-`preflight.ts` runs two Workers in one host on the shortened native-backed script: bash, grep, then one model turn the mock provider holds in flight for 4 s. Session 1 starts once session 0 has streamed text and then pays a Worker cold start (~1 s), so its in-flight turn begins about 1 s after session 0's. Session 0 then disposes while session 1's in-flight turn is still running. The close barrier is judged from recorded evidence, not a sampled flag: some session 1 `turn` interval must span session 0's whole `disposing`→`disposed` window. Session 0 is then closed. The preflight passes only if all of these hold:
+`preflight.ts` runs two Workers in one host on the shortened native-backed script: bash, grep, then one model turn the mock provider holds in flight for 4 s. Session 1 starts once session 0 has streamed text and then pays a Worker cold start (~1 s), so its in-flight turn begins about 1 s after session 0's. Session 0 then disposes while session 1's in-flight turn is still running. The close barrier is judged from recorded evidence, not a sampled flag: some session 1 `turn` interval must span from session 0's `disposing` phase until its Worker termination is confirmed. Session 0 is then closed. The preflight passes only if all of these hold:
 - The close barrier holds.
 - Worker 1 completes.
 - Both evidence sets equal a standalone run of the same script.
@@ -87,6 +87,7 @@ If the preflight fails, the verdict is **stop at Phase A (infeasible without Pha
 Known process-global risks it exercises:
 - the native crash hooks (`crates/pi-natives/src/crash.rs`, `packages/natives/native/index.js`);
 - the process-cwd WeakRef in `src/session/session-manager.ts`.
+- **Observed during harness bring-up (Bun 1.4.0+34cbb9a40, macOS arm64):** the Worker host crashed twice in about 20 Worker-arm smoke runs (N=2). Both crashes were `EXC_BREAKPOINT` (a runtime trap) on a thread named `Worker`, with identical faulting offsets, about 0.3 s after host launch (`~/Library/Logs/DiagnosticReports/bun.exe-*.ips`). The driver sees `root … exited with code 137 before session 0 completed` and marks the rep invalid, so the crash can produce `insufficient-evidence` but never a pass. Phase A run records keep these failures and do not retry them away.
 
 ## Inventory: Broker `session.create` surface vs. what Phase A touches
 

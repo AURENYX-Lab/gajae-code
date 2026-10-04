@@ -450,9 +450,33 @@ describe("multi-session report gates", () => {
 				},
 			],
 		});
+		// A standalone child that exited before its read: every gate stays evaluable.
 		const accepted = makeInput(contract);
-		accepted.worker = accepted.worker.map(rep => ({ ...rep, samples: rep.samples.map(exited) }));
-		expect(gate(evaluate(accepted), "memory").verdict).toBe("pass");
+		accepted.standalone = accepted.standalone.map(rep => ({ ...rep, samples: rep.samples.map(exited) }));
+		const acceptedReport = evaluate(accepted);
+		for (const name of ["memory", "turn latency", "throughput", "event-loop lag", "cold readiness", "teardown"]) {
+			expect(gate(acceptedReport, name).verdict).toBe("pass");
+		}
+		expect(acceptedReport.verdict).toBe("pass");
+
+		// The Worker host itself gone at teardown: no live host read, so teardown is unproven.
+		const hostGone = makeInput(contract);
+		hostGone.worker = hostGone.worker.map(rep => ({
+			...rep,
+			samples: rep.samples.map(current =>
+				current.tick === rep.teardownTick
+					? {
+							...current,
+							members: current.members.map(item =>
+								item.reason === "root" ? { ...item, read: { status: "absent" as const, pid: item.pid } } : item,
+							),
+							armTotal: DRIVER_FOOTPRINT,
+							armRssTotal: DRIVER_FOOTPRINT,
+						}
+					: current,
+			),
+		}));
+		expect(gate(evaluate(hostGone), "teardown").verdict).toBe("insufficient-evidence");
 
 		const driverGone = makeInput(contract);
 		driverGone.worker = driverGone.worker.map(rep => ({
