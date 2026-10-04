@@ -424,6 +424,15 @@ Reconciliation state survives client disconnect/reconnect. With the session-priv
 
 ### Request-owned queue cancellation and execution deadlines
 
+SDK-only ordinary abort cancels a snapshot of its authenticated requester's
+already-admitted preflights, including a prompt accepted durably but not yet
+started. It cancels those per-request controllers without borrowing another
+run's abort authority; foreign admissions and later pipelined requests are not
+part of the snapshot. A local `aborted: true` acknowledges cancellation, not a
+new durable execution terminal. For already-accepted work, recover its original
+`clientRef` through `turn.result`; unconfirmed terminal persistence remains
+uncertain and never permits mutation replay.
+
 Before consumption, a prompt diverted into steering retains its own queue-removal
 capability; cancelling it must not abort unrelated active work. After consumption,
 its durable completion belongs to the exact consuming run and cancellation domain.
