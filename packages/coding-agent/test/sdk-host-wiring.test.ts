@@ -162,9 +162,9 @@ afterEach(async () => {
 });
 
 async function waitFor(predicate: () => boolean, label: string): Promise<void> {
-	const deadline = Date.now() + 15_000;
+	const deadline = performance.now() + 15_000;
 	while (!predicate()) {
-		if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}`);
+		if (performance.now() > deadline) throw new Error(`Timed out waiting for ${label}`);
 		await Bun.sleep(20);
 	}
 }
@@ -2883,8 +2883,13 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 		getTerminalRunOwnerForEvent: getAgentTerminalOwnerContext,
 		getTerminalTurnEpoch: () => 41,
 		abortPromptAndWait: async (handle: string) => {
-			abortHandles.push(handle);
-			return { status: "settled", terminalScope: {} };
+			const domain = ledger.lookupDomain(handle);
+			abortAttempts.push({ handle, activeHandle: live.handle, hasLiveDomain: domain !== undefined });
+			if (domain) {
+				abortHandles.push(handle);
+				ledger.seal(handle);
+			}
+			return await ledger.waitForSettlement(handle, { graceMs: 0 });
 		},
 	};
 	const deadlineMs = 500;
@@ -2894,6 +2899,7 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 		getAgentDir: () => cwd,
 	} as unknown as Settings;
 	const abortHandles: string[] = [];
+	const abortAttempts: Array<{ handle: string; activeHandle: string; hasLiveDomain: boolean }> = [];
 	let joinedPromotion: ((promotion: { startsOwnRun?: boolean; removed?: boolean }) => void) | undefined;
 	const predecessorDispatchStarted = Promise.withResolvers<void>();
 	const predecessorDispatchReady = Promise.withResolvers<void>();
@@ -2918,8 +2924,9 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 		await completion.promise;
 		pendingSubmissions.delete(completion.resolve);
 	};
-	let handlers = start(sessionContext, settings, sendText, true, new Map(), undefined, false);
-	const predecessorHandlers = handlers;
+	let handlers = new Map<string, (event: unknown, context: unknown) => unknown>();
+	let clockNow = Date.now();
+	const leaseClock = spyOn(Date, "now").mockImplementation(() => clockNow);
 	const openClient = async (): Promise<{
 		socket: WebSocket;
 		frames: Record<string, unknown>[];
@@ -2969,6 +2976,11 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 		};
 	};
 	try {
+		// Lease time is controlled; socket/disk work and 15s wait guards stay real.
+		// Keep the 500ms lease and exact 350ms late-progress boundary without
+		// letting slow transport consume the remaining ownership-check window.
+		handlers = start(sessionContext, settings, sendText, true, new Map(), undefined, false);
+		const predecessorHandlers = handlers;
 		await handlers.get("session_start")?.({ type: "session_start" }, sessionContext);
 		const predecessor = await openClient();
 		const joinedPromise = predecessor.control("predecessor-joined", "turn.prompt", {
@@ -3001,6 +3013,9 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 		await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
 		await closeSocket(predecessor.socket);
 		ledger.seal("predecessor-run");
+		expect(await ledger.waitForSettlement("predecessor-run", { graceMs: 0 })).toEqual({ status: "settled" });
+		const predecessorAborts = [...abortHandles];
+		expect(predecessorAborts.every(handle => handle === "predecessor-run")).toBe(true);
 
 		live.idle = true;
 		live.handle = "successor-deadline-run";
@@ -3022,7 +3037,7 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 		});
 		await handlers.get("agent_start")?.(successorStart, sessionContext);
 		const acceptedAt = Date.now();
-		await Bun.sleep(350);
+		clockNow = acceptedAt + 350;
 
 		const latePredecessorProgress = {
 			type: "tool_execution_update" as const,
@@ -3068,7 +3083,7 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 			ok: true,
 			result: { turn: "no_active_turn", terminal: "terminal_no_effect" },
 		});
-		expect(abortHandles).toEqual([]);
+		expect(abortHandles).toEqual(predecessorAborts);
 		await closeSocket(outsider.socket);
 		expect(
 			successor.frames.some(
@@ -3078,6 +3093,7 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 					frame.turnId === successorCorrelation.turnId,
 			),
 		).toBe(false);
+		clockNow = acceptedAt + deadlineMs;
 		await waitFor(
 			() =>
 				successor.frames.some(
@@ -3088,14 +3104,20 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 				),
 			"successor-owned deadline terminal",
 		);
-		expect(Date.now() - acceptedAt).toBeLessThan(deadlineMs + 250);
 		expect(
 			await successor.query("successor-deadline-result", { kind: "prompt", ...successorCorrelation }),
 		).toMatchObject({
 			ok: true,
-			result: { status: "failed", error: { code: "prompt_deadline_exceeded" } },
+			result: {
+				status: "failed",
+				terminalAt: acceptedAt + deadlineMs,
+				error: { code: "prompt_deadline_exceeded" },
+			},
 		});
-		expect(abortHandles.filter(handle => handle === "successor-deadline-run")).toEqual(["successor-deadline-run"]);
+		expect(abortHandles).toEqual([...predecessorAborts, "successor-deadline-run"]);
+		expect(abortAttempts.some(attempt => attempt.hasLiveDomain && attempt.handle !== attempt.activeHandle)).toBe(
+			false,
+		);
 		expect(abortHandles.every(handle => handle === "predecessor-run" || handle === "successor-deadline-run")).toBe(
 			true,
 		);
@@ -3163,9 +3185,13 @@ test("SDK host text-only stop/restart isolates late predecessor progress and ter
 			result: { status: "failed", error: { code: "prompt_deadline_exceeded" } },
 		});
 	} finally {
-		predecessorDispatchReady.resolve();
-		settleSubmissions();
-		await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+		try {
+			predecessorDispatchReady.resolve();
+			settleSubmissions();
+			await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, sessionContext);
+		} finally {
+			leaseClock.mockRestore();
+		}
 	}
 });
 
