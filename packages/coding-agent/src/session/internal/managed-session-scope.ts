@@ -34,6 +34,8 @@ import {
 import { parseFirstJsonlLine } from "../session-transcript-header";
 import {
 	parseTaskArtifactOwnerDeletionEvidence,
+	parseTaskArtifactOwnerRetirementOutcome,
+	type TaskArtifactOwnerDeletionEvidence,
 	type TaskArtifactOwnerStorageContext,
 } from "../task-artifact-owner-codec";
 import { verifyTaskArtifactOwnerPhysicalRetirement } from "../task-artifact-owner-retirement";
@@ -65,6 +67,7 @@ import {
 	ManagedSessionDescendantStore,
 	type ManagedSessionSecurityPolicy,
 	type ManagedStorageLock,
+	managedDirectoryRoot,
 	managedSecurityFailureClassification,
 	prepareManagedDirectoryRoot,
 	publishManagedFileNoReplace,
@@ -115,6 +118,14 @@ const managedScopeConfigurations = new WeakMap<
 const managedDirectoryIdentities = new WeakMap<ManagedScope, { dev: bigint; ino: bigint }>();
 const managedDirectoryAuthorities = new WeakMap<ManagedScope, RecoveryFsRoot | undefined>();
 const boundManagedWriteAuthorities = new WeakMap<ManagedScope, ManagedCandidateWriteAuthority>();
+const readManagedGcScopeIdentities = new WeakMap<
+	ManagedScope,
+	{
+		readonly configuredRoot: { readonly path: string; readonly dev: bigint; readonly ino: bigint };
+		readonly profile: { readonly path: string; readonly dev: bigint; readonly ino: bigint };
+		readonly sessions: { readonly path: string; readonly dev: bigint; readonly ino: bigint };
+	}
+>();
 
 function bindManagedWriteAuthority(scope: ManagedScope, authority: ManagedCandidateWriteAuthority): void {
 	if (
@@ -389,6 +400,7 @@ async function deleteSessionVerifiedWithFence(
 	if (hook) await hook({ flow, stage });
 	lock.assertOwned();
 	verifyAuthority?.();
+	assertLegacyOwnerFreeTranscript(target);
 	return new FileSessionStorage().deleteSessionVerified(target);
 }
 
@@ -712,6 +724,71 @@ export function resolveManagedScope(input: ManagedScopeInput): ManagedScopeResol
 /** Resolve a scope for a synchronous write without mutating an existing ACL mismatch. */
 export function resolveManagedScopeForWrite(input: ManagedScopeInput): ManagedScopeResolution {
 	return resolveManagedScopeInternal(input, true);
+}
+
+/** Resolve only an existing, authenticated v2 scope; this path never initializes or repairs storage. */
+export function resolveManagedGcScopeForRead(input: ManagedScopeInput): ManagedScopeResolution {
+	const resolved = resolveManagedScope(input);
+	if (resolved.kind === "error") return resolved;
+	const scope = resolved.scope;
+	try {
+		const rootPath = configuredRootPath(scope);
+		if (
+			path.resolve(scope.agentDir) !== scope.agentDir ||
+			path.resolve(scope.sessionsRoot) !== scope.sessionsRoot ||
+			path.dirname(scope.directoryPath) !== scope.sessionsRoot ||
+			scope.directoryName !== `v2-${scopeDigest(scope.platform, scope.canonicalCwd)}`
+		)
+			throw new Error("managed_gc_scope_authority_mismatch");
+		const captureDirectory = (pathname: string) => {
+			const stat = fs.lstatSync(pathname, { bigint: true });
+			if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("managed_gc_scope_authority_mismatch");
+			const security = validateNativeSecurityResult(
+				verifyExistingManagedScopeDirectory(pathname),
+				"verify",
+				"directory",
+			);
+			if (!security.ok) throw new Error("managed_gc_scope_authority_mismatch");
+			return { path: pathname, dev: stat.dev, ino: stat.ino };
+		};
+		const configuredRoot = captureDirectory(rootPath);
+		const profile = captureDirectory(scope.agentDir);
+		const sessions = captureDirectory(scope.sessionsRoot);
+		const scopeDirectory = captureDirectory(scope.directoryPath);
+		const rootAuthority = managedDirectoryRoot(rootPath);
+		if (
+			rootAuthority.canonicalPath !== rootPath ||
+			rootAuthority.dev !== BigInt.asUintN(64, configuredRoot.dev) ||
+			rootAuthority.ino !== BigInt.asUintN(64, configuredRoot.ino)
+		)
+			throw new Error("managed_gc_scope_authority_mismatch");
+		const bindingPath = path.join(scope.directoryPath, MANAGED_SESSION_BINDING_FILE);
+		const binding = captureManagedFileNoFollow(bindingPath);
+		if (validateBindingRaw(scope, binding.bytes.toString("utf8")))
+			throw new Error("managed_gc_scope_authority_mismatch");
+		for (const expected of [configuredRoot, profile, sessions, scopeDirectory]) {
+			const current = fs.lstatSync(expected.path, { bigint: true });
+			if (
+				!current.isDirectory() ||
+				current.isSymbolicLink() ||
+				current.dev !== expected.dev ||
+				current.ino !== expected.ino
+			)
+				throw new Error("managed_gc_scope_authority_mismatch");
+		}
+		managedRoots.set(scope, rootAuthority);
+		managedDirectoryIdentities.set(scope, { dev: scopeDirectory.dev, ino: scopeDirectory.ino });
+		managedDirectoryAuthorities.set(scope, undefined);
+		readManagedGcScopeIdentities.set(scope, { configuredRoot, profile, sessions });
+		return resolved;
+	} catch (error) {
+		return {
+			kind: "error",
+			code: "binding_invalid",
+			message: "The existing managed GC read authority could not be verified.",
+			cause: { classification: managedScopeResidualClassification(error) ?? "managed_gc_scope_authority_mismatch" },
+		};
+	}
 }
 
 function legacyDirectoryNames(
@@ -2113,7 +2190,9 @@ function preparedReceiptMatches(
 	}
 }
 
-type RetiredTarget = ManagedCandidate;
+type RetiredTarget = ManagedCandidate & {
+	readonly taskArtifactOwnerDeletionEvidence?: TaskArtifactOwnerDeletionEvidence;
+};
 
 const MANAGED_GC_RETIREMENT_PREFIX = "gc-retirement-";
 const MANAGED_GC_RETIREMENT_RECEIPTS = `${MANAGED_INTERNAL_DIRECTORY}/${MANAGED_RECEIPTS_DIRECTORY}`;
@@ -2148,6 +2227,31 @@ function managedGcTrustedScope(scope: ManagedScope): ManagedGcTrustedScope {
 	assertManagedDirectoryRoot(root);
 	managedDirectoryIdentityForScope(scope);
 	assertRetainedManagedDirectoryIdentity(scope);
+	const readIdentities = readManagedGcScopeIdentities.get(scope);
+	if (readIdentities) {
+		for (const expected of [readIdentities.configuredRoot, readIdentities.profile, readIdentities.sessions]) {
+			const current = fs.lstatSync(expected.path, { bigint: true });
+			if (
+				!current.isDirectory() ||
+				current.isSymbolicLink() ||
+				current.dev !== expected.dev ||
+				current.ino !== expected.ino
+			)
+				throw new Error("managed_gc_scope_authority_mismatch");
+		}
+		for (const pathname of [
+			readIdentities.configuredRoot.path,
+			readIdentities.profile.path,
+			readIdentities.sessions.path,
+		]) {
+			const verified = validateNativeSecurityResult(
+				verifyExistingManagedScopeDirectory(pathname),
+				"verify",
+				"directory",
+			);
+			if (!verified.ok) throw new Error("managed_gc_scope_authority_mismatch");
+		}
+	}
 	return {
 		root,
 		retainedAuthority: managedDirectoryAuthorities.get(scope),
@@ -2179,6 +2283,21 @@ function managedGcScopeStore(scope: ManagedScope, trusted: ManagedGcTrustedScope
 			dev: BigInt.asUintN(64, trusted.identity.dev),
 			ino: BigInt.asUintN(64, trusted.identity.ino),
 		},
+	);
+}
+function managedGcScopeReader(scope: ManagedScope, trusted: ManagedGcTrustedScope): ManagedSessionDescendantStore {
+	return new ManagedSessionDescendantStore(
+		trusted.root,
+		scope.directoryPath,
+		undefined,
+		trusted.policy,
+		scope.agentDir,
+		{
+			canonicalPath: scope.directoryPath,
+			dev: BigInt.asUintN(64, trusted.identity.dev),
+			ino: BigInt.asUintN(64, trusted.identity.ino),
+		},
+		"read-only",
 	);
 }
 function managedGcRetirementTranscriptKey(transcriptPath: string): string {
@@ -2255,7 +2374,7 @@ export function bindManagedGcSessionRetirementTarget(
 ): ManagedGcSessionRetirementTarget {
 	const trusted = managedGcTrustedScope(scope);
 	const transcriptPath = validateManagedGcTranscriptPath(scope, transcriptPathValue);
-	const store = managedGcScopeStore(scope, trusted);
+	const store = managedGcScopeReader(scope, trusted);
 	try {
 		store.verifyRootSecurity();
 		store.assertBound();
@@ -2454,10 +2573,10 @@ function readManagedGcSessionRetirementReceiptUnlocked(
 	transcriptPathValue: string,
 	trusted: ManagedGcTrustedScope,
 	store: ManagedSessionDescendantStore,
-	lock: ManagedStorageLock,
+	lock?: ManagedStorageLock,
 ): ManagedGcSessionRetirementReceipt | undefined {
 	const transcriptPath = validateManagedGcTranscriptPath(scope, transcriptPathValue);
-	lock.assertOwned();
+	lock?.assertOwned();
 	store.assertBound();
 	const prepared = readManagedGcPreparedAuthority(scope, transcriptPath, trusted.ownerContext, store);
 	if (!prepared) {
@@ -2634,6 +2753,147 @@ export async function readManagedGcSessionRetirementReceipt(
 	);
 }
 
+/** Read an authenticated journal without creating lock/receipt directories or repairing security state. */
+export async function readManagedGcSessionRetirementReceiptReadOnly(
+	scope: ManagedScope,
+	transcriptPath: string,
+): Promise<ManagedGcSessionRetirementReceipt | undefined> {
+	const trusted = managedGcTrustedScope(scope);
+	validateManagedGcTranscriptPath(scope, transcriptPath);
+	const store = managedGcScopeReader(scope, trusted);
+	try {
+		store.verifyRootSecurity();
+		store.assertBound();
+		try {
+			store.captureDirectoryIdentity(MANAGED_GC_RETIREMENT_RECEIPTS);
+		} catch (error) {
+			if (hasFsCode(error, "ENOENT")) return undefined;
+			throw error;
+		}
+		return readManagedGcSessionRetirementReceiptUnlocked(scope, transcriptPath, trusted, store);
+	} finally {
+		store.close();
+	}
+}
+
+/** Discover complete owner journals under authenticated existing v2 scopes without initializing storage. */
+export async function discoverManagedGcSessionRetirementReceipts(input: {
+	agentDir: string;
+	sessionsRoot: string;
+}): Promise<readonly { readonly scope: ManagedScope; readonly receipt: ManagedGcSessionRetirementReceipt }[]> {
+	const agentDir = canonicalizeTrustedPath(input.agentDir);
+	const sessionsRoot = canonicalizeTrustedPath(input.sessionsRoot);
+	const profileStat = fs.lstatSync(agentDir, { bigint: true });
+	const rootStat = fs.lstatSync(sessionsRoot, { bigint: true });
+	for (const [pathname, stat] of [
+		[agentDir, profileStat],
+		[sessionsRoot, rootStat],
+	] as const) {
+		if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("managed_gc_scope_authority_mismatch");
+		const verified = validateNativeSecurityResult(
+			verifyExistingManagedScopeDirectory(pathname),
+			"verify",
+			"directory",
+		);
+		if (!verified.ok) throw new Error("managed_gc_scope_authority_mismatch");
+	}
+	const inventoryBefore = {
+		dev: rootStat.dev,
+		ino: rootStat.ino,
+		profileDev: profileStat.dev,
+		profileIno: profileStat.ino,
+	};
+	const entries = fs.readdirSync(sessionsRoot, { withFileTypes: true });
+	const result: Array<{ readonly scope: ManagedScope; readonly receipt: ManagedGcSessionRetirementReceipt }> = [];
+	// Fail closed for the whole root: a partial inventory cannot prove live sibling absence.
+	for (const entry of entries) {
+		if (!/^v2-[a-z2-7]{52}$/u.test(entry.name)) continue;
+		if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error("managed_gc_scope_authority_mismatch");
+		const scopePath = path.join(sessionsRoot, entry.name);
+		const bindingPath = path.join(scopePath, MANAGED_SESSION_BINDING_FILE);
+		const bindingBytes = captureManagedFileNoFollow(bindingPath).bytes;
+		let bindingValue: unknown;
+		try {
+			bindingValue = JSON.parse(bindingBytes.toString("utf8"));
+		} catch {
+			throw new Error("managed_gc_scope_authority_mismatch");
+		}
+		if (!isBinding(bindingValue) || bindingValue.identityDigest !== entry.name.slice(3))
+			throw new Error("managed_gc_scope_authority_mismatch");
+		const resolved = resolveManagedGcScopeForRead({ cwd: bindingValue.canonicalPath, agentDir, sessionsRoot });
+		if (resolved.kind !== "resolved" || resolved.scope.directoryPath !== scopePath)
+			throw new Error("managed_gc_scope_authority_mismatch");
+		const scope = resolved.scope;
+		const trusted = managedGcTrustedScope(scope);
+		const store = managedGcScopeReader(scope, trusted);
+		try {
+			let directoryIdentity: { dev: string; ino: string };
+			try {
+				directoryIdentity = store.captureDirectoryIdentity(MANAGED_GC_RETIREMENT_RECEIPTS);
+			} catch (error) {
+				if (hasFsCode(error, "ENOENT")) continue;
+				throw error;
+			}
+			const receiptDir = path.join(scopePath, MANAGED_GC_RETIREMENT_RECEIPTS);
+			const receiptEntries = fs.readdirSync(receiptDir, { withFileTypes: true });
+			const after = store.captureDirectoryIdentity(MANAGED_GC_RETIREMENT_RECEIPTS);
+			if (after.dev !== directoryIdentity.dev || after.ino !== directoryIdentity.ino)
+				throw new Error("task_artifact_owner_continuation_authority_mismatch");
+			const names = receiptEntries.filter(item => item.name.startsWith(MANAGED_GC_RETIREMENT_PREFIX));
+			const groups = new Map<string, string[]>();
+			for (const item of names) {
+				if (
+					!item.isFile() ||
+					item.isSymbolicLink() ||
+					!/^gc-retirement-[a-f0-9]{64}-(?:prepared|artifacts_removed|owner_retired|owner_pending-[0-9]{8,})\.json$/u.test(
+						item.name,
+					)
+				)
+					throw new Error("task_artifact_owner_continuation_corrupt");
+				const key = item.name.slice(MANAGED_GC_RETIREMENT_PREFIX.length, MANAGED_GC_RETIREMENT_PREFIX.length + 64);
+				groups.set(key, [...(groups.get(key) ?? []), item.name]);
+			}
+			for (const [key, group] of groups) {
+				const preparedName = `${MANAGED_GC_RETIREMENT_PREFIX}${key}-prepared.json`;
+				if (!group.includes(preparedName)) throw new Error("task_artifact_owner_continuation_state_missing");
+				const preparedFile = store.readExpected(`${MANAGED_GC_RETIREMENT_RECEIPTS}/${preparedName}`);
+				if (!preparedFile) throw new Error("task_artifact_owner_continuation_state_missing");
+				let preparedValue: unknown;
+				try {
+					preparedValue = JSON.parse(preparedFile.bytes.toString("utf8"));
+				} catch {
+					throw new Error("task_artifact_owner_continuation_corrupt");
+				}
+				const transcriptPath =
+					preparedValue && typeof preparedValue === "object"
+						? (preparedValue as Record<string, unknown>).transcriptPath
+						: undefined;
+				if (typeof transcriptPath !== "string" || managedGcRetirementTranscriptKey(transcriptPath) !== key)
+					throw new Error("task_artifact_owner_continuation_authority_mismatch");
+				const receipt = await readManagedGcSessionRetirementReceiptReadOnly(scope, transcriptPath);
+				if (!receipt) throw new Error("task_artifact_owner_continuation_state_missing");
+				result.push({ scope, receipt });
+			}
+		} finally {
+			store.close();
+		}
+	}
+	const rootAfter = fs.lstatSync(sessionsRoot, { bigint: true });
+	const profileAfter = fs.lstatSync(agentDir, { bigint: true });
+	if (
+		!rootAfter.isDirectory() ||
+		rootAfter.isSymbolicLink() ||
+		rootAfter.dev !== inventoryBefore.dev ||
+		rootAfter.ino !== inventoryBefore.ino ||
+		!profileAfter.isDirectory() ||
+		profileAfter.isSymbolicLink() ||
+		profileAfter.dev !== inventoryBefore.profileDev ||
+		profileAfter.ino !== inventoryBefore.profileIno
+	)
+		throw new Error("managed_gc_scope_authority_mismatch");
+	return result.sort((left, right) => left.receipt.transcriptPath.localeCompare(right.receipt.transcriptPath));
+}
+
 function managedGcReceiptForPublication(
 	scope: ManagedScope,
 	receipt: ManagedGcSessionRetirementReceipt,
@@ -2786,67 +3046,141 @@ export async function publishManagedGcSessionRetirementReceipt(
 	});
 }
 function retiredTargets(scope: ManagedScope, pathname: string): readonly RetiredTarget[] | undefined {
+	let value: unknown;
 	try {
-		const value: unknown = JSON.parse(captureManagedFileNoFollow(pathname).bytes.toString("utf8"));
-		if (!value || typeof value !== "object") return undefined;
-		const record = value as { schemaVersion?: unknown; state?: unknown; scope?: unknown; targets?: unknown };
-		if (
-			record.schemaVersion !== 2 ||
-			record.state !== "retired" ||
-			record.scope !== scopeDigest(scope.platform, scope.canonicalCwd) ||
-			!Array.isArray(record.targets)
-		)
-			return undefined;
-		const targets: RetiredTarget[] = [];
-		for (const target of record.targets) {
-			if (!target || typeof target !== "object" || Array.isArray(target)) return undefined;
-			const item = target as Record<string, unknown>;
-			const identity = item.identity;
-			if (!identity || typeof identity !== "object" || Array.isArray(identity)) return undefined;
-			const fields = identity as Record<string, unknown>;
-			if (
-				typeof item.path !== "string" ||
-				typeof item.sessionId !== "string" ||
-				typeof item.cwd !== "string" ||
-				!pathIsWithin(scope.sessionsRoot, item.path) ||
-				(item.provenance !== undefined && item.provenance !== "v2" && item.provenance !== "legacy") ||
-				typeof fields.canonicalPath !== "string" ||
-				typeof fields.dev !== "string" ||
-				typeof fields.ino !== "string" ||
-				typeof fields.size !== "number" ||
-				typeof fields.mtimeMs !== "number" ||
-				typeof fields.mtimeNs !== "string" ||
-				typeof fields.sha256 !== "string"
-			)
-				return undefined;
-			const provenance =
-				item.provenance === "v2" || item.provenance === "legacy"
-					? item.provenance
-					: path.dirname(item.path) === scope.directoryPath
-						? "v2"
-						: "legacy";
-			targets.push({
-				path: item.path,
-				sessionId: item.sessionId,
-				cwd: item.cwd,
-				provenance,
-				migrationState: provenance === "v2" ? "native_v2" : "legacy_unmigrated",
-				identity: {
-					canonicalPath: fields.canonicalPath,
-					dev: BigInt(fields.dev),
-					ino: BigInt(fields.ino),
-					size: fields.size,
-					mtimeMs: fields.mtimeMs,
-					mtimeNs: BigInt(fields.mtimeNs),
-					sha256: fields.sha256,
-					sessionId: item.sessionId,
-				},
-			});
-		}
+		value = JSON.parse(captureManagedFileNoFollow(pathname).bytes.toString("utf8"));
+		const targets = parseRetiredTargetRecord(scope, value);
+		if (!targets) assertLegacyOwnerFreeRecord(value);
 		return targets;
-	} catch {
+	} catch (error) {
+		assertLegacyOwnerFreeRecord(value);
+		if (isOwnerBoundaryFailure(error)) throw error;
+		if (error instanceof SyntaxError) throw new Error("durability_failed", { cause: error });
 		return undefined;
 	}
+}
+
+const OWNER_CONSUMER_UNAVAILABLE = "task_artifact_owner_legacy_scope_unsupported";
+
+function isOwnerBoundaryFailure(error: unknown): boolean {
+	return error instanceof Error && error.message.startsWith("task_artifact_owner_");
+}
+
+function hasOwnerClaims(value: unknown): boolean {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	return (
+		Object.keys(record).some(key => key.startsWith("taskArtifactOwner")) ||
+		(record.target !== undefined && hasOwnerClaims(record.target)) ||
+		(Array.isArray(record.targets) && record.targets.some(hasOwnerClaims))
+	);
+}
+
+function assertLegacyOwnerFreeRecord(value: unknown): void {
+	if (hasOwnerClaims(value)) throw new Error(OWNER_CONSUMER_UNAVAILABLE);
+}
+
+function assertLegacyOwnerFreeTargets(targets: readonly RetiredTarget[]): void {
+	for (const target of targets)
+		if (target.taskArtifactOwnerDeletionEvidence) throw new Error(OWNER_CONSUMER_UNAVAILABLE);
+}
+
+function assertLegacyOwnerFreeTranscript(
+	target: Pick<
+		VerifiedSessionDeleteTarget,
+		"transcriptPath" | "sessionId" | "transcriptIdentity" | "detachedTranscriptPath"
+	>,
+): void {
+	const pathname = target.detachedTranscriptPath ?? target.transcriptPath;
+	let snapshot: SessionStorageSnapshot;
+	try {
+		snapshot = new FileSessionStorage().readSnapshotSync(pathname);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	// Descriptor-bound owner classification is data, not authorization; storage retains its exact identity fence.
+	if (taskArtifactOwnerLocatorFromTranscriptBytes(snapshot.bytes, target.sessionId))
+		throw new Error(OWNER_CONSUMER_UNAVAILABLE);
+}
+
+function parseRetiredTargetRecord(scope: ManagedScope, value: unknown): readonly RetiredTarget[] | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	if (Object.keys(value).some(key => key.startsWith("taskArtifactOwner"))) throw new Error(OWNER_CONSUMER_UNAVAILABLE);
+	const record = value as { schemaVersion?: unknown; state?: unknown; scope?: unknown; targets?: unknown };
+	if (
+		record.schemaVersion !== 2 ||
+		record.state !== "retired" ||
+		record.scope !== scopeDigest(scope.platform, scope.canonicalCwd) ||
+		!Array.isArray(record.targets)
+	)
+		return undefined;
+	const targets: RetiredTarget[] = [];
+	for (const target of record.targets) {
+		if (!target || typeof target !== "object" || Array.isArray(target)) return undefined;
+		const item = target as Record<string, unknown>;
+		if (
+			Object.keys(item).some(
+				key => key.startsWith("taskArtifactOwner") && key !== "taskArtifactOwnerDeletionEvidence",
+			)
+		)
+			throw new Error(OWNER_CONSUMER_UNAVAILABLE);
+		const identity = item.identity;
+		if (!identity || typeof identity !== "object" || Array.isArray(identity)) return undefined;
+		const fields = identity as Record<string, unknown>;
+		if (
+			typeof item.path !== "string" ||
+			typeof item.sessionId !== "string" ||
+			typeof item.cwd !== "string" ||
+			!pathIsWithin(scope.sessionsRoot, item.path) ||
+			(item.provenance !== undefined && item.provenance !== "v2" && item.provenance !== "legacy") ||
+			typeof fields.canonicalPath !== "string" ||
+			typeof fields.dev !== "string" ||
+			typeof fields.ino !== "string" ||
+			typeof fields.size !== "number" ||
+			typeof fields.mtimeMs !== "number" ||
+			typeof fields.mtimeNs !== "string" ||
+			typeof fields.sha256 !== "string"
+		)
+			return undefined;
+		const provenance =
+			item.provenance === "v2" || item.provenance === "legacy"
+				? item.provenance
+				: path.dirname(item.path) === scope.directoryPath
+					? "v2"
+					: "legacy";
+		let taskArtifactOwnerDeletionEvidence: TaskArtifactOwnerDeletionEvidence | undefined;
+		if (Object.hasOwn(item, "taskArtifactOwnerDeletionEvidence")) {
+			try {
+				taskArtifactOwnerDeletionEvidence = parseTaskArtifactOwnerDeletionEvidence(
+					item.taskArtifactOwnerDeletionEvidence,
+				);
+				if (taskArtifactOwnerDeletionEvidence.sessionId !== item.sessionId)
+					throw new Error("owner_session_mismatch");
+			} catch (cause) {
+				throw new Error("task_artifact_owner_legacy_scope_unsupported", { cause });
+			}
+		}
+		targets.push({
+			...(taskArtifactOwnerDeletionEvidence ? { taskArtifactOwnerDeletionEvidence } : {}),
+			path: item.path,
+			sessionId: item.sessionId,
+			cwd: item.cwd,
+			provenance,
+			migrationState: provenance === "v2" ? "native_v2" : "legacy_unmigrated",
+			identity: {
+				canonicalPath: fields.canonicalPath,
+				dev: BigInt(fields.dev),
+				ino: BigInt(fields.ino),
+				size: fields.size,
+				mtimeMs: fields.mtimeMs,
+				mtimeNs: BigInt(fields.mtimeNs),
+				sha256: fields.sha256,
+				sessionId: item.sessionId,
+			},
+		});
+	}
+	return targets;
 }
 
 /**
@@ -2924,6 +3258,7 @@ function retainedArtifactsRootMatches(record: Record<string, unknown>): boolean 
 }
 
 type CleanupReceipt = {
+	taskArtifactOwnerTranscriptDeleted?: true;
 	attempt: number;
 	target: RetiredTarget;
 	expectedArtifactsIdentity?: SessionStorageFileIdentity;
@@ -3604,111 +3939,128 @@ function pendingCleanupReceipt(
 			.sort((left, right) => Number(left.attempt) - Number(right.attempt));
 		let latest: CleanupReceipt | undefined;
 		const plannedPaths = new Set<string>();
-		for (const record of records) {
-			const attempt = record.attempt;
-			const recorded = record.target as Record<string, unknown> | undefined;
-			const identity = recorded?.identity as Record<string, unknown> | undefined;
-			if (
-				record.schemaVersion !== 2 ||
-				record.state !== "cleanup_pending" ||
-				record.scope !== scopeDigest(scope.platform, scope.canonicalCwd) ||
-				record.tombstone !== tombstone ||
-				typeof attempt !== "number" ||
-				!Number.isSafeInteger(attempt) ||
-				attempt !== (latest?.attempt ?? 0) + 1 ||
-				recorded?.path !== target.path ||
-				recorded.sessionId !== target.sessionId ||
-				recorded.cwd !== target.cwd ||
-				identity?.dev !== String(target.identity.dev) ||
-				identity.ino !== String(target.identity.ino) ||
-				identity.size !== target.identity.size ||
-				identity.mtimeNs !== String(target.identity.mtimeNs) ||
-				identity.sha256 !== target.identity.sha256 ||
-				!isQuarantinePath(target, record.plannedArtifactsPath) ||
-				!isQuarantinePath(target, record.plannedTranscriptPath) ||
-				record.plannedArtifactsPath === record.plannedTranscriptPath ||
-				plannedPaths.has(record.plannedArtifactsPath as string) ||
-				plannedPaths.has(record.plannedTranscriptPath as string) ||
-				(record.detachedArtifactsPath !== undefined && !isQuarantinePath(target, record.detachedArtifactsPath)) ||
-				(record.detachedTranscriptPath !== undefined && !isQuarantinePath(target, record.detachedTranscriptPath)) ||
-				(record.retainedArtifactsSuccessorPath !== undefined &&
-					!isRetainedNativePath(target, record.retainedArtifactsSuccessorPath)) ||
-				(record.retainedArtifactsPlaceholderPath !== undefined &&
-					!isRetainedNativePath(target, record.retainedArtifactsPlaceholderPath)) ||
-				(record.retainedArtifactsUnknownPath !== undefined &&
-					!isRetainedNativePath(target, record.retainedArtifactsUnknownPath)) ||
-				(record.retainedTranscriptSuccessorPath !== undefined &&
-					!isRetainedNativePath(target, record.retainedTranscriptSuccessorPath)) ||
-				(record.retainedTranscriptPlaceholderPath !== undefined &&
-					!isRetainedNativePath(target, record.retainedTranscriptPlaceholderPath)) ||
-				(record.retainedTranscriptUnknownPath !== undefined &&
-					!isRetainedNativePath(target, record.retainedTranscriptUnknownPath)) ||
-				(record.artifactsPayloadDurable !== undefined && record.artifactsPayloadDurable !== true) ||
-				(record.artifactsRemovedAttempt !== undefined &&
-					(typeof record.artifactsRemovedAttempt !== "number" ||
-						!Number.isSafeInteger(record.artifactsRemovedAttempt) ||
-						record.artifactsRemovedAttempt < 1 ||
-						record.artifactsRemovedAttempt > (attempt as number))) ||
-				(record.transcriptPayloadDurable !== undefined && record.transcriptPayloadDurable !== true)
-			)
-				throw new Error("durability_failed");
-			const artifact = record.expectedArtifactsIdentity as Record<string, unknown> | undefined;
-			const expectedArtifactsIdentity = artifact
-				? typeof artifact.dev === "string" &&
-					typeof artifact.ino === "string" &&
-					typeof artifact.size === "number" &&
-					typeof artifact.mtimeNs === "string" &&
-					typeof artifact.sha256 === "string"
-					? {
-							dev: BigInt(artifact.dev),
-							ino: BigInt(artifact.ino),
-							size: artifact.size,
-							mtimeNs: BigInt(artifact.mtimeNs),
-							sha256: artifact.sha256,
-						}
-					: undefined
-				: undefined;
-			if (artifact && !expectedArtifactsIdentity) throw new Error("durability_failed");
-			const expectedArtifactsTree =
-				record.expectedArtifactsTree === undefined ? undefined : artifactTreeSnapshot(record.expectedArtifactsTree);
-			if (record.expectedArtifactsTree !== undefined && !expectedArtifactsTree) throw new Error("durability_failed");
-
-			if (
-				latest &&
-				((record.detachedArtifactsPath !== undefined &&
-					![...plannedPaths].some(planned =>
-						isAuthorizedArtifactRoot(target, planned, record.detachedArtifactsPath),
-					)) ||
-					(record.detachedTranscriptPath !== undefined && !plannedPaths.has(record.detachedTranscriptPath)))
-			)
-				throw new Error("durability_failed");
-			plannedPaths.add(record.plannedArtifactsPath as string);
-			plannedPaths.add(record.plannedTranscriptPath as string);
-			latest = {
-				attempt,
-				target,
-				expectedArtifactsIdentity,
-				expectedArtifactsTree,
-				artifactsPayloadDurable: record.artifactsPayloadDurable === true ? true : undefined,
-				artifactsRemovedAttempt: record.artifactsRemovedAttempt as number | undefined,
-				detachedArtifactsPath: record.detachedArtifactsPath as string | undefined,
-				detachedTranscriptPath: record.detachedTranscriptPath as string | undefined,
-				transcriptPayloadDurable: record.transcriptPayloadDurable === true ? true : undefined,
-				retainedArtifactsSuccessorPath: record.retainedArtifactsSuccessorPath as string | undefined,
-				retainedArtifactsPlaceholderPath: record.retainedArtifactsPlaceholderPath as string | undefined,
-				retainedArtifactsUnknownPath: record.retainedArtifactsUnknownPath as string | undefined,
-				retainedTranscriptSuccessorPath: record.retainedTranscriptSuccessorPath as string | undefined,
-				retainedTranscriptPlaceholderPath: record.retainedTranscriptPlaceholderPath as string | undefined,
-				retainedTranscriptUnknownPath: record.retainedTranscriptUnknownPath as string | undefined,
-				plannedArtifactsPath: record.plannedArtifactsPath as string,
-				plannedTranscriptPath: record.plannedTranscriptPath as string,
-			};
-		}
+		for (const record of records)
+			latest = parseCleanupReceiptRecord(scope, tombstone, target, record, latest, plannedPaths);
 		return latest;
 	} catch (error) {
-		if ((error as Error).message === "durability_failed") throw error;
+		if ((error as Error).message === "durability_failed" || isOwnerBoundaryFailure(error)) throw error;
 		return undefined;
 	}
+}
+
+function parseCleanupReceiptRecord(
+	scope: ManagedScope,
+	tombstone: string,
+	target: RetiredTarget,
+	record: Record<string, unknown>,
+	latest: CleanupReceipt | undefined,
+	plannedPaths: Set<string>,
+): CleanupReceipt {
+	if (
+		Object.keys(record).some(
+			key => key.startsWith("taskArtifactOwner") && key !== "taskArtifactOwnerTranscriptDeleted",
+		)
+	)
+		throw new Error(OWNER_CONSUMER_UNAVAILABLE);
+	const attempt = record.attempt;
+	const recorded = record.target as Record<string, unknown> | undefined;
+	const identity = recorded?.identity as Record<string, unknown> | undefined;
+	if (
+		record.schemaVersion !== 2 ||
+		record.state !== "cleanup_pending" ||
+		record.scope !== scopeDigest(scope.platform, scope.canonicalCwd) ||
+		record.tombstone !== tombstone ||
+		typeof attempt !== "number" ||
+		!Number.isSafeInteger(attempt) ||
+		attempt !== (latest?.attempt ?? 0) + 1 ||
+		recorded?.path !== target.path ||
+		recorded.sessionId !== target.sessionId ||
+		recorded.cwd !== target.cwd ||
+		identity?.dev !== String(target.identity.dev) ||
+		identity.ino !== String(target.identity.ino) ||
+		identity.size !== target.identity.size ||
+		identity.mtimeNs !== String(target.identity.mtimeNs) ||
+		identity.sha256 !== target.identity.sha256 ||
+		!isQuarantinePath(target, record.plannedArtifactsPath) ||
+		!isQuarantinePath(target, record.plannedTranscriptPath) ||
+		record.plannedArtifactsPath === record.plannedTranscriptPath ||
+		plannedPaths.has(record.plannedArtifactsPath as string) ||
+		plannedPaths.has(record.plannedTranscriptPath as string) ||
+		(record.detachedArtifactsPath !== undefined && !isQuarantinePath(target, record.detachedArtifactsPath)) ||
+		(record.detachedTranscriptPath !== undefined && !isQuarantinePath(target, record.detachedTranscriptPath)) ||
+		(record.retainedArtifactsSuccessorPath !== undefined &&
+			!isRetainedNativePath(target, record.retainedArtifactsSuccessorPath)) ||
+		(record.retainedArtifactsPlaceholderPath !== undefined &&
+			!isRetainedNativePath(target, record.retainedArtifactsPlaceholderPath)) ||
+		(record.retainedArtifactsUnknownPath !== undefined &&
+			!isRetainedNativePath(target, record.retainedArtifactsUnknownPath)) ||
+		(record.retainedTranscriptSuccessorPath !== undefined &&
+			!isRetainedNativePath(target, record.retainedTranscriptSuccessorPath)) ||
+		(record.retainedTranscriptPlaceholderPath !== undefined &&
+			!isRetainedNativePath(target, record.retainedTranscriptPlaceholderPath)) ||
+		(record.retainedTranscriptUnknownPath !== undefined &&
+			!isRetainedNativePath(target, record.retainedTranscriptUnknownPath)) ||
+		(record.artifactsPayloadDurable !== undefined && record.artifactsPayloadDurable !== true) ||
+		(record.artifactsRemovedAttempt !== undefined &&
+			(typeof record.artifactsRemovedAttempt !== "number" ||
+				!Number.isSafeInteger(record.artifactsRemovedAttempt) ||
+				record.artifactsRemovedAttempt < 1 ||
+				record.artifactsRemovedAttempt > (attempt as number))) ||
+		(record.transcriptPayloadDurable !== undefined && record.transcriptPayloadDurable !== true) ||
+		(record.taskArtifactOwnerTranscriptDeleted !== undefined &&
+			(record.taskArtifactOwnerTranscriptDeleted !== true || !target.taskArtifactOwnerDeletionEvidence))
+	)
+		throw new Error("durability_failed");
+	const artifact = record.expectedArtifactsIdentity as Record<string, unknown> | undefined;
+	const expectedArtifactsIdentity = artifact
+		? typeof artifact.dev === "string" &&
+			typeof artifact.ino === "string" &&
+			typeof artifact.size === "number" &&
+			typeof artifact.mtimeNs === "string" &&
+			typeof artifact.sha256 === "string"
+			? {
+					dev: BigInt(artifact.dev),
+					ino: BigInt(artifact.ino),
+					size: artifact.size,
+					mtimeNs: BigInt(artifact.mtimeNs),
+					sha256: artifact.sha256,
+				}
+			: undefined
+		: undefined;
+	if (artifact && !expectedArtifactsIdentity) throw new Error("durability_failed");
+	const expectedArtifactsTree =
+		record.expectedArtifactsTree === undefined ? undefined : artifactTreeSnapshot(record.expectedArtifactsTree);
+	if (record.expectedArtifactsTree !== undefined && !expectedArtifactsTree) throw new Error("durability_failed");
+
+	if (
+		latest &&
+		((record.detachedArtifactsPath !== undefined &&
+			![...plannedPaths].some(planned => isAuthorizedArtifactRoot(target, planned, record.detachedArtifactsPath))) ||
+			(record.detachedTranscriptPath !== undefined && !plannedPaths.has(record.detachedTranscriptPath)))
+	)
+		throw new Error("durability_failed");
+	plannedPaths.add(record.plannedArtifactsPath as string);
+	plannedPaths.add(record.plannedTranscriptPath as string);
+	return {
+		taskArtifactOwnerTranscriptDeleted: record.taskArtifactOwnerTranscriptDeleted === true ? true : undefined,
+		attempt,
+		target,
+		expectedArtifactsIdentity,
+		expectedArtifactsTree,
+		artifactsPayloadDurable: record.artifactsPayloadDurable === true ? true : undefined,
+		artifactsRemovedAttempt: record.artifactsRemovedAttempt as number | undefined,
+		detachedArtifactsPath: record.detachedArtifactsPath as string | undefined,
+		detachedTranscriptPath: record.detachedTranscriptPath as string | undefined,
+		transcriptPayloadDurable: record.transcriptPayloadDurable === true ? true : undefined,
+		retainedArtifactsSuccessorPath: record.retainedArtifactsSuccessorPath as string | undefined,
+		retainedArtifactsPlaceholderPath: record.retainedArtifactsPlaceholderPath as string | undefined,
+		retainedArtifactsUnknownPath: record.retainedArtifactsUnknownPath as string | undefined,
+		retainedTranscriptSuccessorPath: record.retainedTranscriptSuccessorPath as string | undefined,
+		retainedTranscriptPlaceholderPath: record.retainedTranscriptPlaceholderPath as string | undefined,
+		retainedTranscriptUnknownPath: record.retainedTranscriptUnknownPath as string | undefined,
+		plannedArtifactsPath: record.plannedArtifactsPath as string,
+		plannedTranscriptPath: record.plannedTranscriptPath as string,
+	};
 }
 
 function artifactIdentityForCleanup(target: RetiredTarget): SessionStorageFileIdentity | undefined {
@@ -3888,32 +4240,84 @@ async function publishCleanupPending(
 }
 
 function cleanupCompleted(scope: ManagedScope, tombstone: string, target: RetiredTarget): boolean {
+	assertLegacyOwnerFreeTargets([target]);
 	try {
 		const value: unknown = JSON.parse(
 			captureManagedFileNoFollow(cleanupReceiptPath(tombstone, target, "completed", 1)).bytes.toString("utf8"),
 		);
-		if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-		const record = value as Record<string, unknown>;
-		const recorded = record.target as Record<string, unknown> | undefined;
-		const identity = recorded?.identity as Record<string, unknown> | undefined;
-		return (
-			record.schemaVersion === 1 &&
-			record.state === "cleanup_completed" &&
-			record.scope === scopeDigest(scope.platform, scope.canonicalCwd) &&
-			record.tombstone === tombstone &&
-			record.attempt === 1 &&
-			recorded?.path === target.path &&
-			recorded.sessionId === target.sessionId &&
-			recorded.cwd === target.cwd &&
-			identity?.dev === String(target.identity.dev) &&
-			identity.ino === String(target.identity.ino) &&
-			identity.size === target.identity.size &&
-			identity.mtimeNs === String(target.identity.mtimeNs) &&
-			identity.sha256 === target.identity.sha256
-		);
-	} catch {
+		assertLegacyOwnerFreeRecord(value);
+		return cleanupCompletedRecordMatches(scope, tombstone, target, undefined, value);
+	} catch (error) {
+		if (isOwnerBoundaryFailure(error)) throw error;
 		return false;
 	}
+}
+
+function cleanupCompletedRecordMatches(
+	scope: ManagedScope,
+	tombstone: string,
+	target: RetiredTarget,
+	ownerReceipt: ManagedGcSessionRetirementReceipt | undefined,
+	value: unknown,
+): boolean {
+	if (
+		target.taskArtifactOwnerDeletionEvidence &&
+		(ownerReceipt?.state !== "owner_retired" ||
+			!deepSame(ownerReceipt.taskArtifactOwnerDeletionEvidence, target.taskArtifactOwnerDeletionEvidence))
+	)
+		return false;
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	const recorded = record.target as Record<string, unknown> | undefined;
+	const identity = recorded?.identity as Record<string, unknown> | undefined;
+	const expectedKeys = ownerReceipt
+		? [
+				"schemaVersion",
+				"state",
+				"scope",
+				"tombstone",
+				"attempt",
+				"target",
+				"taskArtifactOwnerDeletionEvidence",
+				"taskArtifactOwnerRetirementOutcome",
+				"taskArtifactOwnerRetired",
+				"taskArtifactOwnerTranscriptDeleted",
+			]
+		: ["schemaVersion", "state", "scope", "tombstone", "attempt", "target"];
+	if (Object.keys(record).length !== expectedKeys.length || !expectedKeys.every(key => key in record)) return false;
+	if (ownerReceipt) {
+		const pending = pendingCleanupReceipt(scope, tombstone, target);
+		if (record.taskArtifactOwnerTranscriptDeleted !== true || !pending?.taskArtifactOwnerTranscriptDeleted)
+			return false;
+		const evidence = parseTaskArtifactOwnerDeletionEvidence(record.taskArtifactOwnerDeletionEvidence);
+		const outcome = parseTaskArtifactOwnerRetirementOutcome(
+			taskArtifactOwnerStorageContextForScope(scope),
+			evidence,
+			record.taskArtifactOwnerRetirementOutcome,
+		);
+		if (
+			record.taskArtifactOwnerRetired !== true ||
+			outcome.kind !== "completed" ||
+			!deepSame(evidence, ownerReceipt.taskArtifactOwnerDeletionEvidence) ||
+			!deepSame(outcome, ownerReceipt.taskArtifactOwnerRetirementOutcome)
+		)
+			return false;
+	}
+	return (
+		record.schemaVersion === 1 &&
+		record.state === "cleanup_completed" &&
+		record.scope === scopeDigest(scope.platform, scope.canonicalCwd) &&
+		record.tombstone === tombstone &&
+		record.attempt === 1 &&
+		recorded?.path === target.path &&
+		recorded.sessionId === target.sessionId &&
+		recorded.cwd === target.cwd &&
+		identity?.dev === String(target.identity.dev) &&
+		identity.ino === String(target.identity.ino) &&
+		identity.size === target.identity.size &&
+		identity.mtimeNs === String(target.identity.mtimeNs) &&
+		identity.sha256 === target.identity.sha256
+	);
 }
 
 async function publishCleanupCompleted(
@@ -3922,6 +4326,7 @@ async function publishCleanupCompleted(
 	target: RetiredTarget,
 	lock: ManagedStorageLock,
 ): Promise<void> {
+	assertLegacyOwnerFreeTargets([target]);
 	try {
 		await publishManagedTombstone(
 			cleanupReceiptPath(tombstone, target, "completed", 1),
@@ -3947,7 +4352,8 @@ function tombstonePathContaining(scope: ManagedScope, candidate: ManagedCandidat
 			const pathname = path.join(directory, name);
 			if (retiredTargets(scope, pathname)?.some(target => sameCandidate(target, candidate))) return pathname;
 		}
-	} catch {
+	} catch (error) {
+		if (isOwnerBoundaryFailure(error) || (error as Error).message === "durability_failed") throw error;
 		return undefined;
 	}
 	return undefined;
@@ -4694,7 +5100,15 @@ export async function reconcileManagedTombstones(
 		const tombstone = path.join(directory, name);
 		const targets = retiredTargets(scope, tombstone);
 		if (!targets) continue;
+		assertLegacyOwnerFreeTargets(targets);
 		if (targets.every(target => cleanupCompleted(scope, tombstone, target))) continue;
+		for (const target of targets)
+			if (!cleanupCompleted(scope, tombstone, target))
+				assertLegacyOwnerFreeTranscript({
+					transcriptPath: target.path,
+					sessionId: target.sessionId,
+					transcriptIdentity: target.identity,
+				});
 		let lock: ManagedStorageLock | undefined;
 		try {
 			lock = await acquireManagedLock(
@@ -4704,6 +5118,14 @@ export async function reconcileManagedTombstones(
 			);
 			const lockedTargets = retiredTargets(scope, tombstone);
 			if (!lockedTargets) continue;
+			assertLegacyOwnerFreeTargets(lockedTargets);
+			for (const target of lockedTargets)
+				if (!cleanupCompleted(scope, tombstone, target))
+					assertLegacyOwnerFreeTranscript({
+						transcriptPath: target.path,
+						sessionId: target.sessionId,
+						transcriptIdentity: target.identity,
+					});
 			for (const target of lockedTargets) {
 				lock.assertOwned();
 				if (cleanupCompleted(scope, tombstone, target)) continue;
@@ -5358,6 +5780,15 @@ async function deleteManagedSessionCandidateInternal(
 	scope: ManagedScope,
 	candidate: ManagedCandidate,
 ): Promise<ManagedDeleteCandidateResult> {
+	try {
+		assertLegacyOwnerFreeTranscript({
+			transcriptPath: candidate.path,
+			sessionId: candidate.sessionId,
+			transcriptIdentity: candidate.identity,
+		});
+	} catch (error) {
+		return { kind: "error", code: expectedFailure(error), message: (error as Error).message };
+	}
 	const prepared = await prepareManagedSessionScopeForWrite(scope);
 	if (prepared.kind === "error")
 		return {
@@ -5367,6 +5798,12 @@ async function deleteManagedSessionCandidateInternal(
 		};
 	const current = validateCandidateForScope(scope, candidate);
 	const paired = current ? receiptPair(scope, current) : undefined;
+	if (paired)
+		assertLegacyOwnerFreeTranscript({
+			transcriptPath: paired.path,
+			sessionId: paired.sessionId,
+			transcriptIdentity: paired.identity,
+		});
 	const logical = paired?.provenance === "legacy" ? paired : (current ?? candidate);
 	const existingTombstone = tombstonePathContaining(scope, candidate);
 	const tombstone =
@@ -5410,6 +5847,14 @@ async function deleteManagedSessionCandidateInternal(
 			targets = retiredTargets(scope, tombstone);
 			if (!targets) throw new Error("durability_failed");
 		}
+		assertLegacyOwnerFreeTargets(targets);
+		for (const target of targets)
+			if (!cleanupCompleted(scope, tombstone, target))
+				assertLegacyOwnerFreeTranscript({
+					transcriptPath: target.path,
+					sessionId: target.sessionId,
+					transcriptIdentity: target.identity,
+				});
 		let deletedAny = false;
 		for (const target of targets) {
 			lock.assertOwned();
