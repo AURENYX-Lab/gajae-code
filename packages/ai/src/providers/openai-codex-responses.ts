@@ -2367,7 +2367,14 @@ function isCodexIncompleteToolCallTimeoutRetryable(
 	runtime: CodexStreamRuntime,
 	error: unknown,
 ): boolean {
-	if (runtime.incompleteToolCallRetryAttempted || !isCodexTransientStreamClose(error)) return false;
+	if (
+		runtime.incompleteToolCallRetryAttempted ||
+		runtime.partialToolCallReplayAttempted ||
+		runtime.eventsReleased ||
+		!isCodexTransientStreamClose(error)
+	) {
+		return false;
+	}
 	const providerCode =
 		error instanceof CodexProviderStreamError
 			? error.code?.toLowerCase()
@@ -2679,7 +2686,9 @@ async function tryRetryCodexProviderError(
 		hasUnfinalizedToolCall &&
 		!runtime.partialToolCallReplayAttempted &&
 		isCodexPartialOutputReplayEligible(context.output, runtime);
-	const canRetryWithOutput = canReplayPartialToolCall || allowIncompleteToolCallOutput;
+	const canRetryWithOutput =
+		canReplayPartialToolCall ||
+		(allowIncompleteToolCallOutput && !runtime.partialToolCallReplayAttempted && !runtime.eventsReleased);
 	if (
 		(!isRetryableCodexProviderError(error) && !canRetryWithOutput) ||
 		(context.output.content.length > 0 && !canRetryWithOutput) ||
