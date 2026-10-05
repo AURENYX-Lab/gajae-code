@@ -4,10 +4,11 @@ import * as fsPromises from "node:fs/promises";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent, markNonDispatchedToolEvent, ThinkingLevel } from "@gajae-code/agent-core";
+import { Agent, type AgentOptions, markNonDispatchedToolEvent, ThinkingLevel } from "@gajae-code/agent-core";
 import { createAttemptMinter } from "@gajae-code/agent-core/attempt-scope";
-import type { UserMessage } from "@gajae-code/ai/core";
+import { type AssistantMessage, getBundledModel, type Model, type UserMessage } from "@gajae-code/ai/core";
 import { createMockModel } from "@gajae-code/ai/providers/mock";
+import { AssistantMessageEventStream } from "@gajae-code/ai/utils/event-stream";
 import { logger } from "@gajae-code/utils";
 import { createTestSession } from "../../../test/utilities";
 import { AsyncJobManager } from "../../async";
@@ -5102,6 +5103,85 @@ function neverSettlingPromise(): Promise<void> {
 	return Promise.withResolvers<void>().promise;
 }
 
+function typedContextOverflowStream(model: Model, onEmitted?: () => void): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	queueMicrotask(() => {
+		const message: AssistantMessage & {
+			transportFailure: { kind: "transport"; status: number; openaiErrorCode: string };
+		} = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "error",
+			errorMessage: "",
+			errorStatus: 400,
+			timestamp: Date.now(),
+			transportFailure: { kind: "transport", status: 400, openaiErrorCode: "context_length_exceeded" },
+		};
+		stream.push({ type: "start", partial: message });
+		stream.push({ type: "error", reason: "error", error: message });
+		onEmitted?.();
+	});
+	return stream;
+}
+
+function selector(model: Model): string {
+	return `${model.provider}/${model.id}`;
+}
+
+async function createTerminalizationSession(
+	cwd: string,
+	streamFn: AgentOptions["streamFn"],
+	settingsOverrides: Record<string, unknown> = {},
+): Promise<{ session: AgentSession; authStorage: AuthStorage; model: Model }> {
+	const authStorage = await AuthStorage.create(path.join(cwd, "testauth.db"));
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	const fallback = getBundledModel("openai", "gpt-4o-mini");
+	if (!model || !fallback) throw new Error("Expected bundled test models");
+	authStorage.setRuntimeApiKey(model.provider, "test-key");
+	authStorage.setRuntimeApiKey(fallback.provider, "test-key");
+	const settings = Settings.isolated({
+		"compaction.enabled": false,
+		"contextPromotion.enabled": false,
+		"fallback.maxAttempts": 3,
+		"retry.baseDelayMs": 1,
+		...settingsOverrides,
+	});
+	settings.setModelRole("default", selector(model));
+	const agent = new Agent({
+		getApiKey: provider => `${provider}-key`,
+		initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		streamFn,
+	});
+	const session = new AgentSession({
+		agent,
+		sessionManager: SessionManager.inMemory(cwd),
+		settings,
+		modelRegistry: new ModelRegistry(authStorage),
+	});
+	session.setConfiguredModelChain("default", [selector(model), selector(fallback)], "test");
+	return { session, authStorage, model };
+}
+
+function deferredRealSendUserMessage(session: AgentSession) {
+	return async (content: unknown, options?: PreflightHooks & { deliverAs?: string }): Promise<void> => {
+		await options?.onPreflightAcceptCommit?.();
+		const { onPreflightAcceptCommit: _onPreflightAcceptCommit, ...dispatchOptions } = options ?? {};
+		void session.sendUserMessage(content as string, dispatchOptions as never);
+		await neverSettlingPromise();
+	};
+}
+
 test("SDK turn.steer preserves its expected run token and propagates a stale-run rejection", async () => {
 	const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-turn-steer-run-token-"));
 	const staleToken = "ended-command:ended-turn";
@@ -5140,18 +5220,26 @@ test("SDK turn.steer preserves its expected run token and propagates a stale-run
 });
 
 describe("post-acceptance invocation terminalization", () => {
-	test.each([
-		"todo-reminder",
-		"overflow-retry",
-	])("preserves prompt correlation across a %s continuation", async continuation => {
-		const cwd = await mkdtemp(path.join(os.tmpdir(), `gjc-${continuation}-correlation-`));
+	test("preserves prompt correlation across a real overflow retry", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-overflow-retry-correlation-"));
 		let harness: InvocationHarness | undefined;
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		let providerCalls = 0;
 		try {
-			harness = await invocationHarness(`${continuation}-correlation`, cwd, {
-				sendUserMessage: async (_content, options) => {
-					await options?.onPreflightAcceptCommit?.();
-					await neverSettlingPromise();
-				},
+			const real = await createTerminalizationSession(cwd, async (model, context, options) => {
+				providerCalls++;
+				if (providerCalls === 1) return typedContextOverflowStream(model);
+				return createMockModel({ responses: [{ content: ["recovered"] }] }).stream(model, context, options);
+			});
+			session = real.session;
+			authStorage = real.authStorage;
+			harness = await invocationHarness("overflow-retry-correlation", cwd, {
+				isIdle: () => !session?.isStreaming,
+				sendUserMessage: deferredRealSendUserMessage(session),
+			});
+			session.subscribe(async event => {
+				await harness?.emit(event.type, event);
 			});
 			const accepted = await harness.control("turn.prompt", { text: "finish the outstanding work" });
 			expect(accepted.ok).toBe(true);
@@ -5159,20 +5247,6 @@ describe("post-acceptance invocation terminalization", () => {
 				commandId: accepted.result?.commandId,
 				turnId: accepted.result?.turnId,
 			};
-			const lifecycleScope = createAttemptMinter().mint("main");
-
-			await harness.emit("agent_start", { lifecycleScope });
-			if (continuation === "todo-reminder") {
-				await harness.emit("todo_reminder", {
-					todos: [{ content: "finish the outstanding work", status: "pending" }],
-					attempt: 1,
-					maxAttempts: 3,
-				});
-			}
-			await harness.emit("agent_start", { lifecycleScope });
-			await harness.emit("agent_end", {
-				messages: [{ role: "assistant", stopReason: "stop", content: "completed" }],
-			});
 
 			const terminal = await settledStatus(harness, "turn.result", { kind: "prompt", ...correlation });
 			expect(terminal).toMatchObject({
@@ -5188,7 +5262,186 @@ describe("post-acceptance invocation terminalization", () => {
 					turnId: correlation.turnId,
 				},
 			});
+			expect(providerCalls).toBe(2);
 		} finally {
+			await session?.dispose();
+			authStorage?.close();
+			await harness?.stop();
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("keeps todo reminders advisory for deferred agent turns", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-todo-reminder-advisory-"));
+		let harness: InvocationHarness | undefined;
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		let providerCalls = 0;
+		try {
+			const real = await createTerminalizationSession(cwd, async (model, context, options) => {
+				providerCalls++;
+				return createMockModel({ responses: [{ content: ["completed"] }] }).stream(model, context, options);
+			});
+			session = real.session;
+			authStorage = real.authStorage;
+			session.setClientBridge({ capabilities: {}, deferAgentInitiatedTurns: true });
+			session.setTodoPhases([
+				{ name: "Work", tasks: [{ content: "finish the outstanding work", status: "pending" }] },
+			]);
+			harness = await invocationHarness("todo-reminder-advisory", cwd, {
+				isIdle: () => !session?.isStreaming,
+				sendUserMessage: deferredRealSendUserMessage(session),
+			});
+			session.subscribe(async event => {
+				await harness?.emit(event.type, event);
+			});
+			const accepted = await harness.control("turn.prompt", { text: "finish the outstanding work" });
+			expect(accepted.ok).toBe(true);
+			const correlation = {
+				commandId: accepted.result?.commandId,
+				turnId: accepted.result?.turnId,
+			};
+			const terminal = await settledStatus(harness, "turn.result", { kind: "prompt", ...correlation });
+			expect(terminal).toMatchObject({
+				status: "terminal_ok",
+				commandId: correlation.commandId,
+				turnId: correlation.turnId,
+			});
+			expect(harness.broadcasts.filter(frame => frame.kind === "agent_start")).toHaveLength(1);
+			expect(harness.broadcasts.filter(frame => frame.kind === "agent_end")).toHaveLength(1);
+			expect(providerCalls).toBe(1);
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
+			await harness?.stop();
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("terminalizes a second overflow during overflow maintenance", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-overflow-maintenance-failure-"));
+		let harness: InvocationHarness | undefined;
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		try {
+			const real = await createTerminalizationSession(cwd, model => {
+				return typedContextOverflowStream(model);
+			});
+			session = real.session;
+			authStorage = real.authStorage;
+			harness = await invocationHarness("overflow-maintenance-failure", cwd, {
+				isIdle: () => !session?.isStreaming,
+				sendUserMessage: deferredRealSendUserMessage(session),
+			});
+			session.subscribe(async event => {
+				await harness?.emit(event.type, event);
+			});
+			const accepted = await harness.control("turn.prompt", { text: "retry the outstanding work" });
+			expect(accepted.ok).toBe(true);
+			const correlation = { commandId: accepted.result?.commandId, turnId: accepted.result?.turnId };
+			const terminal = await settledStatus(harness, "turn.result", { kind: "prompt", ...correlation });
+			expect(terminal).toMatchObject({
+				status: "failed",
+				commandId: correlation.commandId,
+				turnId: correlation.turnId,
+			});
+			expect(harness.broadcasts.filter(frame => frame.kind === "agent_end")).toHaveLength(1);
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
+			await harness?.stop();
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("terminalizes cancellation during a scheduled overflow retry", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-overflow-retry-cancel-"));
+		let harness: InvocationHarness | undefined;
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		let providerCalls = 0;
+		const overflowEmitted = Promise.withResolvers<void>();
+		try {
+			const real = await createTerminalizationSession(
+				cwd,
+				model => {
+					providerCalls++;
+					return typedContextOverflowStream(
+						model,
+						providerCalls === 1 ? () => overflowEmitted.resolve() : undefined,
+					);
+				},
+				{ "retry.baseDelayMs": 1_000 },
+			);
+			session = real.session;
+			authStorage = real.authStorage;
+			session.setClientBridge({ capabilities: {}, deferAgentInitiatedTurns: true });
+			harness = await invocationHarness("overflow-retry-cancel", cwd, {
+				isIdle: () => !session?.isStreaming,
+				sendUserMessage: deferredRealSendUserMessage(session),
+			});
+			session.subscribe(async event => {
+				await harness?.emit(event.type, event);
+			});
+			const accepted = await harness.control("turn.prompt", { text: "cancel the retry" });
+			expect(accepted.ok).toBe(true);
+			const correlation = { commandId: accepted.result?.commandId, turnId: accepted.result?.turnId };
+			await overflowEmitted.promise;
+			await harness.control("turn.cancel", correlation);
+			const terminal = await settledStatus(harness, "turn.result", { kind: "prompt", ...correlation });
+			expect(terminal.status).toBe("failed");
+			expect(terminal).toMatchObject(correlation);
+			expect(harness.broadcasts.filter(frame => frame.kind === "agent_end")).toHaveLength(1);
+			await session.waitForIdle();
+			expect(
+				harness.broadcasts.filter(
+					frame =>
+						frame.kind === "agent_end" &&
+						(frame.payload as { commandId?: string }).commandId === correlation.commandId,
+				),
+			).toHaveLength(1);
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
+			await harness?.stop();
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("terminalizes a synchronous throw from the overflow retry stream", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-overflow-retry-throw-"));
+		let harness: InvocationHarness | undefined;
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		let providerCalls = 0;
+		try {
+			const real = await createTerminalizationSession(cwd, async model => {
+				providerCalls++;
+				if (providerCalls === 2) throw new Error("retry stream failed synchronously");
+				return typedContextOverflowStream(model);
+			});
+			session = real.session;
+			authStorage = real.authStorage;
+			harness = await invocationHarness("overflow-retry-throw", cwd, {
+				isIdle: () => !session?.isStreaming,
+				sendUserMessage: deferredRealSendUserMessage(session),
+			});
+			session.subscribe(async event => {
+				await harness?.emit(event.type, event);
+			});
+			const accepted = await harness.control("turn.prompt", { text: "retry with a throwing provider" });
+			expect(accepted.ok).toBe(true);
+			const correlation = { commandId: accepted.result?.commandId, turnId: accepted.result?.turnId };
+			const terminal = await settledStatus(harness, "turn.result", { kind: "prompt", ...correlation });
+			expect(terminal).toMatchObject({
+				status: "failed",
+				commandId: correlation.commandId,
+				turnId: correlation.turnId,
+			});
+			expect(harness.broadcasts.filter(frame => frame.kind === "agent_end")).toHaveLength(1);
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
 			await harness?.stop();
 			await rm(cwd, { recursive: true, force: true });
 		}
