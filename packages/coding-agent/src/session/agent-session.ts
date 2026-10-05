@@ -24346,6 +24346,11 @@ export class AgentSession {
 		scope?: AttemptScope,
 		scopeWasClean = this.#isRetryScopeClean(scope),
 	): Promise<boolean | ManagedAttemptDecision> {
+		// Capture the SDK owner before the failed attempt retires its active scope.
+		// Retry/continuation terminals must remain attributed to the prompt that
+		// admitted the provider call, even when the retry starts after agent_end.
+		const retrySdkRunToken =
+			(scope ? this.#sdkRunTokensByAttemptScope.get(scope) : undefined) ?? this.#activeSdkRunToken;
 		const retryAbortEpoch = this.#abortAdmissionEpoch;
 		const retryCancelled = () =>
 			this.#isDisposed || this.#sessionAdmissionClosing || this.#abortAdmissionEpoch !== retryAbortEpoch;
@@ -24959,7 +24964,7 @@ export class AgentSession {
 					await this.agent.continue({
 						...this.#managedFallbackPromptOptions(),
 						onRunAccepted: (handle: AttemptRunHandle) => {
-							this.#acceptSdkAttemptRun(handle, this.#activeSdkRunToken);
+							this.#acceptSdkAttemptRun(handle, retrySdkRunToken);
 						},
 					});
 					return;
@@ -24987,6 +24992,7 @@ export class AgentSession {
 				allowDuringCancelAndSubmit: true,
 				suppressPredecessorAgentEnd: resourceRunId !== undefined,
 				resourceRunId,
+				sdkRunToken: retrySdkRunToken,
 				onError: () => this.#failRetryRecovery("Retry continuation failed to start"),
 				onSkip: () => this.#failRetryRecovery("Retry continuation was superseded"),
 			});
