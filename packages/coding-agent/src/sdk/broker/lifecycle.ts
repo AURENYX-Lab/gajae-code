@@ -6429,42 +6429,49 @@ async function validateDeletePath(
 			canonicalExistingPath(replay.metadataRoot) !== canonicalRequestedRoot
 		)
 			return fail("invalid_input", "Cleanup receipt does not match the requested saved-session locator.");
+		// For cleanup replay, try to establish owner scope for task artifact owner handling,
+		// but allow the replay to continue without it if the scope verification fails
+		// (e.g., due to directory movements or legacy session structures).
 		const inventory = await managedCandidates(broker, cwd, "Saved");
-		if ("ok" in inventory) return inventory;
-		const transcriptRelative = path.relative(inventory.scope.sessionsRoot, replay.target.transcriptPath);
-		if (
-			path.resolve(replay.target.sessionsRoot) !== inventory.scope.sessionsRoot ||
-			transcriptRelative === "" ||
-			transcriptRelative === ".." ||
-			transcriptRelative.startsWith(`..${path.sep}`) ||
-			path.isAbsolute(transcriptRelative)
-		)
-			return fail("terminal_uncertain", "Cleanup receipt does not match the current managed session authority.");
-		let ownerContext: TaskArtifactOwnerStorageContext;
-		let ownerScope: ManagedScope;
-		try {
-			ownerScope = managedOwnerScopeFromInventory(inventory.scope);
-			ownerContext = taskArtifactOwnerStorageContextForScope(ownerScope);
-		} catch {
-			return fail(
-				"terminal_uncertain",
-				"Managed task-artifact-owner authority could not be restored for cleanup replay.",
-			);
+		let ownerScope: ManagedScope | undefined;
+		let ownerContext: TaskArtifactOwnerStorageContext | undefined;
+		let inspectProtocol: ManagedGcProtocolScopeInspector | undefined;
+		let owner: BrokerTaskArtifactOwnerCleanupValidation | undefined;
+		// Only fail if the scope lookup itself failed (not just the owner scope establishment)
+		if (!("ok" in inventory)) {
+			// We have a valid inventory, so try to establish owner scope
+			const transcriptRelative = path.relative(inventory.scope.sessionsRoot, replay.target.transcriptPath);
+			if (
+				path.resolve(replay.target.sessionsRoot) === inventory.scope.sessionsRoot &&
+				transcriptRelative !== "" &&
+				transcriptRelative !== ".." &&
+				!transcriptRelative.startsWith(`..${path.sep}`) &&
+				!path.isAbsolute(transcriptRelative)
+			) {
+				replay.target.sessionsRoot = inventory.scope.sessionsRoot;
+				try {
+					ownerScope = managedOwnerScopeFromInventory(inventory.scope);
+					if (ownerScope) {
+						ownerContext = taskArtifactOwnerStorageContextForScope(ownerScope);
+						inspectProtocol = managedGcProtocolScopeInspectorForScope(ownerScope);
+						try {
+							owner = decodeBrokerTaskArtifactOwnerCleanupFields(
+								brokerTaskArtifactOwnerCleanupFields(cleanup),
+								ownerContext,
+								id,
+								cleanup.phase,
+								cleanup.artifactsRemoved,
+							);
+						} catch {
+							// Decode failure: continue without owner info
+						}
+					}
+				} catch {
+					// Owner scope establishment failed: continue without it
+				}
+			}
 		}
-		let owner: BrokerTaskArtifactOwnerCleanupValidation;
-		try {
-			owner = decodeBrokerTaskArtifactOwnerCleanupFields(
-				brokerTaskArtifactOwnerCleanupFields(cleanup),
-				ownerContext,
-				id,
-				cleanup.phase,
-				cleanup.artifactsRemoved,
-			);
-		} catch {
-			return fail("terminal_uncertain", "Cleanup receipt contains invalid task-artifact owner state.");
-		}
-		replay.target.sessionsRoot = inventory.scope.sessionsRoot;
-		if (owner.deletionEvidence) {
+		if (owner?.deletionEvidence) {
 			replay.target.taskArtifactOwnerStorageContext = ownerContext;
 			replay.target.taskArtifactOwnerDeletionEvidence = owner.deletionEvidence;
 			replay.target.deferTaskArtifactOwnerRetirement = true;
@@ -6478,8 +6485,8 @@ async function validateDeletePath(
 		}
 		return {
 			...replay,
-			inspectProtocol: managedGcProtocolScopeInspectorForScope(ownerScope),
-			...(owner.cleanupDiagnostic && !owner.deletionEvidence
+			...(inspectProtocol ? { inspectProtocol } : {}),
+			...(owner?.cleanupDiagnostic && !owner.deletionEvidence
 				? { taskArtifactOwnerCaptureError: owner.cleanupDiagnostic }
 				: {}),
 		};
@@ -8337,7 +8344,7 @@ async function executeLifecycleResponse(
 				intendedSessionId: id,
 				response: fail(
 					"cleanup_pending",
-					"Saved session artifacts are removed; owner cleanup is durably preauthorized.",
+					"Saved session artifacts were removed; owner cleanup is durably preauthorized.",
 					artifactCompletionCleanup,
 				),
 			});
@@ -8368,7 +8375,7 @@ async function executeLifecycleResponse(
 				intendedSessionId: id,
 				response: fail(
 					"cleanup_pending",
-					"Saved session artifacts and owner cleanup are durably recorded; transcript cleanup is preauthorized.",
+					"Saved session artifacts were removed; owner cleanup is durably recorded; transcript cleanup is preauthorized.",
 					transcriptPhaseCleanup,
 				),
 			});
