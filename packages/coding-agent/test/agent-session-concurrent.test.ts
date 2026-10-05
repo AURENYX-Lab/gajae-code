@@ -790,7 +790,6 @@ describe("AgentSession concurrent prompt guard", () => {
 		await hiddenTurn;
 		await firstPrompt;
 		await session.waitForIdle();
-
 		expect(callMessages).toHaveLength(2);
 		expect(
 			callMessages[1]?.some(message => {
@@ -804,6 +803,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			}),
 		).toBe(true);
 	});
+
 
 	it("excludes undrained hidden nextTurn context from the drainable queue count after the turn settles", async () => {
 		// The busy-recovery UI gate (#4741) must see only queues its restore/clear
