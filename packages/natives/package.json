@@ -31,7 +31,6 @@
 	"scripts": {
 		"build": "bun scripts/build-native.ts",
 		"check": "biome check . && bun run check:types",
-		"precheck:types": "bun --cwd=../coding-agent run generate-docs-index",
 		"check:types": "tsc -p tsconfig.json --noEmit",
 		"lint": "biome lint .",
 		"test": "bun test",
