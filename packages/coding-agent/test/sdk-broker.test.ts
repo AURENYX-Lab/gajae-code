@@ -53,7 +53,12 @@ import { observeProcessIncarnation } from "../src/sdk/broker/process-incarnation
 import { resolveSdkInternalSpawnCommand, resolveSdkInternalSpawnCommandForTest } from "../src/sdk/broker/runtime";
 import { readBrokerStartupFailureMarker, writeBrokerStartupFailureMarker } from "../src/sdk/broker/startup-failure";
 import { BROKER_RUNTIME_ABORT_CAPABILITY_FIELD } from "../src/sdk/host/control/runtime-gate";
-import { prepareManagedSessionScopeForWrite, resolveManagedScope } from "../src/session/internal/managed-session-scope";
+import {
+	prepareManagedSessionScopeForWrite,
+	prepareManagedSessionScopeForWriteSync,
+	resolveManagedScope,
+	resolveManagedScopeForWrite,
+} from "../src/session/internal/managed-session-scope";
 import { SessionManager } from "../src/session/session-manager";
 import {
 	FileSessionStorage,
@@ -103,6 +108,13 @@ async function managedSessionPath(agentDir: string, cwd: string, sessionId: stri
 	const prepared = await prepareManagedSessionScopeForWrite(resolved.scope);
 	if (prepared.kind !== "resolved") throw new Error(prepared.message);
 	return path.join(prepared.scope.directoryPath, `${sessionId}.jsonl`);
+}
+/** Provisions the managed scope that #6339's fail-closed session.delete requires for owner authority. */
+function provisionManagedDeleteScope(input: { cwd: string; agentDir: string; sessionsRoot: string }): void {
+	const resolved = resolveManagedScopeForWrite(input);
+	if (resolved.kind !== "resolved") throw new Error(`Expected managed delete scope: ${resolved.code}`);
+	const prepared = prepareManagedSessionScopeForWriteSync(resolved.scope);
+	if (prepared.kind !== "resolved") throw new Error(`Expected prepared delete scope: ${prepared.code}`);
 }
 async function settleRetainedTranscriptForTest(
 	broker: Broker,
@@ -3105,6 +3117,7 @@ describe("SDK broker identity and discovery", () => {
 					retainedUnknownPath: target.plannedTranscriptPath,
 				};
 			};
+			provisionManagedDeleteScope({ cwd, agentDir: dir, sessionsRoot: getSessionsDir(dir) });
 			try {
 				const input = { sessionId: "legacy-replay", sessionPath: legacyReplayPath, cwd };
 				expect(await broker.handleRequest("session.delete", input, "legacy-cleanup-key")).toMatchObject({
@@ -3386,7 +3399,8 @@ describe("SDK broker identity and discovery", () => {
 		await broker.start();
 		const transitionSpy = vi.spyOn(broker.ledger, "transition").mockImplementation(async (...args) => {
 			const result = await transition(...args);
-			if (!canonicalInjected && JSON.stringify(args[2]?.response).includes("artifacts were removed")) {
+			// #6339 reworded the durable artifact-completion response to "artifacts are removed".
+			if (!canonicalInjected && JSON.stringify(args[2]?.response).includes("artifacts are removed")) {
 				canonicalInjected = true;
 				await fs.mkdir(artifactsDir);
 				await fs.writeFile(path.join(artifactsDir, ".reappeared"), "reappeared");
@@ -3980,7 +3994,8 @@ describe("SDK broker identity and discovery", () => {
 			const transcriptParent = path.dirname(sessionPath);
 			const renamedTranscriptParent = `${transcriptParent}.renamed`;
 			await fs.rename(transcriptParent, renamedTranscriptParent);
-			await fs.mkdir(transcriptParent);
+			// The replacement must still pass managed-scope security (#6339) so replay reaches receipt validation.
+			await fs.mkdir(transcriptParent, { mode: 0o700 });
 			const replacedParentReplay = await broker.handleRequest(
 				"session.delete",
 				{ sessionId, sessionPath, cwd },
