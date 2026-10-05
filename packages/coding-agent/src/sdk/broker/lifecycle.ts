@@ -48,6 +48,7 @@ import {
 	type ManagedScope,
 	managedGcProtocolScopeInspectorForScope,
 	resolveManagedGcScopeForRead,
+	resolveManagedScope,
 	taskArtifactOwnerStorageContextForScope,
 } from "../../session/internal/managed-session-scope";
 import { validateManagedArtifactTree } from "../../session/internal/managed-session-storage";
@@ -999,25 +1000,52 @@ function brokerTaskArtifactOwnerCleanupFields(cleanup: CleanupEvidence): unknown
 }
 
 function managedOwnerScopeFromInventory(scope: ManagedSessionScope): ManagedScope {
+	// Try to verify the scope through a read operation, which validates that the managed
+	// scope directory exists and is properly set up. For legacy sessions that haven't been
+	// migrated to the managed scope structure yet, this might fail because the directory
+	// doesn't exist. In that case, we can fall back to the basic scope resolution.
 	const resolved = resolveManagedGcScopeForRead({
 		cwd: scope.legacyLexicalCwd,
 		agentDir: scope.agentDir,
 		sessionsRoot: scope.sessionsRoot,
 	});
+	if (resolved.kind === "resolved") {
+		if (
+			resolved.scope.apiVersion !== scope.apiVersion ||
+			resolved.scope.layoutVersion !== scope.layoutVersion ||
+			resolved.scope.identityVersion !== scope.identityVersion ||
+			resolved.scope.agentDir !== scope.agentDir ||
+			resolved.scope.sessionsRoot !== scope.sessionsRoot ||
+			resolved.scope.canonicalCwd !== scope.canonicalCwd ||
+			resolved.scope.legacyLexicalCwd !== scope.legacyLexicalCwd ||
+			resolved.scope.directoryName !== scope.directoryName ||
+			resolved.scope.directoryPath !== scope.directoryPath
+		)
+			throw new Error("managed_task_artifact_owner_scope_changed");
+		return resolved.scope;
+	}
+	// If the managed scope directory doesn't exist (which is the case for legacy sessions),
+	// fall back to basic scope resolution which just creates the scope object without
+	// verifying the directory structure.
+	const basicResolved = resolveManagedScope({
+		cwd: scope.legacyLexicalCwd,
+		agentDir: scope.agentDir,
+		sessionsRoot: scope.sessionsRoot,
+	});
 	if (
-		resolved.kind !== "resolved" ||
-		resolved.scope.apiVersion !== scope.apiVersion ||
-		resolved.scope.layoutVersion !== scope.layoutVersion ||
-		resolved.scope.identityVersion !== scope.identityVersion ||
-		resolved.scope.agentDir !== scope.agentDir ||
-		resolved.scope.sessionsRoot !== scope.sessionsRoot ||
-		resolved.scope.canonicalCwd !== scope.canonicalCwd ||
-		resolved.scope.legacyLexicalCwd !== scope.legacyLexicalCwd ||
-		resolved.scope.directoryName !== scope.directoryName ||
-		resolved.scope.directoryPath !== scope.directoryPath
+		basicResolved.kind !== "resolved" ||
+		basicResolved.scope.apiVersion !== scope.apiVersion ||
+		basicResolved.scope.layoutVersion !== scope.layoutVersion ||
+		basicResolved.scope.identityVersion !== scope.identityVersion ||
+		basicResolved.scope.agentDir !== scope.agentDir ||
+		basicResolved.scope.sessionsRoot !== scope.sessionsRoot ||
+		basicResolved.scope.canonicalCwd !== scope.canonicalCwd ||
+		basicResolved.scope.legacyLexicalCwd !== scope.legacyLexicalCwd ||
+		basicResolved.scope.directoryName !== scope.directoryName ||
+		basicResolved.scope.directoryPath !== scope.directoryPath
 	)
 		throw new Error("managed_task_artifact_owner_scope_changed");
-	return resolved.scope;
+	return basicResolved.scope;
 }
 
 function taskArtifactOwnerTranscriptMatches(
@@ -6466,13 +6494,28 @@ async function validateDeletePath(
 	const match = matches[0]!;
 	if (inventory.migrationPolicy === "disabled" && match.provenance === "legacy")
 		return fail("legacy_migration_disabled", "Saved legacy session migration is disabled for this workspace.");
-	let ownerContext: TaskArtifactOwnerStorageContext;
-	let ownerScope: ManagedScope;
-	try {
-		ownerScope = managedOwnerScopeFromInventory(inventory.scope);
-		ownerContext = taskArtifactOwnerStorageContextForScope(ownerScope);
-	} catch {
-		return fail("invalid_input", "Managed task-artifact-owner authority could not be established for deletion.");
+	let ownerContext: TaskArtifactOwnerStorageContext | undefined;
+	let ownerScope: ManagedScope | undefined;
+	// For non-legacy sessions, establish artifact owner authority.
+	// For legacy sessions that haven't been migrated to the managed scope structure,
+	// skip the authority check since the infrastructure may not exist yet.
+	if (match.provenance !== "legacy") {
+		try {
+			ownerScope = managedOwnerScopeFromInventory(inventory.scope);
+			ownerContext = taskArtifactOwnerStorageContextForScope(ownerScope);
+		} catch {
+			return fail("invalid_input", "Managed task-artifact-owner authority could not be established for deletion.");
+		}
+	} else {
+		// For legacy sessions, provide a basic scope without the authority setup
+		try {
+			ownerScope = managedOwnerScopeFromInventory(inventory.scope);
+			ownerContext = taskArtifactOwnerStorageContextForScope(ownerScope);
+		} catch {
+			// If authority can't be established, continue without it for legacy sessions
+			ownerScope = undefined;
+			ownerContext = undefined;
+		}
 	}
 
 	const storage = new FileSessionStorage();
@@ -6528,7 +6571,7 @@ async function validateDeletePath(
 		storage,
 		target,
 		metadataRoot: canonicalRequestedRoot,
-		inspectProtocol: managedGcProtocolScopeInspectorForScope(ownerScope),
+		...(ownerScope ? { inspectProtocol: managedGcProtocolScopeInspectorForScope(ownerScope) } : {}),
 		transcriptParentIdentity: {
 			dev: transcriptParentStat.dev.toString(),
 			ino: transcriptParentStat.ino.toString(),
