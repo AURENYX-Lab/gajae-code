@@ -7736,9 +7736,24 @@ describe("openai-codex streaming", () => {
 
 	it("flushes the buffered window on abort and finishes as aborted", async () => {
 		const ready = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
+		const partialRead = Promise.withResolvers<void>();
 		const encoder = new TextEncoder();
 		global.fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
 			const body = new ReadableStream<Uint8Array>({
+				pull(controller) {
+					if (controller.desiredSize === null) return;
+					controller.enqueue(
+						encoder.encode(
+							`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", id: "fc_abort", call_id: "call_abort", name: "abort_tool", arguments: "" } })}\n\n`,
+						),
+					);
+					controller.enqueue(
+						encoder.encode(
+							`data: ${JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_abort", delta: '{"partial":' })}\n\n`,
+						),
+					);
+					partialRead.resolve();
+				},
 				start(controller) {
 					ready.resolve(controller);
 					init?.signal?.addEventListener("abort", () => {
@@ -7770,11 +7785,13 @@ describe("openai-codex streaming", () => {
 				`data: ${JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_abort", delta: '{"partial":' })}\n\n`,
 			),
 		);
+		await partialRead.promise;
 		abort.abort();
 		await consuming;
 		const result = await stream.result();
 
 		expect(result.stopReason).toBe("aborted");
+		expect(global.fetch).toHaveBeenCalledTimes(1);
 		expect(events.map(event => event.type)).not.toContain("toolcall_start");
 		expect(events.map(event => event.type)).not.toContain("toolcall_delta");
 	});
@@ -8065,6 +8082,92 @@ describe("openai-codex streaming", () => {
 		]);
 		expect(events.filter(event => event.type === "toolcall_start")).toHaveLength(1);
 		expect(JSON.stringify(events)).not.toContain("old");
+	});
+
+	it.each([
+		"invalid_request_error",
+		"invalid_prompt",
+	])("does not replay a partial call for non-retryable %s socket-close errors", async code => {
+		const sse = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: { type: "function_call", id: "fc_veto", call_id: "call_veto", name: "veto_tool", arguments: "" },
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_veto", delta: '{"partial":' },
+			{ type: "error", code, message: "The socket connection was closed unexpectedly" },
+		]);
+		const fetchMock = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		);
+		global.fetch = fetchMock as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(`code=${code}`);
+	});
+
+	it("replays a partial call when socket-close wording has no non-retryable provider veto", async () => {
+		const partial = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_socket_retry",
+					call_id: "call_socket_retry",
+					name: "old_tool",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_socket_retry", delta: '{"old":' },
+			{ type: "error", code: "request_timeout", message: "The socket connection was closed unexpectedly" },
+		]);
+		const accepted = createCodexErrorSse([
+			{
+				type: "response.output_item.added",
+				item: {
+					type: "function_call",
+					id: "fc_socket_retry_new",
+					call_id: "call_socket_retry_new",
+					name: "new_tool",
+					arguments: "",
+				},
+			},
+			{ type: "response.function_call_arguments.delta", item_id: "fc_socket_retry_new", delta: '{"new":true}' },
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "function_call",
+					id: "fc_socket_retry_new",
+					call_id: "call_socket_retry_new",
+					name: "new_tool",
+					arguments: '{"new":true}',
+				},
+			},
+			{ type: "response.completed", response: { status: "completed", usage: DEFAULT_USAGE } },
+		]);
+		let requestCount = 0;
+		global.fetch = vi.fn(async () => {
+			requestCount += 1;
+			return new Response(requestCount === 1 ? partial : accepted, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		}) as unknown as typeof fetch;
+
+		const result = await streamOpenAICodexResponses(
+			{ ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false },
+			createCodexTestContext(),
+			{ apiKey: createCodexTestToken() },
+		).result();
+
+		expect(requestCount).toBe(2);
+		expect(result.stopReason).toBe("toolUse");
 	});
 
 	it("delivers tool-choice incapability when streaming fallback retries", async () => {
