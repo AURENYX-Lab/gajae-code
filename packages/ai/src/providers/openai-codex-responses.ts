@@ -1338,11 +1338,19 @@ function discardCodexEvents(runtime: CodexStreamRuntime, resumeBuffering = false
 	runtime.eventsReleased = !resumeBuffering;
 }
 
+function isCodexControlPlaneEvent(event: AssistantMessageEvent): boolean {
+	return event.type === "toolChoiceIncapability";
+}
+
 function emitCodexEvent(
 	context: CodexStreamProcessingContext,
 	runtime: CodexStreamRuntime,
 	event: AssistantMessageEvent,
 ): void {
+	if (isCodexControlPlaneEvent(event)) {
+		context.stream.push(event);
+		return;
+	}
 	// Public consumers cannot retract starts or deltas. Hold replayable attempts
 	// until they commit, and discard their events when replay resets the output.
 	if (
@@ -2604,7 +2612,9 @@ async function tryReplayWebsocketFailureOverSse(
 		runtime.nativeOutputItemOutputIndexes.length = 0;
 		runtime.finalizedToolCallIds.clear();
 		runtime.toolArgumentCorrelationFailed = false;
-		discardCodexEvents(runtime);
+		// The visible websocket output was already released, but the new SSE
+		// attempt is still replayable until it commits or becomes unreplayable.
+		discardCodexEvents(runtime, true);
 		resetOutputState(context.output);
 		context.firstTokenTime = undefined;
 	}
