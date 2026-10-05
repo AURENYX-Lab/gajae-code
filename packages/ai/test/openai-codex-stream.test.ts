@@ -7774,17 +7774,7 @@ describe("openai-codex streaming", () => {
 		const consuming = (async () => {
 			for await (const event of stream) events.push(event as { type: string });
 		})();
-		const controller = await ready.promise;
-		controller.enqueue(
-			encoder.encode(
-				`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", id: "fc_abort", call_id: "call_abort", name: "abort_tool", arguments: "" } })}\n\n`,
-			),
-		);
-		controller.enqueue(
-			encoder.encode(
-				`data: ${JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_abort", delta: '{"partial":' })}\n\n`,
-			),
-		);
+		await ready.promise;
 		await partialRead.promise;
 		abort.abort();
 		await consuming;

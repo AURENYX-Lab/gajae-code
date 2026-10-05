@@ -1567,12 +1567,10 @@ function trySalvageCodexFinalizedToolCalls(
 
 function isCodexTransientStreamClose(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
+	if (hasCodexNonRetryableProviderVeto(error)) return false;
 	const providerMessage = (error as CodexProviderStreamError).providerMessage;
 	const message = (providerMessage || error.message).toLowerCase();
-	const providerCode =
-		(error as CodexProviderStreamError & { providerCode?: string }).code?.toLowerCase() ??
-		(error as { providerCode?: string }).providerCode?.toLowerCase();
-	if (providerCode && CODEX_NON_RETRYABLE_EVENT_CODES.has(providerCode)) return false;
+	const providerCode = (error as CodexProviderStreamError & { providerCode?: string }).code?.toLowerCase();
 	const hasRequestTimeout = providerCode === "request_timeout" || message.includes("request_timeout");
 	const hasClosedStreamMessage =
 		message.includes("stream disconnected before completion") ||
@@ -1583,6 +1581,7 @@ function isCodexTransientStreamClose(error: unknown): boolean {
 
 function isCodexSocketReset(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
+	if (hasCodexNonRetryableProviderVeto(error)) return false;
 	const providerMessage = (error as CodexProviderStreamError).providerMessage;
 	const message = (providerMessage || error.message).toLowerCase();
 	const transportCode = (error as { code?: unknown }).code;
@@ -1590,6 +1589,14 @@ function isCodexSocketReset(error: unknown): boolean {
 		isUnexpectedSocketCloseMessage(message) ||
 		(typeof transportCode === "string" && transportCode.toLowerCase() === "econnreset")
 	);
+}
+
+function hasCodexNonRetryableProviderVeto(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	const codexError = error as CodexProviderStreamError & { providerCode?: string };
+	const providerCode = codexError.code?.toLowerCase() ?? codexError.providerCode?.toLowerCase() ?? "";
+	const providerMessage = codexError.providerMessage || error.message;
+	return isCodexDeterministicVeto(providerCode, providerMessage);
 }
 
 function isCodexIdleStall(error: unknown): boolean {
@@ -2632,6 +2639,7 @@ async function tryRetryCodexProviderError(
 		block => block.type === "toolCall" && !runtime.finalizedToolCallIds.has(block.id),
 	);
 	const canReplayPartialToolCall =
+		!hasCodexNonRetryableProviderVeto(error) &&
 		((isCodexTransientStreamClose(error) && !isCodexIdleStall(error)) || isCodexSocketReset(error)) &&
 		hasUnfinalizedToolCall &&
 		!runtime.partialToolCallReplayAttempted &&
