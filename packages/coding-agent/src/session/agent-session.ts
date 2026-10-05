@@ -24963,7 +24963,6 @@ export class AgentSession {
 					}
 					await this.agent.continue({
 						...this.#managedFallbackPromptOptions(),
-						sdkRunToken: retrySdkRunToken,
 						onRunAccepted: (handle: AttemptRunHandle) => {
 							this.#acceptSdkAttemptRun(handle, retrySdkRunToken);
 						},
