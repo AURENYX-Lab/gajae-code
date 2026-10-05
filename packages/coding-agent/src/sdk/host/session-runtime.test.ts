@@ -5234,6 +5234,7 @@ describe("post-acceptance invocation terminalization", () => {
 			});
 			session = real.session;
 			authStorage = real.authStorage;
+
 			harness = await invocationHarness("overflow-retry-correlation", cwd, {
 				isIdle: () => !session?.isStreaming,
 				sendUserMessage: deferredRealSendUserMessage(session),
@@ -5271,24 +5272,28 @@ describe("post-acceptance invocation terminalization", () => {
 		}
 	});
 
-	test("keeps todo reminders advisory for deferred agent turns", async () => {
-		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-todo-reminder-advisory-"));
+	test("preserves prompt correlation across a todo-reminder continuation", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-todo-reminder-continuation-"));
 		let harness: InvocationHarness | undefined;
 		let session: AgentSession | undefined;
 		let authStorage: AuthStorage | undefined;
 		let providerCalls = 0;
 		try {
-			const real = await createTerminalizationSession(cwd, async (model, context, options) => {
-				providerCalls++;
-				return createMockModel({ responses: [{ content: ["completed"] }] }).stream(model, context, options);
-			});
+			const real = await createTerminalizationSession(
+				cwd,
+				async (model, context, options) => {
+					providerCalls++;
+					return createMockModel({ responses: [{ content: ["completed"] }] }).stream(model, context, options);
+				},
+				{ "todo.enabled": true, "todo.reminders": true, "todo.reminders.max": 1 },
+			);
 			session = real.session;
 			authStorage = real.authStorage;
-			session.setClientBridge({ capabilities: {}, deferAgentInitiatedTurns: true });
+
 			session.setTodoPhases([
 				{ name: "Work", tasks: [{ content: "finish the outstanding work", status: "pending" }] },
 			]);
-			harness = await invocationHarness("todo-reminder-advisory", cwd, {
+			harness = await invocationHarness("todo-reminder-continuation", cwd, {
 				isIdle: () => !session?.isStreaming,
 				sendUserMessage: deferredRealSendUserMessage(session),
 			});
@@ -5301,15 +5306,140 @@ describe("post-acceptance invocation terminalization", () => {
 				commandId: accepted.result?.commandId,
 				turnId: accepted.result?.turnId,
 			};
+			expect(correlation.commandId).toBeDefined();
+			expect(correlation.turnId).toBeDefined();
 			const terminal = await settledStatus(harness, "turn.result", { kind: "prompt", ...correlation });
 			expect(terminal).toMatchObject({
 				status: "terminal_ok",
 				commandId: correlation.commandId,
 				turnId: correlation.turnId,
 			});
-			expect(harness.broadcasts.filter(frame => frame.kind === "agent_start")).toHaveLength(1);
-			expect(harness.broadcasts.filter(frame => frame.kind === "agent_end")).toHaveLength(1);
-			expect(providerCalls).toBe(1);
+			expect(harness.broadcasts.filter(frame => frame.kind === "agent_start")).toHaveLength(2);
+			const ends = harness.broadcasts.filter(frame => frame.kind === "agent_end");
+			expect(ends).toHaveLength(1);
+			expect(ends[0]).toMatchObject({
+				payload: {
+					commandId: correlation.commandId,
+					turnId: correlation.turnId,
+				},
+			});
+			expect(providerCalls).toBe(2);
+		} finally {
+			await session?.dispose();
+			authStorage?.close();
+			await harness?.stop();
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("terminalizes cancellation during a todo-reminder continuation", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-todo-reminder-cancel-"));
+		let harness: InvocationHarness | undefined;
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		let providerCalls = 0;
+		let secondSignal: AbortSignal | undefined;
+		const secondEntered = Promise.withResolvers<void>();
+		const releaseSecond = Promise.withResolvers<void>();
+		try {
+			const real = await createTerminalizationSession(
+				cwd,
+				async (model, context, options) => {
+					providerCalls++;
+					if (providerCalls === 2) {
+						secondSignal = options?.signal;
+						secondEntered.resolve();
+					}
+					const response =
+						providerCalls === 2
+							? async () => {
+									await releaseSecond.promise;
+									return { content: ["completed"] };
+								}
+							: { content: ["started"] };
+					return createMockModel({ responses: [response] }).stream(model, context, options);
+				},
+				{ "todo.enabled": true, "todo.reminders": true, "todo.reminders.max": 1 },
+			);
+			session = real.session;
+			authStorage = real.authStorage;
+			session.setTodoPhases([
+				{ name: "Work", tasks: [{ content: "finish the outstanding work", status: "pending" }] },
+			]);
+			harness = await invocationHarness("todo-reminder-cancel", cwd, {
+				isIdle: () => !session?.isStreaming,
+				sendUserMessage: deferredRealSendUserMessage(session),
+			});
+			session.subscribe(async event => {
+				await harness?.emit(event.type, event);
+			});
+			const accepted = await harness.control("turn.prompt", { text: "finish the outstanding work" });
+			expect(accepted.ok).toBe(true);
+			const correlation = { commandId: accepted.result?.commandId, turnId: accepted.result?.turnId };
+			expect(correlation.commandId).toBeDefined();
+			expect(correlation.turnId).toBeDefined();
+			await secondEntered.promise;
+			expect(secondSignal?.aborted).toBe(false);
+			expect(harness.broadcasts.filter(frame => frame.kind === "agent_end")).toHaveLength(0);
+			await session.abort();
+			expect(secondSignal?.aborted).toBe(true);
+			releaseSecond.resolve();
+			await session.waitForIdle();
+			const terminal = await settledStatus(harness, "turn.result", { kind: "prompt", ...correlation });
+			expect(terminal).toMatchObject(correlation);
+			const ends = harness.broadcasts.filter(frame => frame.kind === "agent_end");
+			expect(ends).toHaveLength(1);
+			expect(ends[0]).toMatchObject({ payload: correlation });
+			expect(providerCalls).toBe(2);
+		} finally {
+			releaseSecond.resolve();
+			await session?.dispose();
+			authStorage?.close();
+			await harness?.stop();
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	test("terminalizes a synchronous throw during a todo-reminder continuation", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "gjc-todo-reminder-throw-"));
+		let harness: InvocationHarness | undefined;
+		let session: AgentSession | undefined;
+		let authStorage: AuthStorage | undefined;
+		let providerCalls = 0;
+		try {
+			const real = await createTerminalizationSession(
+				cwd,
+				async (model, context, options) => {
+					providerCalls++;
+					if (providerCalls === 2) throw new Error("todo continuation stream failed synchronously");
+					return createMockModel({ responses: [{ content: ["started"] }] }).stream(model, context, options);
+				},
+				{ "todo.enabled": true, "todo.reminders": true, "todo.reminders.max": 1 },
+			);
+			session = real.session;
+			authStorage = real.authStorage;
+			session.setTodoPhases([
+				{ name: "Work", tasks: [{ content: "finish the outstanding work", status: "pending" }] },
+			]);
+			harness = await invocationHarness("todo-reminder-throw", cwd, {
+				isIdle: () => !session?.isStreaming,
+				sendUserMessage: deferredRealSendUserMessage(session),
+			});
+			session.subscribe(async event => {
+				await harness?.emit(event.type, event);
+			});
+			const accepted = await harness.control("turn.prompt", { text: "finish the outstanding work" });
+			expect(accepted.ok).toBe(true);
+			const correlation = { commandId: accepted.result?.commandId, turnId: accepted.result?.turnId };
+			expect(correlation.commandId).toBeDefined();
+			expect(correlation.turnId).toBeDefined();
+			const terminal = await settledStatus(harness, "turn.result", { kind: "prompt", ...correlation });
+			expect(terminal).toMatchObject(correlation);
+			expect(harness.broadcasts.filter(frame => frame.kind === "agent_start")).toHaveLength(2);
+			const ends = harness.broadcasts.filter(frame => frame.kind === "agent_end");
+			expect(ends).toHaveLength(1);
+			expect(ends[0]).toMatchObject({ payload: correlation });
+			expect(providerCalls).toBe(2);
 		} finally {
 			await session?.dispose();
 			authStorage?.close();
