@@ -53,23 +53,13 @@ import { observeProcessIncarnation } from "../src/sdk/broker/process-incarnation
 import { resolveSdkInternalSpawnCommand, resolveSdkInternalSpawnCommandForTest } from "../src/sdk/broker/runtime";
 import { readBrokerStartupFailureMarker, writeBrokerStartupFailureMarker } from "../src/sdk/broker/startup-failure";
 import { BROKER_RUNTIME_ABORT_CAPABILITY_FIELD } from "../src/sdk/host/control/runtime-gate";
-import {
-	type ManagedScope,
-	prepareManagedSessionScopeForWrite,
-	prepareManagedSessionScopeForWriteSync,
-	resolveManagedScope,
-	resolveManagedScopeForWrite,
-	taskArtifactOwnerStorageContextForScope,
-} from "../src/session/internal/managed-session-scope";
-import { ManagedSessionDescendantStore } from "../src/session/internal/managed-session-storage";
+import { prepareManagedSessionScopeForWrite, resolveManagedScope } from "../src/session/internal/managed-session-scope";
 import { SessionManager } from "../src/session/session-manager";
 import {
 	FileSessionStorage,
 	SessionDeleteVerificationError,
 	type VerifiedSessionDeleteTarget,
 } from "../src/session/session-storage";
-import { ensureManagedTaskArtifactOwner } from "../src/session/task-artifact-owner";
-import { type TaskArtifactOwnerStorageContext } from "../src/session/task-artifact-owner-codec";
 
 const temp = () => fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "gjc-broker-"));
 const nextFloat = (value: number): number => {
@@ -113,71 +103,6 @@ async function managedSessionPath(agentDir: string, cwd: string, sessionId: stri
 	const prepared = await prepareManagedSessionScopeForWrite(resolved.scope);
 	if (prepared.kind !== "resolved") throw new Error(prepared.message);
 	return path.join(prepared.scope.directoryPath, `${sessionId}.jsonl`);
-}
-
-async function getManagedScopeForTest(agentDir: string, cwd: string): Promise<{
-	scope: ManagedScope;
-	context: TaskArtifactOwnerStorageContext;
-}> {
-	await fs.mkdir(cwd, { recursive: true });
-	const sessionsRoot = getSessionsDir(agentDir);
-	const resolved = resolveManagedScopeForWrite({ cwd, agentDir, sessionsRoot });
-	if (resolved.kind !== "resolved") throw new Error(resolved.message);
-	const prepared = prepareManagedSessionScopeForWriteSync(resolved.scope);
-	if (prepared.kind !== "resolved") throw new Error(prepared.message);
-	const scope = prepared.scope;
-	const context = taskArtifactOwnerStorageContextForScope(scope);
-	return { scope, context };
-}
-
-function publishManagedTranscriptBytes(
-	scope: ManagedScope,
-	context: TaskArtifactOwnerStorageContext,
-	filename: string,
-	bytes: Uint8Array,
-): string {
-	const store = new ManagedSessionDescendantStore(context.rootAuthority, scope.directoryPath);
-	try {
-		store.publishNoReplaceSync(filename, bytes);
-	} finally {
-		store.close();
-	}
-	return path.join(scope.directoryPath, filename);
-}
-
-async function createOwnedSessionForTest(
-	scope: ManagedScope,
-	context: TaskArtifactOwnerStorageContext,
-	cwd: string,
-	sessionId: string,
-): Promise<string> {
-	const owner = await ensureManagedTaskArtifactOwner(context, sessionId, undefined);
-	try {
-		await owner.manager.save("", "test-fixture");
-	} finally {
-		owner.manager.getManagedStore()?.close();
-	}
-	return publishManagedTranscript(scope, context, sessionId, cwd, owner.locator);
-}
-
-function publishManagedTranscript(
-	scope: ManagedScope,
-	context: TaskArtifactOwnerStorageContext,
-	sessionId: string,
-	cwd: string,
-	locator: any,
-): string {
-	const timestamp = new Date().toISOString();
-	const filename = `${timestamp.replace(/[:.]/g, "-")}_${sessionId}.jsonl`;
-	const header = {
-		type: "session" as const,
-		version: 3,
-		id: sessionId,
-		timestamp,
-		cwd,
-		taskArtifactOwner: locator,
-	};
-	return publishManagedTranscriptBytes(scope, context, filename, Buffer.from(`${JSON.stringify(header)}\n`, "utf8"));
 }
 async function settleRetainedTranscriptForTest(
 	broker: Broker,
@@ -3160,35 +3085,37 @@ describe("SDK broker identity and discovery", () => {
 			});
 			expect(await fs.readFile(external, "utf8")).toContain('"requested"');
 			expect((await fs.stat(externalArtifacts)).isDirectory()).toBe(true);
-			// Test managed scope session with cleanup_pending
-			const managedCwd = path.join(dir, "managed-cwd");
-			const { scope, context } = await getManagedScopeForTest(dir, managedCwd);
-			const managedSessionId = "managed-replay";
-			const managedSessionPath = await createOwnedSessionForTest(scope, context, managedCwd, managedSessionId);
+			const legacyDirectory = path.join(getSessionsDir(dir), `--${cwd.replace(/^\//, "").replace(/[/:]/g, "-")}--`);
+			const legacyReplayPath = path.join(legacyDirectory, "legacy-replay.jsonl");
+			await fs.mkdir(legacyDirectory, { recursive: true });
+			await fs.writeFile(
+				legacyReplayPath,
+				`${JSON.stringify({ type: "session", id: "legacy-replay", timestamp: new Date().toISOString(), cwd })}\n`,
+			);
 			const originalDelete = FileSessionStorage.prototype.deleteSessionVerified;
-			let managedReplayCalls = 0;
+			let legacyReplayCalls = 0;
 			FileSessionStorage.prototype.deleteSessionVerified = async target => {
-				managedReplayCalls += 1;
+				legacyReplayCalls += 1;
 				return {
 					kind: "cleanup_pending" as const,
 					phase: "transcript" as const,
-					error: new Error("managed replay remains pending"),
+					error: new Error("legacy replay remains pending"),
 					transcriptIdentity: target.transcriptIdentity,
 					detachedTranscriptPath: target.plannedTranscriptPath,
 					retainedUnknownPath: target.plannedTranscriptPath,
 				};
 			};
 			try {
-				const input = { sessionId: managedSessionId, sessionPath: managedSessionPath, cwd: managedCwd };
-				expect(await broker.handleRequest("session.delete", input, "managed-cleanup-key")).toMatchObject({
+				const input = { sessionId: "legacy-replay", sessionPath: legacyReplayPath, cwd };
+				expect(await broker.handleRequest("session.delete", input, "legacy-cleanup-key")).toMatchObject({
 					ok: false,
 					error: { code: "cleanup_pending", cleanup: { sessionsRoot: getSessionsDir(dir) } },
 				});
-				expect(await broker.handleRequest("session.delete", input, "managed-cleanup-key-b")).toMatchObject({
+				expect(await broker.handleRequest("session.delete", input, "legacy-cleanup-key-b")).toMatchObject({
 					ok: false,
 					error: { code: "cleanup_pending" },
 				});
-				expect(managedReplayCalls).toBe(1);
+				expect(legacyReplayCalls).toBe(1);
 			} finally {
 				FileSessionStorage.prototype.deleteSessionVerified = originalDelete;
 			}
@@ -3197,37 +3124,7 @@ describe("SDK broker identity and discovery", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
-	 it("rejects legacy session.delete with no managed scope as invalid_input", async () => {
-		const dir = await temp();
-		const cwd = path.join(dir, "workspace");
-		const sessionId = "legacy-no-scope";
-		const legacyDirectory = path.join(getSessionsDir(dir), `--${cwd.replace(/^\//, "").replace(/[/:]/g, "-")}--`);
-		const legacySessionPath = path.join(legacyDirectory, "legacy-session.jsonl");
-		await fs.mkdir(legacyDirectory, { recursive: true });
-		await fs.writeFile(
-			legacySessionPath,
-			`${JSON.stringify({ type: "session", id: sessionId, timestamp: new Date().toISOString(), cwd })}\n`,
-		);
-		const broker = new Broker({ agentDir: dir });
-		await broker.start();
-		try {
-			const response = await broker.handleRequest(
-				"session.delete",
-				{ sessionId, sessionPath: legacySessionPath, cwd },
-				"legacy-delete-key",
-			);
-			expect(response).toMatchObject({
-				ok: false,
-				error: {
-					code: "invalid_input",
-				},
-			});
-		} finally {
-			await broker.stop();
-			await fs.rm(dir, { recursive: true, force: true });
-		}
-	});
-	 it("rejects traversal and conflicting session-id aliases before lifecycle state access", async () => {
+	it("rejects traversal and conflicting session-id aliases before lifecycle state access", async () => {
 		const dir = await temp();
 		const broker = new Broker({ agentDir: dir });
 		try {
@@ -3474,8 +3371,7 @@ describe("SDK broker identity and discovery", () => {
 		const cwd = path.join(dir, "workspace");
 		const stateRoot = path.join(cwd, ".gjc", "state");
 		const sessionId = "canonical-after-artifacts-removed";
-		const { scope, context } = await getManagedScopeForTest(dir, cwd);
-		const sessionPath = await createOwnedSessionForTest(scope, context, cwd, sessionId);
+		const sessionPath = await managedSessionPath(dir, cwd, sessionId);
 		const artifactsDir = sessionPath.slice(0, -6);
 		const broker = new Broker({ agentDir: dir });
 		const originalDelete = FileSessionStorage.prototype.deleteSessionVerified;
@@ -3484,6 +3380,8 @@ describe("SDK broker identity and discovery", () => {
 		let canonicalInjected = false;
 		let plannedArtifactAlias: string | undefined;
 		let postOperationArtifactAlias: string | undefined;
+		await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+		await fs.writeFile(sessionPath, `${JSON.stringify({ type: "session", id: sessionId, cwd })}\n`);
 		await fs.mkdir(artifactsDir);
 		await broker.start();
 		const transitionSpy = vi.spyOn(broker.ledger, "transition").mockImplementation(async (...args) => {
@@ -3998,8 +3896,7 @@ describe("SDK broker identity and discovery", () => {
 		const dir = await temp();
 		const cwd = path.join(dir, "workspace");
 		const sessionId = "retained-transcript-side";
-		const { scope, context } = await getManagedScopeForTest(dir, cwd);
-		const sessionPath = await createOwnedSessionForTest(scope, context, cwd, sessionId);
+		const sessionPath = await managedSessionPath(dir, cwd, sessionId);
 		const retainedSidePath = path.join(path.dirname(sessionPath), ".gjc-transcript-retained-unknown");
 		const retainedHardlinkPath = path.join(
 			path.dirname(sessionPath),
@@ -4012,6 +3909,8 @@ describe("SDK broker identity and discovery", () => {
 		const broker = new Broker({ agentDir: dir });
 		const originalDelete = FileSessionStorage.prototype.deleteSessionVerified;
 		let calls = 0;
+		await fs.mkdir(path.dirname(sessionPath), { recursive: true });
+		await fs.writeFile(sessionPath, `${JSON.stringify({ type: "session", id: sessionId, cwd })}\n`);
 		await fs.mkdir(path.dirname(retainedHardlinkPath), { recursive: true });
 		if (process.platform !== "win32") await fs.symlink(path.dirname(sessionPath), transcriptParentAlias, "dir");
 		await broker.start();
